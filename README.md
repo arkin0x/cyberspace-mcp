@@ -89,18 +89,18 @@ Text that comes from cyberspace (chat lines, hidden messages, riddles, object na
 |---|---|---|---|
 | `identity` | optional `name`, `about`, `operator` | Creates or loads the key in the state directory; publishes or updates the kind 0 profile with `bot: true` and the operator `p` tag. | npub, hex pubkey, spawn coordinate and plane, whether a chain exists and its status (`none`, `valid`, `frozen`, `dead`), the head's age |
 | `whereami` | none | Resolves the live head from the relays. | coordinate (hex and per axis), plane, sector, chain status, head event id, seconds since the head |
-| `look` | optional `radius_sectors`, optional `heights` | The text report of the surroundings: position; the cube keys the server holds around it; the entries of every bag it has opened nearby, with distances and authors; who is present in the 27 sectors around it, with bot flags where known, and how far; what it cannot see and why. | the report as text and as JSON |
-| `plan_hop` | `target` | Prices a hop or sidestep from the live head toward the target: the heights involved, the terrain K, the expected seconds on this machine (from a calibration kept in the state directory), whether it exceeds the caps. Never moves. | the plan and the price |
-| `hop` | `target`, `cap_seconds` | Confirms the head, reserves it, computes the proof, signs, publishes to the canonical relay and the agent's relays, records the result. Refuses if the plan exceeds the cap or the head moved. On a fresh key with no chain, signs the spawn first. A target past a wall above the hop ceiling is reached by one step at a time: the tool executes the next step of the route and says how far the target still is. | the new head's id and coordinate, the work spent, the relays that accepted |
-| `say` | `text` (500 characters at most), optional `reply_to` | Seals a kind 23330 chat line to the h12 cube at the live head, exactly as ONOSENDAI does, and publishes it. Enforces the rate rule (one line per five seconds) and the quiet rule (one unprompted line per arrival; replies to a line that addressed the agent are always allowed). | sent, or refused with the rule it broke |
-| `listen` | `since` (a unix timestamp or `"last"`) | Chat lines heard in the agent's cube and its 26 neighbors since then, decrypted with the keys the server holds. | lines with speaker, bot flag, time, text |
-| `wait_for` | `arrival`, `chat`, `timeout_seconds` | Blocks until someone arrives (a given pubkey, or anyone within N sectors), a chat line is heard (optionally one addressed to the agent), or the timeout passes. | what happened, or `timed out` |
-| `find` | none, or `hint` (`coordinate` and `heights`) | Scans the cubes around the live head from height 1 up to a cap, derives region keys, fetches bags by lookup id, decrypts, and lists the entries. With a hint, sweeps the hinted box within the cap. | what was found, where, and what could not be read |
-| `hide` | `contents`, `coordinate`, `height`, optional `hint_heights`, optional `riddle` | Derives the region key for the cube, merges with the agent's existing bag there (one bag per author per region: read before write, never replace), publishes the bag. Contents are a message (which may hold a Cashu token), an object payload, a key item, or a chest item. | the bag's id and the cube; the cost of the key |
-| `place` | `object` or `address`, `coordinate`, `height` | `validate_object`, then `hide` as an object: inline for small payloads, by reference as a hidden kind 33331 (DECK-0003 section 3.4) for large ones. | as `hide` |
-| `validate_object` | `payload` | sno-core validation against DECK-0003 section 1.9. | valid, or the errors in plain words |
-| `budget` | none | What the server may still spend this session. | work seconds per call and per session, lines of chat |
-| `outbox` | none | The signed events not yet confirmed by the canonical relay, and the retry state. | the list |
+| `look` | optional `radius_sectors` (only `1` in v0), optional `heights` (extra cube heights to derive keys for here, up to 16) | The text report of the surroundings: position; the cube keys the server holds around it; the entries of every bag it has opened nearby, with distances and authors; who is present in the 27 sectors around it, with bot flags where known and their chain verdicts, and how far; recent chat; the budget; what it cannot see and why. | the report as text and as JSON |
+| `plan_hop` | `target` | Prices the next step toward the target: hop or sidestep, the heights involved, the terrain K, the expected seconds on this machine (from a calibration kept in the state directory), whether it exceeds the caps, and how much of the route would remain. A target across a wall higher than the sidestep cap is refused as unreachable, with the reason. Never moves. | the plan and the price |
+| `hop` | `target`, optional `cap_seconds` (the caller's own cap for this call) | Confirms the head, reserves it, computes the proof, confirms the head again, signs, publishes to the canonical relay and the agent's relays, records the result. Refuses if the plan exceeds the cap or the head moved. On a fresh key with no chain, signs the spawn first (after the relays have said there is no chain). A target past a wall above the hop ceiling is reached one step per call: the tool executes the next step of the route and says how far the target still is. | the new head's id and coordinate, the work spent, the relays that accepted and the ones that refused, verbatim |
+| `say` | `text` (500 characters at most), optional `reply_to` (the id of a heard line) | Seals a kind 23330 chat line to the h12 cube at the live head, exactly as ONOSENDAI does, and publishes it. Enforces the rate rule (one line per five seconds) and the quiet rule (one unprompted line per arrival; a reply to a line that addressed the agent is always allowed). | sent, or refused with the rule it broke |
+| `listen` | `since` (a unix timestamp or `"last"`) | Chat lines heard in the agent's cube and its 26 neighbors since then, decrypted with the keys the server holds. | lines with speaker, bot flag where known, time, text, and whether the line addressed the agent |
+| `wait_for` | `arrival` (`pubkey`, `within_sectors`), `chat` (`addressed`), `timeout_seconds` | Blocks until someone arrives (a given pubkey, or anyone within the 27 sectors), a chat line is heard (optionally one addressed to the agent), or the timeout passes. Honors the client's cancellation. | what happened, or `timeout` |
+| `find` | none, or `hint` (`coordinate` and `heights`), optional `max_height` (default 12, at most 16) | Scans the cubes around the live head from height 1 up to the cap, derives region keys, fetches bags by lookup id, decrypts, and lists the entries: messages, objects with their bounds, coins (a Cashu token in a message), keys and chests by kind, with positions and authors. With a hint, finds the bags that carry it and sweeps the hinted box for each one's region, within the caps. | what was found, where, and what could not be read (references not retrieved, bags that did not open, hints that were false) |
+| `hide` | `contents`, `coordinate`, `height` (1 to 16), optional `hint_heights`, optional `riddle` (280 characters) | Derives the region key for the cube, merges with the agent's existing bag there (one bag per author per region: read before write, never replace), publishes the bag. `contents` is one of `{ "message" }` (may hold a Cashu token), `{ "object" }` (an SNO payload; large ones go by reference as a hidden kind 33331), `{ "key": { "name", "about" } }` (a fresh key item), or `{ "chest": { "name", "lock", "requires", "entries" } }` (entries sealed with NIP-44 to a pubkey). | the bag's id and the cube; the key's cost; the relays that accepted and refused |
+| `place` | `object` or `address`, `coordinate`, `height` | `validate_object`, then `hide` as an object: inline for small payloads, by reference as a hidden kind 33331 (DECK-0003 section 3.4) for large ones. With `address` (`33331:<pubkey>:<d>` or an naddr), places a published public object by reference. | as `hide` |
+| `validate_object` | `payload` | Validation against DECK-0003 section 1.9, each failure in plain words, with sno-core's `fromPayload` as the arbiter. | valid, with the size on the wire, or the errors |
+| `budget` | none | What the server may still spend this session. | work seconds per call and per session, lines of chat said and the unprompted allowance, the hop ceiling and sidestep cap |
+| `outbox` | none | The signed events not yet confirmed by the canonical relay and their retry state; refusals kept verbatim; events dropped at replay because they would have forked the chain. | the list |
 
 Resources: `cyberspace://agents.md`, a placeholder that says the document is being written in the spec repository as `docs/agents.md`, with the seven rules above inline so an agent is never without them.
 
@@ -167,6 +167,26 @@ These are pure functions copied from ONOSENDAI (`arkin0x/onosendai-v2`, branch `
 | `src/space/plan.ts` | `src/lib/movePlan.ts` | The route as steps: `nextAxisMove`, `wallSource`, `nextStep`, `planSummary` |
 | `src/space/calibration.ts` | `src/lib/calibration.ts`, `src/workers/calibrate.worker.ts` | The benchmark and the ceilings it recommends |
 
+## Implemented here because a library did not have it
+
+| What | Where | Why |
+|---|---|---|
+| SNO validation with reasons | `src/sno.ts` | sno-core's `fromPayload` returns a model or null and never says why. The checks of DECK-0003 section 1.9 are restated to name the failure in words; `fromPayload` has the last word. A candidate for sno-core. |
+| The chain event builder's self-check | `src/chain/builder.ts` `chainTemplateProblem` | Every template is checked before it is signed: one `A` tag, each read tag exactly once with a value, sector tags equal to the ones computed from `C`, a spawn's `C` equal to the pubkey. |
+| Reachability of a target | `src/agent.ts` `routeRefusal` | ONOSENDAI's `routeFeasible` with HOSAKA's ceilings left out: the tallest wall between here and the target decides, before any step is priced. |
+| The kind 0 profile with the bot flag and the operator tag | `src/profile.ts` | NIP-24 `bot: true` and a `p` tag marked `operator`. |
+| Pricing in seconds | `src/space/calibration.ts` `hopSeconds`, `sidestepSeconds` | ONOSENDAI derives ceilings from the benchmark; the agent also needs the expected seconds of one step, projected from the same measurements. |
+| A WebSocket whose `close()` is idempotent | `src/nostr/websocket.ts` | nostr-tools answers a failed connection by calling `close()` before detaching its handlers, and Node's native WebSocket re-dispatches the error synchronously, so the two recurse until the stack overflows. Browsers do not, so ONOSENDAI never meets it. The guard breaks the loop. Worth reporting upstream to nostr-tools. |
+
+## Known limitations of v0
+
+- A proof is computed on the server's thread, so the server is busy for the seconds a hop takes and answers no other call meanwhile. The caps bound this.
+- `look` sees exactly the 27 sectors around the agent, and `wait_for` an arrival within them.
+- Chat said before the server started listening is gone: the relay keeps none of it.
+- Keys are derived on request up to h16 (`hide`, `find`, `look`); the passive scan reaches h12, as ONOSENDAI's does.
+- Chain status follows the link and tag rules; proofs are not recomputed.
+- Rides, stations and hyperjumps, HOSAKA, `render`, follow and roam are later steps and are not here.
+
 ## Development
 
 ```sh
@@ -175,7 +195,7 @@ npm test
 npm run build
 ```
 
-Tests run with no network: an in-memory relay implements REQ, EVENT, CLOSE and AUTH at the wire level, and the real relay client runs against it through a fake WebSocket. Nothing in the tests publishes anywhere.
+Tests run with no network: an in-memory relay (`test/fakeRelay.ts`) implements REQ, EVENT, CLOSE and AUTH at the wire level, and the real relay client runs against it through a fake WebSocket. Nothing in the tests publishes anywhere, and every key in them is generated in memory. The spawn and hop builders are checked against the spec's worked example (section 5.7) and the hint tags against the spec's golden vectors (section 7.7).
 
 ## License
 
