@@ -52,6 +52,16 @@ describe('the chain event builder', () => {
     expect(chain).toHaveLength(2)
     expect(chainStatus(chain)).toBe('valid')
     expect(chain[1].position).toEqual(to)
+    // The proof tag is the proof of this very event: recomputed from its own c, C and e previous, nothing the builder was handed.
+    const c = placeFromHex(hop.tags.find((x) => x[0] === 'c')![1])
+    const C = placeFromHex(hop.tags.find((x) => x[0] === 'C')![1])
+    const previous = hop.tags.find((x) => x[0] === 'e' && x[3] === 'previous')![1]
+    const recomputed = computeHopProof(c.position.x, c.position.y, c.position.z, C.position.x, C.position.y, C.position.z, C.plane, previous)
+    expect(hop.tags.find((x) => x[0] === 'proof')![1]).toBe(recomputed.proofHash)
+    // And buildChain does not check it: a wrong proof tag still resolves, which is why the line above exists.
+    const forged = signEvent(hopTemplate({ createdAt: 1_700_000_001, genesisId: spawn.id, previousId: spawn.id, prevCoordHex: pubkey, to, plane: home.plane, proofHash: 'ab'.repeat(32) }), sk)
+    expect(chainStatus(buildChain([spawn, forged], pubkey))).toBe('valid')
+    expect(forged.tags.find((x) => x[0] === 'proof')![1]).not.toBe(recomputed.proofHash)
   })
 
   it('refuses a template with a doubled read tag or a wrong sector tag before it is signed', () => {

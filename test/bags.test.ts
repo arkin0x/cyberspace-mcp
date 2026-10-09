@@ -6,11 +6,12 @@ import { describe, expect, it } from 'vitest'
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { newShard } from 'sno-core/shards'
 import {
-  CHAT_BAG_KIND, CHAT_KIND, HIDDEN_KIND, bagEntries, bagTemplate, chatInnerTemplate, chatInners, ciphertextOf,
-  messageInnerTemplate, objectTemplate, referenceTo, unbag, entryKey,
+  CHAT_BAG_KIND, CHAT_KIND, HIDDEN_KIND, KEY_KIND, bagEntries, bagTemplate, chatInnerTemplate, chatInners, chestInnerTemplate, chestItemOf, ciphertextOf,
+  keyInnerTemplate, keyItemOf, messageInnerTemplate, objectTemplate, readItem, referenceTo, unbag, entryKey,
 } from '../src/hidden/bags.js'
+import { forgeKey, openWithSecret, openerFor, readContents, sealEntries } from '../src/hidden/chests.js'
 import { decryptForRegion, encryptForRegion } from '../src/hidden/crypto.js'
-import { signEvent } from '../src/nostr/event.js'
+import { bytesToHex, signEvent } from '../src/nostr/event.js'
 
 const key = new Uint8Array(32).map((_, i) => (i * 7 + 3) & 0xff)
 const at = { x: 1n << 40n, y: 5n, z: 9n }
@@ -111,5 +112,63 @@ describe('an object hidden by reference (DECK-0003 3.4)', () => {
     expect(found[0].ref).toEqual(ref)
     // Without a resolver the reference is a missing entry, not an error.
     expect(await unbag(bag, key, undefined, undefined, 6)).toHaveLength(0)
+  })
+})
+
+describe('key and chest items (Keys and Chests B1, as ONOSENDAI writes them at f9db752)', () => {
+  it('a key rides its secret in a tag and its sentence as the content, and reads back whole', async () => {
+    const item = forgeKey('lantern', 'lights the way')
+    const t = keyInnerTemplate(item, at, 1, 1)
+    expect(t.kind).toBe(KEY_KIND)
+    expect(t.tags.map((x) => x[0])).toEqual(['C', 'title', 'item', 'secret', '-'])
+    expect(t.tags.find((x) => x[0] === 'title')?.[1]).toBe('lantern')
+    expect(t.tags.find((x) => x[0] === 'secret')?.[1]).toBe(item.secretHex)
+    expect(t.tags.find((x) => x[0] === 'item')?.[1]).toBe(item.itemPubkey)
+    expect(t.content).toBe('lights the way')
+    expect(keyItemOf(t)).toEqual(item)
+    // Through a bag sealed to the region, signed, and out again as a key item.
+    const sk = generateSecretKey()
+    const inner = signEvent(t, sk)
+    const bag = signEvent(await bagTemplate([inner], key, lookup, 6, 1, HIDDEN_KIND), sk)
+    const opened = await unbag(bag, key, undefined, undefined, 6)
+    expect(opened).toHaveLength(1)
+    expect(opened[0].type).toBe('key')
+    expect(opened[0].key).toEqual(item)
+    expect(readItem(inner)).toEqual({ type: 'key', key: item })
+  })
+
+  it('still reads a key forged the earlier way: the secret as content, name and about tags', () => {
+    const key = forgeKey('old lantern', 'an older sentence')
+    const read = keyItemOf({ kind: KEY_KIND, content: key.secretHex, tags: [['name', 'old lantern'], ['about', 'an older sentence'], ['item', key.itemPubkey]] })
+    expect(read).toEqual(key)
+  })
+
+  it('refuses a key whose item tag does not match its secret, or whose secret is not a key', () => {
+    const key = forgeKey('x')
+    expect(keyItemOf({ kind: KEY_KIND, content: '', tags: [['secret', key.secretHex], ['item', 'ab'.repeat(32)]] })).toBeNull()
+    expect(keyItemOf({ kind: KEY_KIND, content: '', tags: [['secret', 'not hex']] })).toBeNull()
+  })
+
+  it('a chest names itself with title, caps requires, and opens with the lock\'s secret or the right held key', () => {
+    const sk = generateSecretKey()
+    const lockSk = generateSecretKey()
+    const lockPub = getPublicKey(lockSk)
+    const inner = signEvent(messageInnerTemplate('inside the box', at, 1, 1), sk)
+    const sealed = sealEntries([inner], lockPub)
+    const chest = { name: 'strongbox', lockPubkey: lockPub, senderPubkey: sealed.senderPubkey, requires: 'r'.repeat(100), payload: sealed.payload }
+    const t = chestInnerTemplate(chest, at, 1, 1)
+    expect(t.tags.map((x) => x[0])).toEqual(['C', 'title', 'lock', 'requires'])
+    const read = chestItemOf(t)!
+    expect(read.name).toBe('strongbox')
+    expect(read.requires).toHaveLength(64)
+    const contents = readContents(openWithSecret(read, bytesToHex(lockSk)))
+    expect(contents).toHaveLength(1)
+    expect(contents[0].body.text).toBe('inside the box')
+    expect(contents[0].verified).toBe(true)
+    expect(() => openWithSecret(read, bytesToHex(generateSecretKey()))).toThrow()
+    const held = { itemPubkey: lockPub, secretHex: bytesToHex(lockSk) }
+    expect(openerFor(read, [held], 'me')).toEqual({ by: 'key', key: held })
+    expect(openerFor(read, [], lockPub)).toEqual({ by: 'self' })
+    expect(openerFor(read, [], 'someone else')).toBeNull()
   })
 })
