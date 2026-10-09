@@ -5,6 +5,8 @@ dist/
 # Any state directory: it holds the agent's secret key, its chain and its outbox.
 state*/
 **/state*/
+# The source directory of that name is not a state directory.
+!src/state/
 
 # A key is never committed, wherever it is.
 *.key
