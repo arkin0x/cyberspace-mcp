@@ -74,8 +74,10 @@ export type PublishResult =
   | { ok: true; accepted: string[]; reasons: Record<string, string> }
   | { ok: false; reason: string; reasons: Record<string, string> }
 
-/** A relay's own refusal (NIP-01 OK false prefixes): asking again would get the same answer. */
-export const REFUSED = /^(blocked|invalid|duplicate|pow|rate-limited|restricted|error|mute|auth-required)\b/i
+/** A relay's own final refusal (NIP-01 OK false prefixes): asking again would get the same answer. */
+export const REFUSED = /^(blocked|invalid|duplicate|pow|restricted|error|mute)\b/i
+/** A relay's answer that may change by itself: not retried at once, left to the outbox's backoff. */
+export const TRANSIENT = /^(rate-limited|auth-required)\b/i
 
 /** What nostr-tools is told to wait for an EOSE: far longer than any deadline of ours. */
 const NOSTR_TOOLS_EOSE_MS = 10 * 60_000
@@ -240,12 +242,13 @@ export class Relays {
    * Send to a set of relays; ok if any accepts, the first failure otherwise.
    * When every relay failed for a reason that is not a refusal (a timeout, a
    * closed socket), the sockets are presumed dead: they are dropped and the
-   * event is sent once more over fresh ones. A refusal is never retried.
+   * event is sent once more over fresh ones. A refusal is never retried; a
+   * rate limit or an auth demand is left to the outbox's backoff.
    */
   async publishMany(urls: string[], event: NostrEvent): Promise<PublishResult> {
     if (urls.length === 0) return { ok: false, reason: 'no relays configured', reasons: {} }
     const first = await this.publishOnce(urls, event)
-    if (first.ok || REFUSED.test(first.reason)) return first
+    if (first.ok || REFUSED.test(first.reason) || TRANSIENT.test(first.reason)) return first
     this.dropRelays(urls)
     return this.publishOnce(urls, event)
   }

@@ -17,7 +17,6 @@
 // unprompted.
 
 import { EventEmitter } from 'node:events'
-import type { Plane } from 'cyberspace-core'
 import { nip19 } from 'nostr-tools'
 import type { Filter } from 'nostr-tools/filter'
 import { CHAT_BAG_KIND, MAX_CHAT_LENGTH, bagTemplate, chatInnerTemplate, chatInners } from './hidden/bags.js'
@@ -30,7 +29,7 @@ import type { StateDir } from './state/dir.js'
 /** The least time between two lines the agent says. */
 export const SAY_INTERVAL_S = 5
 /** Lines kept, oldest dropped first. */
-export const CHAT_MAX = 500
+const CHAT_MAX = 500
 
 export interface ChatLine {
   /** The inner event's id: the line's identity, what stops a repeat. */
@@ -74,7 +73,7 @@ export function neighborPositions(at: Position, h: number): Position[] {
 }
 
 /** Which cube of side 2^h a position is in, as a string that changes only on crossing. */
-export function cubeKey(at: Position, h: number): string {
+function cubeKey(at: Position, h: number): string {
   const s = BigInt(h)
   return `${at.x >> s},${at.y >> s},${at.z >> s}`
 }
@@ -98,7 +97,7 @@ export function addressesMe(text: string, me: { pubkey: string; npub: string; na
   return false
 }
 
-export interface ChatOptions {
+interface ChatOptions {
   pubkey: string
   name: () => string | null
   sign: (template: EventTemplate) => NostrEvent
@@ -116,6 +115,8 @@ export class Chat extends EventEmitter {
   private cube: string | null = null
   private stopLive: (() => void) | null = null
   private readonly npub: string
+  /** Resolves when the current subscription has heard a relay say EOSE: it is listening. */
+  private listeningPromise: Promise<void> = Promise.resolve()
 
   constructor(
     private readonly dir: StateDir,
@@ -166,7 +167,14 @@ export class Chat extends EventEmitter {
     const ids = this.room.regions
     if (ids.length === 0) { this.stopLive = null; return }
     const filter: Filter = { kinds: [CHAT_BAG_KIND], '#d': ids }
-    this.stopLive = this.relays.subscribe(filter, (ev) => { void this.receive(ev) })
+    let ready: () => void = () => {}
+    this.listeningPromise = new Promise<void>((resolve) => { ready = resolve })
+    this.stopLive = this.relays.subscribe(filter, (ev) => { void this.receive(ev) }, () => ready())
+  }
+
+  /** Resolves once a relay has acknowledged the current subscription (its EOSE), so a line said after that is heard. */
+  listening(): Promise<void> {
+    return this.listeningPromise
   }
 
   /** Someone arrived: one more unprompted line may be said. */
@@ -242,11 +250,6 @@ export class Chat extends EventEmitter {
     this.lastListenAt = now
     this.save()
     return out
-  }
-
-  /** Where a line was said, for the report: the cube's plane-free base is the key's. */
-  planeOf(): Plane | null {
-    return this.current ? 1 : null
   }
 
   stop(): void {

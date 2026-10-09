@@ -19,7 +19,7 @@ export interface Settings {
   allowRespawn: boolean
 }
 
-export const DEFAULTS = {
+const DEFAULTS = {
   relays: [DEFAULT_RELAY],
   capCallSeconds: 60,
   capSessionSeconds: 600,

@@ -54,7 +54,7 @@ export function positionHex(p: Position, plane: Plane): string {
 }
 
 /** The S tag's value for a position. */
-export function sectorOf(p: Position): string {
+function sectorOf(p: Position): string {
   return sectorTag(xyzToSectorId(p.x, p.y, p.z))
 }
 
@@ -114,13 +114,22 @@ export function parseCoordinate(input: CoordinateInput, from?: Place): Place {
     if (o.x === undefined || o.y === undefined || o.z === undefined) throw new Error('a per-axis coordinate needs x, y and z')
     const plane = o.plane === undefined ? (from?.plane ?? 1) : o.plane
     if (plane !== 0 && plane !== 1) throw new Error('plane must be 0 (dataspace) or 1 (ideaspace)')
-    return placeOf({ x: toBig(o.x as never, 'x'), y: toBig(o.y as never, 'y'), z: toBig(o.z as never, 'z') }, plane as Plane)
+    const axis = (v: unknown, name: string): bigint => {
+      if (typeof v !== 'string' && typeof v !== 'number' && typeof v !== 'bigint') throw new Error(`${name} must be an integer, as a decimal string`)
+      return toBig(v, name)
+    }
+    return placeOf({ x: axis(o.x, 'x'), y: axis(o.y, 'y'), z: axis(o.z, 'z') }, plane as Plane)
   }
   if ('dx' in o || 'dy' in o || 'dz' in o) {
     if (!from) throw new Error('an offset needs a place to start from, and the agent has no position yet')
-    const dx = o.dx === undefined ? 0n : toBig(o.dx as never, 'dx')
-    const dy = o.dy === undefined ? 0n : toBig(o.dy as never, 'dy')
-    const dz = o.dz === undefined ? 0n : toBig(o.dz as never, 'dz')
+    const offset = (v: unknown, name: string): bigint => {
+      if (v === undefined) return 0n
+      if (typeof v !== 'string' && typeof v !== 'number' && typeof v !== 'bigint') throw new Error(`${name} must be an integer, as a decimal string`)
+      return toBig(v, name)
+    }
+    const dx = offset(o.dx, 'dx')
+    const dy = offset(o.dy, 'dy')
+    const dz = offset(o.dz, 'dz')
     return placeOf({ x: from.position.x + dx, y: from.position.y + dy, z: from.position.z + dz }, from.plane)
   }
   throw new Error('a coordinate is a 64-hex string, an {x, y, z, plane} object, or a {dx, dy, dz} offset')

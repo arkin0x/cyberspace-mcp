@@ -1,7 +1,8 @@
 // bags.ts: content hidden at a location.
 //
-// Ported from ONOSENDAI src/lib/hidden.ts at commit 123cb55 (branch
-// feat/keys-and-chests). Trimmed: the credit tags a copied object carries
+// Ported from ONOSENDAI src/lib/hidden.ts at commit f9db752 (origin/v2, PR
+// #256: the secret rides in its own tag, the title tag names keys and
+// chests). Trimmed: the credit tags a copied object carries
 // (this server copies nothing), and the LIVE LINK bookkeeping of the deploy
 // bar; everything that reads or writes a bag is kept.
 //
@@ -43,14 +44,16 @@ export const MESSAGE_KIND = 1
 export const KEY_KIND = 3340
 /** A chest, inside the envelope (B1 2.2): a list of entries sealed to a public key. */
 export const CHEST_KIND = 3341
-/** Longest name a key or a chest carries. */
+/** Longest name a key or a chest carries: a label for a row, not a letter. The requires label is capped the same. */
 export const MAX_ITEM_NAME = 64
+/** Longest about a key carries: a sentence. */
+export const MAX_ABOUT = 280
 /** A standalone SNO object (DECK-0003 3.1); a shard hidden by reference is one of these (3.4). */
 export const OBJECT_KIND = 33331
 /** FF-1's key derivation for a key computed from a place rather than served (spec 7.6). */
-export const REGION_KEY_DERIVATION = 'cyberspace:region'
+const REGION_KEY_DERIVATION = 'cyberspace:region'
 /** The public face of an object hidden by reference. */
-export const OBJECT_PREVIEW = 'This object is hidden at a place in cyberspace. Find it with ONOSENDAI: https://onosendai.tech'
+const OBJECT_PREVIEW = 'This object is hidden at a place in cyberspace. Find it with ONOSENDAI: https://onosendai.tech'
 /** A shard whose payload is larger than this is hidden by reference (DECK-0003 3.2). */
 export const REFERENCE_THRESHOLD_BYTES = 16_384
 /** Longest hidden message. */
@@ -58,7 +61,7 @@ export const MAX_MESSAGE_LENGTH = 10_000
 /** Longest riddle a bag carries in its content (spec 7.7 "Riddles"). */
 export const MAX_RIDDLE_LENGTH = 280
 /** The most references one bag may make this server fetch, and how many at once. */
-export const MAX_REFERENCES_PER_BAG = 64
+const MAX_REFERENCES_PER_BAG = 64
 const REFERENCE_CONCURRENCY = 4
 
 /** A reference entry (spec 7.6): ["a" | "e", target, relay hint, coord hex]. */
@@ -82,7 +85,7 @@ export function entryKey(e: BagEntry): string {
 export interface RegionOrigin { at: Position; plane: Plane }
 
 /** The bytes a shard's payload takes on the wire. */
-export function payloadBytes(shard: ShardModel): number {
+function payloadBytes(shard: ShardModel): number {
   return new TextEncoder().encode(JSON.stringify(toPayload(shard))).length
 }
 
@@ -137,33 +140,53 @@ export interface ChestItem {
 const HEX_64 = /^[0-9a-f]{64}$/
 
 function tagValue(tags: string[][], name: string): string | undefined {
-  return tags.find((t) => t[0] === name)?.[1]
+  return tags.find((t) => Array.isArray(t) && t[0] === name)?.[1]
 }
 
+/** A tag's value trimmed, its whitespace collapsed, and cut to `max`; empty when absent. */
+function capped(tags: string[][], name: string, max: number): string {
+  return (tagValue(tags, name) ?? '').trim().replace(/\s+/g, ' ').slice(0, max)
+}
+
+/** Whether an item's content and tags have the shape every reading below assumes: an unsigned entry may have any shape at all. */
+function wellShaped(ev: Pick<NostrEvent, 'content' | 'tags'>): boolean {
+  return typeof ev.content === 'string' && Array.isArray(ev.tags)
+}
+
+/** A key's or a chest's name: its title tag, the tag other nostr kinds use for a human name; the older name tag; else `fallback`. */
 function nameOf(tags: string[][], fallback: string): string {
-  const name = (tagValue(tags, 'name') ?? '').trim().replace(/\s+/g, ' ').slice(0, MAX_ITEM_NAME)
-  return name || fallback
+  return capped(tags, 'title', MAX_ITEM_NAME) || capped(tags, 'name', MAX_ITEM_NAME) || fallback
 }
 
-/** A key item out of its event, or null when it is not one this server can hold. */
+/**
+ * A key item out of its event, or null when it is not one this server can
+ * hold: the secret tag must be a valid 32-byte secret, and an item tag,
+ * when carried, must be the public key that secret derives. Keys forged on
+ * 2026-10-09, before the secret moved into its tag, carry it as the content
+ * and their sentence in an about tag; they are still read.
+ */
 export function keyItemOf(ev: Pick<NostrEvent, 'kind' | 'content' | 'tags'>): KeyItem | null {
-  if (ev.kind !== KEY_KIND) return null
-  const secretHex = ev.content.trim()
+  if (ev.kind !== KEY_KIND || !wellShaped(ev)) return null
+  const tagged = tagValue(ev.tags, 'secret')
+  const secretHex = (tagged ?? ev.content).trim()
   if (!HEX_64.test(secretHex)) return null
   let itemPubkey: string
   try { itemPubkey = getPublicKey(hexToBytes(secretHex)) } catch { return null }
   const claimed = tagValue(ev.tags, 'item')
   if (claimed !== undefined && claimed !== itemPubkey) return null
-  return { name: nameOf(ev.tags, 'key'), about: (tagValue(ev.tags, 'about') ?? '').trim(), itemPubkey, secretHex }
+  const about = tagged !== undefined
+    ? ev.content.trim().replace(/\s+/g, ' ').slice(0, MAX_ABOUT)
+    : capped(ev.tags, 'about', MAX_ABOUT)
+  return { name: nameOf(ev.tags, 'key'), about, itemPubkey, secretHex }
 }
 
 /** A chest item out of its event, or null when its lock tag or payload is malformed. */
 export function chestItemOf(ev: Pick<NostrEvent, 'kind' | 'content' | 'tags'>): ChestItem | null {
-  if (ev.kind !== CHEST_KIND) return null
-  const lock = ev.tags.find((t) => t[0] === 'lock')
-  if (!lock || !HEX_64.test(lock[1] ?? '') || !HEX_64.test(lock[2] ?? '')) return null
+  if (ev.kind !== CHEST_KIND || !wellShaped(ev)) return null
+  const lock = ev.tags.find((t) => Array.isArray(t) && t[0] === 'lock')
+  if (!lock || typeof lock[1] !== 'string' || typeof lock[2] !== 'string' || !HEX_64.test(lock[1]) || !HEX_64.test(lock[2])) return null
   if (!ev.content) return null
-  return { name: nameOf(ev.tags, 'chest'), lockPubkey: lock[1], senderPubkey: lock[2], requires: (tagValue(ev.tags, 'requires') ?? '').trim(), payload: ev.content }
+  return { name: nameOf(ev.tags, 'chest'), lockPubkey: lock[1], senderPubkey: lock[2], requires: capped(ev.tags, 'requires', MAX_ITEM_NAME), payload: ev.content }
 }
 
 /** What an inline item is, by its kind. */
@@ -229,13 +252,6 @@ export interface Hidden {
   ref?: Reference
 }
 
-/** Why no reader could open this shard, or null when every reader can. */
-export function shardRefusal(shard: ShardModel): string | null {
-  if (shard.vertices.length === 0 && (shard.parts?.length ?? 0) === 0) return 'This shard has no vertices and places nothing.'
-  if (!fromPayload(toPayload(shard), shard.id)) return 'The format refuses this shard as it is, so nobody could open it.'
-  return null
-}
-
 /** The inner shard event template (kind 3330), signed by the author. */
 export function shardInnerTemplate(shard: ShardModel, at: Position, plane: Plane, createdAt: number): EventTemplate {
   return {
@@ -256,11 +272,17 @@ export function messageInnerTemplate(text: string, at: Position, plane: Plane, c
   }
 }
 
-/** The inner key event template (kind 3340), signed by the hider (B1 2.1). The NIP-70 `-` tag keeps a finder from republishing it. */
+/**
+ * The inner key event template (kind 3340), signed by the hider (B1 2.1).
+ * The secret rides in its own tag and the sentence is the content, so a
+ * client that does not know the kind shows the sentence and never the
+ * secret; title names it the way other nostr kinds name things; item is its
+ * public key, so a reader can check one against the other; the NIP-70 `-`
+ * tag keeps a finder from republishing it.
+ */
 export function keyInnerTemplate(key: KeyItem, at: Position, plane: Plane, createdAt: number): EventTemplate {
-  const tags: string[][] = [['C', positionHex(at, plane)], ['name', key.name.slice(0, MAX_ITEM_NAME)], ['item', key.itemPubkey], ['-']]
-  if (key.about) tags.push(['about', key.about])
-  return { kind: KEY_KIND, created_at: createdAt, content: key.secretHex, tags }
+  const tags: string[][] = [['C', positionHex(at, plane)], ['title', key.name.slice(0, MAX_ITEM_NAME)], ['item', key.itemPubkey], ['secret', key.secretHex], ['-']]
+  return { kind: KEY_KIND, created_at: createdAt, content: key.about.slice(0, MAX_ABOUT), tags }
 }
 
 /** The inner chest event template (kind 3341), signed by the hider (B1 2.2). */
@@ -269,7 +291,7 @@ export function chestInnerTemplate(chest: ChestItem, at: Position, plane: Plane,
     kind: CHEST_KIND,
     created_at: createdAt,
     content: chest.payload,
-    tags: [['C', positionHex(at, plane)], ['name', chest.name.slice(0, MAX_ITEM_NAME)], ['lock', chest.lockPubkey, chest.senderPubkey], ['requires', chest.requires]],
+    tags: [['C', positionHex(at, plane)], ['title', chest.name.slice(0, MAX_ITEM_NAME)], ['lock', chest.lockPubkey, chest.senderPubkey], ['requires', chest.requires]],
   }
 }
 
@@ -290,7 +312,7 @@ export interface BagSettings {
   riddle: string
 }
 
-export const DEFAULT_BAG_SETTINGS: BagSettings = { heightTag: true, hint: null, riddle: '' }
+const DEFAULT_BAG_SETTINGS: BagSettings = { heightTag: true, hint: null, riddle: '' }
 
 /** The settings a published bag carries. */
 export function bagSettingsOf(ev: NostrEvent, height: number): BagSettings {
@@ -299,7 +321,7 @@ export function bagSettingsOf(ev: NostrEvent, height: number): BagSettings {
   return { heightTag: h !== null, hint: hint ? hint.heights : null, riddle: ev.content.slice(0, MAX_RIDDLE_LENGTH) }
 }
 
-export interface BagPlace { at: Position; plane: Plane }
+interface BagPlace { at: Position; plane: Plane }
 
 /**
  * Wrap a bag of entries into one region envelope template (spec 8.6): keyed
@@ -479,7 +501,7 @@ export async function bagEntries(outer: NostrEvent, regionKey: Uint8Array): Prom
 }
 
 /** The signed inner events currently in an envelope's bag, signed by its author and verified. */
-export async function bagInners(outer: NostrEvent, regionKey: Uint8Array): Promise<NostrEvent[]> {
+async function bagInners(outer: NostrEvent, regionKey: Uint8Array): Promise<NostrEvent[]> {
   const ct = ciphertextOf(outer)
   if (!ct) return []
   const json = await decryptForRegion(regionKey, ct)

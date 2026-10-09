@@ -1,7 +1,7 @@
 // selfCheck.ts: whether this identity already has a chain on the relays.
 //
 // Ported from ONOSENDAI src/lib/chainHold.ts at commit 8e4d0e3 (branch
-// feat/keys-and-chests): decideSelfCheck, refusalText, summarizeChain. The
+// feat/keys-and-chests): decideSelfCheck and refusalText. The
 // held-chain machinery (a chain started before the relays could answer,
 // kept on the device) is not ported: an agent that cannot tell whether it
 // has a chain is refused a spawn instead, because a rival spawn is the one
@@ -19,10 +19,8 @@
 // is published; a private relay that answers "nothing" only knows about itself.
 
 import { normalizeURL } from 'nostr-tools/utils'
-import { sectorTag, xyzToSectorId, type Plane } from 'cyberspace-core'
 import type { NostrEvent } from '../nostr/event.js'
 import { PARTIAL_CHAIN_REASON, mergeAnswers, type RelayAnswer } from '../nostr/relayOutcome.js'
-import type { Position } from '../space/coords.js'
 import { buildChain } from './events.js'
 
 export type CheckCause =
@@ -49,7 +47,7 @@ export function decideSelfCheck(answers: RelayAnswer[], canonical: string): Chec
 }
 
 /** A relay's refusal in words a reader can act on. */
-export function refusalText(reason: string): string {
+function refusalText(reason: string): string {
   if (/^auth-required:/i.test(reason)) return 'it wants the identity to authenticate'
   if (/^rate-limited:/i.test(reason)) return 'too many requests, try again shortly'
   return reason
@@ -60,34 +58,5 @@ export function causeWords(cause: CheckCause): string {
   switch (cause.kind) {
     case 'unreachable': return `the relays did not answer (${cause.reason})`
     case 'refused': return `the canonical relay refused: ${refusalText(cause.reason)}`
-  }
-}
-
-/** One chain, summarized. */
-export interface ChainSummary {
-  startedAt: number
-  actions: number
-  lastActive: number
-  position: Position
-  plane: Plane
-  sector: string
-  headId: string
-  spawnId: string
-}
-
-/** The active chain in `events`, summarized; null when there is none. */
-export function summarizeChain(events: NostrEvent[]): ChainSummary | null {
-  const chain = buildChain(events)
-  if (chain.length === 0) return null
-  const head = chain[chain.length - 1]
-  return {
-    startedAt: chain[0].createdAt,
-    actions: chain.length,
-    lastActive: head.createdAt,
-    position: head.position,
-    plane: head.plane,
-    sector: sectorTag(xyzToSectorId(head.position.x, head.position.y, head.position.z)),
-    headId: head.id,
-    spawnId: chain[0].id,
   }
 }

@@ -17,13 +17,13 @@ import { AXIS_CENTER, computeAxisMerkleRoot, computeSubtreeCantor, seedPrefix, t
 import type { StateDir } from '../state/dir.js'
 
 /** Budget for one axis tree of a hop; a whole commit is up to three plus the temporal tree. */
-export const HOP_AXIS_BUDGET_MS = 5000
+const HOP_AXIS_BUDGET_MS = 5000
 /** Budget for a whole sidestep. */
-export const SIDESTEP_BUDGET_MS = 60_000
+const SIDESTEP_BUDGET_MS = 60_000
 
 /** Until measured: h17 finishes in seconds on modest hardware. */
-export const DEFAULT_HOP_HEIGHT = 17
-export const DEFAULT_SIDESTEP_HEIGHT = 24
+const DEFAULT_HOP_HEIGHT = 17
+const DEFAULT_SIDESTEP_HEIGHT = 24
 
 /** Cantor cost per height never grows slower than this in practice. */
 const GROWTH_RATIO_FLOOR = 2.5
@@ -92,9 +92,9 @@ export interface Calibration {
 }
 
 /** A week keeps the numbers honest without re-running every start. */
-export const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000
+const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
-export function cacheValid(entry: unknown, now: number, fingerprint: string): entry is Calibration {
+function cacheValid(entry: unknown, now: number, fingerprint: string): entry is Calibration {
   if (typeof entry !== 'object' || entry === null) return false
   const e = entry as Partial<Calibration>
   if (e.version !== 1) return false

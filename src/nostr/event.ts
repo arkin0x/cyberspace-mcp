@@ -24,7 +24,7 @@ export const HEX_64 = /^[0-9a-f]{64}$/
  * published event carries it except auth events, which are proofs handed to
  * one server and never published.
  */
-export const CLIENT_NAME = 'cyberspace-mcp'
+const CLIENT_NAME = 'cyberspace-mcp'
 
 /** NIP-42 relay auth, Blossom upload auth, NIP-98 HTTP auth: never attributed. */
 const UNATTRIBUTED_KINDS = new Set([22242, 24242, 27235])
@@ -53,14 +53,6 @@ export function isAuthentic(ev: NostrEvent): boolean {
   } catch {
     return false
   }
-}
-
-/** Whether a value has the fields of a nostr event, with the right types. */
-export function looksLikeEvent(x: unknown): x is NostrEvent {
-  if (!x || typeof x !== 'object' || Array.isArray(x)) return false
-  const e = x as Record<string, unknown>
-  return typeof e.id === 'string' && typeof e.pubkey === 'string' && typeof e.created_at === 'number' &&
-    typeof e.kind === 'number' && Array.isArray(e.tags) && typeof e.content === 'string' && typeof e.sig === 'string'
 }
 
 export function bytesToHex(bytes: Uint8Array): string {

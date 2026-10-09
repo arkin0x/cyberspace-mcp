@@ -118,6 +118,14 @@ export class ChainKeeper {
     return changed
   }
 
+  /** Forget events this server signed that the relays' chain has overruled (a fork or an ended chain): they are never published. */
+  dropLocal(ids: Set<string>): void {
+    if (ids.size === 0) return
+    this.events = this.events.filter((e) => !ids.has(e.id))
+    for (const id of ids) delete this.published[id]
+    this.save()
+  }
+
   /** Record an event this server signed, before it is sent anywhere. */
   record(event: NostrEvent, status: PublishStatus = 'queued'): void {
     if (!this.events.some((e) => e.id === event.id)) this.events.push(event)

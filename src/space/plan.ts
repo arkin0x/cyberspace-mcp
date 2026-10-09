@@ -55,7 +55,7 @@ export type AxisMove =
  * sidestep across when standing on the leaf touching it, else whatever
  * brings us toward that leaf.
  */
-export function nextAxisMove(current: bigint, target: bigint, ceiling: number): AxisMove {
+function nextAxisMove(current: bigint, target: bigint, ceiling: number): AxisMove {
   if (current === target) return { kind: 'none' }
   const h = findLcaHeight(current, target)
   if (h <= ceiling) return { kind: 'hop', to: target, height: h }

@@ -31,7 +31,7 @@ const REFUSAL = new RegExp(`^(${REFUSAL_PREFIXES.join('|')}):`, 'i')
 export const PARTIAL_CHAIN_REASON = 'the relays returned only part of this chain'
 
 /** True when a close reason is a relay's own refusal rather than a dropped connection. */
-export function isRefusal(reason: string): boolean {
+function isRefusal(reason: string): boolean {
   return REFUSAL.test(reason.trim())
 }
 

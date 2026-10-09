@@ -15,10 +15,22 @@ import { describePlace, distanceBetween, distanceWords, placeOf, sameCube, type 
 import type { HeldKey, OpenedBag } from './space/regionKeys.js'
 import { sectorsApart } from './presence.js'
 
+/** The agent's own chain, as every report states it. */
+export interface ChainFacts {
+  status: ChainStatus
+  headId: string | null
+  /** Seconds since the head was signed. */
+  headAge: number | null
+  /** Why the chain cannot be extended, when it cannot. */
+  words: string | null
+  /** The chain rules this server implements (spec 8.12). */
+  rules: string
+}
+
 export interface LookInput {
   me: { pubkey: string; npub: string; name: string | null }
   place: Place
-  chain: { status: ChainStatus; headId: string | null; headAge: number | null; words: string | null }
+  chain: ChainFacts
   keys: HeldKey[]
   bags: OpenedBag[]
   people: Person[]

@@ -28,9 +28,8 @@ import { readProfile, type ReadProfile } from './profile.js'
 import { placeFromHex, type Place, type Position } from './space/coords.js'
 
 /** Newest actions fetched when a neighborhood is entered. */
-export const BACKFILL_LIMIT = 500
-/** Most tag filters the cyberspace relay (strfry) accepts in one filter. */
-export const MAX_TAG_FILTERS = 3
+const BACKFILL_LIMIT = 500
+// strfry accepts at most three tag filters in one filter, so the filter below names the three axis tags and nothing else.
 
 export interface Person {
   pubkey: string

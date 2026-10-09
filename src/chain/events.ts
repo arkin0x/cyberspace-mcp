@@ -148,7 +148,7 @@ function carriesSpawn(ev: NostrEvent): boolean {
 }
 
 /** The fork rule, as a fork's break says it (spec 8.7.3 rule 4). */
-export const FORK_RULE_WORDS = 'A chain may only ever have one next action after each event, so a fork ends the whole chain, whichever branch came first or is valid, and the identity stands at its spawn coordinate (spec 8.7.3 rule 4)'
+const FORK_RULE_WORDS = 'A chain may only ever have one next action after each event, so a fork ends the whole chain, whichever branch came first or is valid, and the identity stands at its spawn coordinate (spec 8.7.3 rule 4)'
 
 const countWord = (n: number): string => ['no', 'one', 'two', 'three', 'four', 'five'][n] ?? String(n)
 
@@ -493,7 +493,7 @@ function standingAt(entry: ActionEvent, at: Placed): ActionEvent {
 }
 
 /** Two different coordinates, each cut to the stretch where they differ. */
-export function shownApart(a: string, b: string): [string, string] {
+function shownApart(a: string, b: string): [string, string] {
   let d = 0
   while (d < a.length && a[d] === b[d]) d++
   const start = Math.min(d, Math.max(0, a.length - 8))
@@ -646,18 +646,13 @@ export function chainGap(events: NostrEvent[], spawnId: string): { until: number
   return gap ? { until: gap.createdAt, missingId: gap.previousId } : null
 }
 
-/** Where a chain currently puts its identity, and what the next action names as its previous. */
-export function chainHead(chain: ActionEvent[]): ActionEvent | null {
-  return chain.length ? chain[chain.length - 1] : null
-}
-
 /**
  * The action that rules looking back from index `at` see (spec 8.9 rule 4,
  * 8.11.4 rule 8): the nearest recognized action before it, with skipped and
  * broken events passed over and a closed bracket standing for the action
  * before its enter-virtual.
  */
-export function lookBack(chain: ActionEvent[], at: number): ActionEvent | null {
+function lookBack(chain: ActionEvent[], at: number): ActionEvent | null {
   let j = Math.min(at, chain.length) - 1
   while (j >= 0) {
     const a = chain[j]

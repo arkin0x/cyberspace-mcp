@@ -19,7 +19,7 @@ export const SCAN_MAX_HEIGHT = 12
 /** The hard cap on what the core computes for a key, matching cyberspace-core's DEFAULT_MAX_COMPUTE_HEIGHT. */
 export const MAX_COMPUTE_HEIGHT = 20
 /** How many keys and opened bags are kept; the least recently used go first. */
-export const KEYS_KEPT = 4000
+const KEYS_KEPT = 4000
 
 export type KeySource = 'scan' | 'hop' | 'hide' | 'find' | 'hint'
 
@@ -49,6 +49,21 @@ export interface EntrySummary {
   byReference?: boolean
   /** A shard's bounds in gibsons at its unit, and its vertex and face counts. */
   shard?: { unit: number; vertices: number; faces: number; extent: number; mode: string }
+  /** A key item: its public half and sentence. The secret is held in keys/items.json and never reported. */
+  key?: { itemPubkey: string; about: string }
+  /** A chest: whether this server could open it, and what it holds when it could. */
+  chest?: { lock: string; requires: string; opened: boolean; openedWith?: 'own key' | 'held item'; contents?: Array<{ type: HiddenType; label: string; author: string; verified: boolean }> }
+}
+
+/** A key item this server has found and therefore holds (B1 2.1): reading it is holding it. */
+export interface HeldItem {
+  itemPubkey: string
+  secretHex: string
+  name: string
+  about: string
+  /** The bag it was found in. */
+  foundIn: string
+  at: number
 }
 
 export interface OpenedBag {
@@ -69,11 +84,13 @@ export interface OpenedBag {
 
 interface KeysFile { version: 1; keys: HeldKey[] }
 interface BagsFile { version: 1; bags: OpenedBag[] }
+interface ItemsFile { version: 1; items: HeldItem[] }
 
 const KEYS_FILE = 'keys/regions.json'
 const BAGS_FILE = 'keys/bags.json'
+const ITEMS_FILE = 'keys/items.json'
 
-export function alignedBaseOf(p: Position, height: number): { x: string; y: string; z: string } {
+function alignedBaseOf(p: Position, height: number): { x: string; y: string; z: string } {
   const h = BigInt(height)
   return { x: ((p.x >> h) << h).toString(), y: ((p.y >> h) << h).toString(), z: ((p.z >> h) << h).toString() }
 }
@@ -81,12 +98,27 @@ export function alignedBaseOf(p: Position, height: number): { x: string; y: stri
 export class KeyStore {
   readonly keys = new Map<string, HeldKey>()
   readonly bags = new Map<string, OpenedBag>()
+  /** Key items found, by their public half. */
+  readonly items = new Map<string, HeldItem>()
 
   constructor(private readonly dir: StateDir) {
     const keys = dir.readJson<KeysFile | null>(KEYS_FILE, null)
     if (keys?.version === 1) for (const k of keys.keys) this.keys.set(k.lookupId, k)
     const bags = dir.readJson<BagsFile | null>(BAGS_FILE, null)
     if (bags?.version === 1) for (const b of bags.bags) this.bags.set(b.lookupId, b)
+    const items = dir.readJson<ItemsFile | null>(ITEMS_FILE, null)
+    if (items?.version === 1) for (const i of items.items) this.items.set(i.itemPubkey, i)
+  }
+
+  /** Hold a key item that was found: from now on a chest sealed to it opens. */
+  holdItem(item: HeldItem): void {
+    this.items.set(item.itemPubkey, item)
+    this.dir.writeJson(ITEMS_FILE, { version: 1, items: [...this.items.values()] } satisfies ItemsFile)
+  }
+
+  /** The held items as a chest opener needs them. */
+  heldItems(): Array<{ itemPubkey: string; secretHex: string }> {
+    return [...this.items.values()].map((i) => ({ itemPubkey: i.itemPubkey, secretHex: i.secretHex }))
   }
 
   private save(): void {

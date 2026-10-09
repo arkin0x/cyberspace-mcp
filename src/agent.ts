@@ -10,37 +10,43 @@
 // flight; a spawn is signed only when the relays have said there is no chain,
 // or when the human allowed a respawn; every event comes from a builder;
 // every price is quoted and checked against the caps before work is spent;
-// the chat rules are the chat room's; a relay's refusal is returned verbatim.
+// the chat rules are the chat room's; a relay's refusal is returned verbatim;
+// an outbox event no relay has taken is sent only when the relays show the
+// chain is clear of it, and dropped when they show a fork.
 
 import { randomBytes } from 'node:crypto'
-import { computeHopProof, computeSidestepProof, deriveRegionKeys, encodeNonce, encodeOpenings, type Plane } from 'cyberspace-core'
+import { computeHopProof, computeSidestepProof, encodeNonce, encodeOpenings, type Plane } from 'cyberspace-core'
 import { nip19 } from 'nostr-tools'
+import type { Filter } from 'nostr-tools/filter'
 import { finalizeEvent, getPublicKey } from 'nostr-tools/pure'
+import { normalizeURL } from 'nostr-tools/utils'
 import type { ShardModel } from 'sno-core/shards'
 import { Budget } from './budget.js'
-import { chainTemplateProblem, hopTemplate, sidestepTemplate, spawnTemplate } from './chain/builder.js'
+import { ACTION_KIND, chainTemplateProblem, hopTemplate, sidestepTemplate, spawnTemplate } from './chain/builder.js'
 import { findDivergence } from './chain/divergence.js'
+import { CHAIN_RULES_REVISION, newestSpawn, type ActionEvent } from './chain/events.js'
 import { Holders } from './chain/holders.js'
 import { ChainKeeper } from './chain/keeper.js'
-import { fetchChainEvents, parsePubkey } from './chain/resolve.js'
-import { causeWords } from './chain/selfCheck.js'
+import { askChainEvents, parsePubkey } from './chain/resolve.js'
+import { causeWords, decideSelfCheck } from './chain/selfCheck.js'
 import { Chat, type ChatLine } from './chat.js'
 import {
-  HIDDEN_KIND, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, bagEntries, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference, keyInnerTemplate,
-  messageInnerTemplate, messagePreview, objectTemplate, referenceCount, referenceTo, shardInnerTemplate, unbag, wantsReference, entryKey,
+  HIDDEN_KIND, MAX_ITEM_NAME, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, REFERENCE_THRESHOLD_BYTES, bagEntries, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
+  keyInnerTemplate, messageInnerTemplate, messagePreview, objectTemplate, referenceCount, referenceTo, shardInnerTemplate, unbag, wantsReference, entryKey,
   type BagEntry, type Hidden, type Reference,
 } from './hidden/bags.js'
-import { forgeKey, sealEntries } from './hidden/chests.js'
+import { forgeKey, openWithSecret, openerFor, readContents, requiresLabel, sealEntries } from './hidden/chests.js'
 import { hintFits, hintTags, parseHint, hintCandidatesExponent, type HintHeights } from './hidden/hint.js'
-import { lookReport } from './look.js'
+import { lookReport, type ChainFacts } from './look.js'
 import { bytesToHex, hexToBytes, nowSeconds, signEvent, tagValue, type EventTemplate, type NostrEvent } from './nostr/event.js'
-import { Outbox } from './nostr/outbox.js'
-import { Relays, normalizeRelay, type PublishResult } from './nostr/relays.js'
+import { Outbox, type GuardVerdict } from './nostr/outbox.js'
+import { mergeAnswers } from './nostr/relayOutcome.js'
+import { DEFAULT_RELAY, Relays, normalizeRelay, type PublishResult } from './nostr/relays.js'
 import { Presence, neighborhoodFilter, sectorsApart, type Person } from './presence.js'
 import { profileTemplate, type ProfileFields } from './profile.js'
 import { validateSnoPayload } from './sno.js'
 import { hopCeiling, loadOrMeasure, projectCantorMs, type Calibration } from './space/calibration.js'
-import { describePlace, distanceBetween, parseCoordinate, placeFromHex, placeOf, spawnPlace, type CoordinateInput, type Place } from './space/coords.js'
+import { describePlace, distanceBetween, parseCoordinate, placeOf, spawnPlace, type CoordinateInput, type Place } from './space/coords.js'
 import { planSummary, priceNextStep, type Ceilings, type PricedStep } from './space/plan.js'
 import { KeyStore, MAX_COMPUTE_HEIGHT, SCAN_MAX_HEIGHT, type EntrySummary, type HeldKey, type OpenedBag } from './space/regionKeys.js'
 import { StateDir } from './state/dir.js'
@@ -72,10 +78,10 @@ export interface ToolResult {
   data: Record<string, unknown>
 }
 
-/** The highest cube a key is derived for on request (hide, find): a key at h16 is about a second. */
+/** The highest cube a key is derived for on request (hide, find, look): a key at h16 is about a second. */
 export const MAX_KEY_HEIGHT = 16
 /** The most candidate regions a hinted sweep will try. */
-export const MAX_SWEEP_CANDIDATES = 1 << 16
+const MAX_SWEEP_CANDIDATES = 1 << 16
 
 interface ProfileFile {
   content: string
@@ -85,11 +91,16 @@ interface ProfileFile {
   refused: Record<string, string>
 }
 
-type Contents =
+export type Contents =
   | { message: string }
   | { object: unknown }
   | { key: { name: string; about?: string } }
   | { chest: { name: string; lock: string; requires?: string; entries: Array<{ message: string } | { object: unknown }> } }
+
+export interface HintInput {
+  coordinate: CoordinateInput
+  heights: [number, number, number]
+}
 
 export class Agent {
   readonly pubkey: string
@@ -132,12 +143,18 @@ export class Agent {
           this.holders.note(accepted)
         }
       },
+      guard: (event) => this.guardChainEvent(event),
     })
     this.keys = new KeyStore(dir)
     this.budget = new Budget(config.capCallSeconds, config.capSessionSeconds)
     this.chat = new Chat(dir, this.relays, this.keys, { pubkey: this.pubkey, name: () => this.name, sign: (t) => this.sign(t), log: this.log })
     this.presence = new Presence(this.relays, this.pubkey, this.log)
     this.presence.on('arrival', () => this.chat.arrival())
+  }
+
+  /** Whether the chain's truth is being read from a relay other than the default canonical one. */
+  get nonDefaultCanonical(): boolean {
+    return this.relays.canonical !== normalizeURL(DEFAULT_RELAY)
   }
 
   /**
@@ -158,6 +175,9 @@ export class Agent {
         log(measured ? `calibrated: hop ceiling h${hopCeiling(c.cantorMsByHeight)}, ${Math.round(c.sha256PerSec / 1000)}k SHA-256/s` : 'calibration loaded from the state directory')
       }
       const agent = new Agent(config, dir, sk, release, calibration)
+      if (agent.nonDefaultCanonical) {
+        log(`WARNING: the canonical relay is ${agent.relays.canonical}, not the default ${DEFAULT_RELAY}. The chain's truth (which spawn is newest, where the head is) is read from there. A spawn signed because that relay shows no chain would end a chain this identity has on the default relay. Use this only for a relay that really holds this identity's chain.`)
+      }
       await agent.boot()
       return agent
     } catch (err) {
@@ -167,34 +187,59 @@ export class Agent {
   }
 
   private async boot(): Promise<void> {
-    // What a crash left signed and unsent goes out first, unless it would fork the chain.
-    const { sent, dropped } = await this.outbox.replay(async (event) => this.wouldFork(event))
-    if (sent.length || dropped.length) this.log(`outbox replay: ${sent.length} sent, ${dropped.length} dropped`)
+    // What a crash left signed and unsent goes out first, when the relays show the chain is clear of it.
+    const { sent, dropped, waiting } = await this.outbox.replay()
+    if (sent.length || dropped.length || waiting.length) this.log(`outbox replay: ${sent.length} sent, ${dropped.length} dropped, ${waiting.length} waiting for the relays`)
     for (const d of dropped) this.log(`dropped ${d.event.id.slice(0, 8)}: ${d.dropped}`)
     this.settle()
   }
 
-  /** Why a chain event the outbox holds must not be published: it would fork the chain against moves the relays already hold. */
-  private async wouldFork(event: NostrEvent): Promise<string | null> {
-    if (!this.keeper.events.some((e) => e.id === event.id)) return null
-    let relayEvents: NostrEvent[]
+  /**
+   * Whether an event the outbox holds may be sent (the guard of H1): a
+   * non-chain event always; a chain event only when the relays answered and
+   * showed neither a fork at its point nor a chain started by another spawn.
+   * Clear needs the canonical relay's own answer; any other answer can only
+   * drop the event, never clear it.
+   */
+  private async guardChainEvent(event: NostrEvent): Promise<GuardVerdict> {
+    if (event.kind !== ACTION_KIND) return { verdict: 'clear' }
+    if (!this.keeper.events.some((e) => e.id === event.id)) return { verdict: 'fork', reason: 'this event is no longer on the chain this server keeps' }
+    let answers
     try {
-      relayEvents = await fetchChainEvents(this.relays, this.pubkey, this.keeper.genesisId(), this.keeper.events)
-    } catch {
-      return null
+      answers = await askChainEvents(this.relays, this.holders, this.pubkey, this.keeper.genesisId(), this.keeper.events)
+    } catch (err) {
+      return { verdict: 'unknown', reason: `the relays could not be asked: ${err instanceof Error ? err.message : String(err)}` }
+    }
+    const verdict = decideSelfCheck(answers, this.relays.canonical)
+    if (verdict.status === 'unknown') return { verdict: 'unknown', reason: `cannot tell whether another device moved from the same point: ${causeWords(verdict.cause)}` }
+    const relayEvents = mergeAnswers(answers)
+    const ours = newestSpawn(this.keeper.events, this.pubkey)
+    const theirs = newestSpawn(relayEvents, this.pubkey)
+    if (ours && theirs && theirs.id !== ours.id) {
+      // The relays' chain starts from another spawn: ours is history, or would end theirs.
+      const unpublished = new Set(this.keeper.events.filter((e) => this.keeper.published[e.id] !== 'ok').map((e) => e.id))
+      this.keeper.dropLocal(unpublished)
+      this.keeper.adopt(relayEvents)
+      const theirsNewer = theirs.created_at > ours.created_at || (theirs.created_at === ours.created_at && theirs.id > ours.id)
+      return {
+        verdict: 'fork',
+        reason: theirsNewer
+          ? `the relays hold a newer spawn (${theirs.id.slice(0, 8)}...), so this event belongs to a chain that has ended; the relays' chain was adopted`
+          : `the relays hold a chain started by another spawn (${theirs.id.slice(0, 8)}...), and publishing this would end it; a spawn is never signed over a human's chain without the human, so the relays' chain was adopted`,
+      }
     }
     const div = findDivergence(this.keeper.events, this.keeper.published, relayEvents)
-    if (!div) {
+    if (div && div.local.some((a) => a.id === event.id)) {
+      this.keeper.dropLocal(new Set(div.local.map((a) => a.id)))
       this.keeper.adopt(relayEvents)
-      return null
+      return { verdict: 'fork', reason: `another device published ${div.relay.length} move${div.relay.length === 1 ? '' : 's'} from the same point (event ${div.forkId.slice(0, 8)}...) while this one was unsent; publishing it would fork the chain and kill it, so it was dropped and the relays' version adopted` }
     }
-    // The relays' version wins: this server's unpublished moves after the fork point are gone.
-    const gone = new Set(div.local.map((a) => a.id))
-    if (!gone.has(event.id)) return null
-    this.keeper.events = this.keeper.events.filter((e) => !gone.has(e.id))
-    for (const id of gone) delete this.keeper.published[id]
+    const canonical = answers.find((a) => a.url === this.relays.canonical)
+    if (canonical?.outcome !== 'answered') {
+      return { verdict: 'unknown', reason: `the canonical relay did not answer (${canonical ? canonical.reason : 'not asked'}); another relay showed no fork, but only the canonical relay's answer can say nothing newer was published there` }
+    }
     this.keeper.adopt(relayEvents)
-    return `another device published ${div.relay.length} move${div.relay.length === 1 ? '' : 's'} from the same point (event ${div.forkId.slice(0, 8)}...) while this one was unsent; publishing it would fork the chain and kill it, so it was dropped and the relays' version adopted`
+    return { verdict: 'clear' }
   }
 
   private sign(template: EventTemplate): NostrEvent {
@@ -223,9 +268,33 @@ export class Agent {
     this.settle()
   }
 
-  private chainSummary(now: number): { status: string; headId: string | null; headAge: number | null; words: string | null } {
+  private chainFacts(now: number): ChainFacts {
     const head = this.keeper.head()
-    return { status: this.keeper.status(), headId: head?.id ?? null, headAge: head ? Math.max(0, now - head.createdAt) : null, words: this.keeper.breakWords() }
+    return { status: this.keeper.status(), headId: head?.id ?? null, headAge: head ? Math.max(0, now - head.createdAt) : null, words: this.keeper.breakWords(), rules: CHAIN_RULES_REVISION }
+  }
+
+  // ---- the price of keys (M3) ----------------------------------------------
+
+  /** The seconds deriving keys at these heights costs here: nothing up to the passive scan height, about three Cantor trees per height above it. */
+  private keysSeconds(heights: number[]): number {
+    let ms = 0
+    for (const h of heights) if (h > SCAN_MAX_HEIGHT) ms += 3 * projectCantorMs(this.calibration.cantorMsByHeight, h)
+    return ms / 1000
+  }
+
+  /** Why deriving these keys would break a cap, or null. */
+  private keysRefusal(heights: number[]): string | null {
+    const seconds = this.keysSeconds(heights)
+    return seconds > 0 ? this.budget.refusal(seconds) : null
+  }
+
+  /** Derive keys through `derive`, timing it, and spend the time when any height is above the passive scan. */
+  private deriveKeys<T>(heights: number[], derive: () => T): { result: T; ms: number } {
+    const t0 = performance.now()
+    const result = derive()
+    const ms = performance.now() - t0
+    if (heights.some((h) => h > SCAN_MAX_HEIGHT)) this.budget.spendWork(ms / 1000)
+    return { result, ms }
   }
 
   // ---- identity -------------------------------------------------------------
@@ -254,17 +323,18 @@ export class Agent {
     await this.refreshChain()
     const now = nowSeconds()
     const spawn = spawnPlace(this.pubkey)
-    const chain = this.chainSummary(now)
+    const chain = this.chainFacts(now)
     const text = [
       `You are ${this.npub} (hex ${this.pubkey}).`,
       `Your spawn coordinate is ${describePlace(spawn).hex} in ${describePlace(spawn).planeName}, sector ${describePlace(spawn).sector}.`,
-      `Chain: ${chain.status}${chain.headId ? `, head ${chain.headId.slice(0, 8)}... from ${chain.headAge} s ago` : ' (no spawn yet; your first hop will spawn you)'}.${chain.words ? ` ${chain.words}` : ''}`,
+      `Chain: ${chain.status}${chain.headId ? `, head ${chain.headId.slice(0, 8)}... from ${chain.headAge} s ago` : ' (no spawn yet; your first hop will spawn you)'}.${chain.words ? ` ${chain.words}` : ''} Chain rules: ${CHAIN_RULES_REVISION}.`,
       publish.status === 'unchanged' ? 'Profile: unchanged since it was last accepted; not republished.'
         : publish.status === 'published' ? `Profile published (bot: true${operator ? `, operator ${nip19.npubEncode(operator)}` : ''}) to ${publish.accepted.join(', ')}${Object.keys(publish.refused).length ? `; refused by ${Object.entries(publish.refused).map(([u, r]) => `${u} (${r})`).join(', ')}` : ''}.`
         : `Profile NOT published: ${publish.reason}${Object.keys(publish.refused).length ? `. Each relay said: ${Object.entries(publish.refused).map(([u, r]) => `${u}: ${r}`).join('; ')}` : ''}. The relay's words are verbatim; this server will not retry a refusal. Give the agent a relay of its own with --relay for its profile.`,
       operator ? '' : 'No operator was given: pass --operator <npub> at startup or `operator` to this tool so the profile names your human.',
+      this.nonDefaultCanonical ? `WARNING: the chain's truth is being read from ${this.relays.canonical}, not the default canonical relay ${DEFAULT_RELAY}. A spawn signed because this relay shows no chain could derezz a chain this identity has elsewhere.` : '',
     ].filter(Boolean).join('\n')
-    return { text, data: { npub: this.npub, pubkey: this.pubkey, spawn: describePlace(spawn), chain, profile: publish, operator: operator ? { hex: operator, npub: nip19.npubEncode(operator) } : null } }
+    return { text, data: { npub: this.npub, pubkey: this.pubkey, spawn: describePlace(spawn), chain, profile: publish, operator: operator ? { hex: operator, npub: nip19.npubEncode(operator) } : null, canonical: this.relays.canonical, nonDefaultCanonical: this.nonDefaultCanonical } }
   }
 
   // ---- whereami -------------------------------------------------------------
@@ -273,7 +343,7 @@ export class Agent {
     await this.refreshChain()
     const now = nowSeconds()
     const place = this.keeper.place()
-    const chain = this.chainSummary(now)
+    const chain = this.chainFacts(now)
     const where = describePlace(place)
     const text = `You stand at ${where.hex}: ${where.planeName}, sector ${where.sector}, x ${where.x} y ${where.y} z ${where.z}. Chain ${chain.status}${chain.headId ? `, head ${chain.headId.slice(0, 8)}... signed ${chain.headAge} s ago` : ', no spawn yet: this is your spawn coordinate'}.${chain.words ? ` ${chain.words}` : ''}`
     return { text, data: { where, chain, secondsSinceHead: chain.headAge } }
@@ -287,21 +357,23 @@ export class Agent {
     const blind: string[] = []
     if (input.radius_sectors !== undefined && input.radius_sectors !== 1) blind.push(`v0 sees exactly the 27 sectors around you (radius 1); a radius of ${input.radius_sectors} is not available.`)
     const heights = (input.heights ?? []).filter((h) => Number.isInteger(h) && h >= 1 && h <= MAX_KEY_HEIGHT)
-    for (const h of heights) this.keys.keyAt(place.position, h, 'scan')
+    const priced = this.keysRefusal(heights)
+    if (priced) throw new Refusal(priced)
+    const { ms: keyMs } = this.deriveKeys(heights, () => { for (const h of heights) this.keys.keyAt(place.position, h, 'scan') })
     await this.presence.refresh()
     await this.presence.fetchProfiles()
     await this.presence.verdicts(12)
     const people = this.presence.others().filter((p) => sectorsApart(p.place.position, place.position) <= 1n)
     const unchecked = people.filter((p) => p.verdictAt !== p.actionId).length
     if (unchecked > 0) blind.push(`${unchecked} of the people here have chains this server has not read yet; their position is where their newest action says.`)
-    blind.push(`Bags sealed to cubes above h${Math.max(SCAN_MAX_HEIGHT, ...heights)} here: no key held for them. Pass heights to look, or use find.`)
+    blind.push(`Bags sealed to cubes above h${Math.max(SCAN_MAX_HEIGHT, ...heights)} here: no key held for them. Pass heights to look (priced above h${SCAN_MAX_HEIGHT}), or use find.`)
     blind.push('Chat said before this server started listening: the relay keeps none of it.')
     blind.push('Proofs are not re-verified: chain status follows the link and tag rules.')
     if (this.presence.loading) blind.push('The presence backfill has not finished; more people may appear.')
     const report = lookReport({
       me: { pubkey: this.pubkey, npub: this.npub, name: this.name },
       place,
-      chain: this.chainSummary(nowSeconds()) as never,
+      chain: this.chainFacts(nowSeconds()),
       keys: this.keys.keysContaining(place.position),
       bags: this.keys.bagsContaining(place.position),
       people,
@@ -311,7 +383,7 @@ export class Agent {
       blind,
       scanHeight: SCAN_MAX_HEIGHT,
     }, nowSeconds())
-    return { text: report.text, data: report.data }
+    return { text: report.text, data: { ...report.data, keyMs: Math.round(keyMs) } }
   }
 
   // ---- plan_hop and hop -----------------------------------------------------
@@ -360,10 +432,7 @@ export class Agent {
     if (route) return route
     if (step.aboveSidestepCap) return `The next step is a sidestep across an h${step.maxHeight} wall, above the configured cap of h${this.config.maxSidestepHeight}. Nobody can hop a wall that high on this machine; its price would be about ${step.seconds > 3600 ? `${(step.seconds / 3600).toFixed(1)} hours` : `${step.seconds.toFixed(0)} s`} of hashing. Pick a nearer target, or ask your human to raise --max-sidestep-height.`
     if (!step.feasible) return `The next step (${step.kind}, h${step.maxHeight}) is above what this machine computes (hop ceiling h${this.ceilings().hop}).`
-    const budget = this.budget.refusal(step.seconds, cap)
-    if (budget) return budget
-    if (target.plane !== step.to.plane && step.to.hex !== target.hex) return null
-    return null
+    return this.budget.refusal(step.seconds, cap)
   }
 
   async planHop(input: { target: CoordinateInput }): Promise<ToolResult> {
@@ -442,31 +511,11 @@ export class Agent {
     if (this.keeper.status() !== 'valid') throw new Refusal(this.keeper.breakWords() ?? 'The chain is not valid.')
 
     const chain = this.keeper.chain()
-    const genesisId = chain[0].id
     const head = chain[chain.length - 1]
-    const to = step.to
     const t0 = performance.now()
-    let template: EventTemplate
-    if (step.kind === 'hop') {
-      const proof = computeHopProof(head.position.x, head.position.y, head.position.z, to.position.x, to.position.y, to.position.z, to.plane, head.id, this.ceilings().hop)
-      template = hopTemplate({ createdAt: nowSeconds(), genesisId, previousId: head.id, prevCoordHex: head.coordHex, to: to.position, plane: to.plane, proofHash: proof.proofHash })
-      // The region the hop crossed, when it is one cube: its key opens whatever is hidden there.
-      if (step.heights.x === step.heights.y && step.heights.y === step.heights.z && step.maxHeight >= 1) {
-        const keys = deriveRegionKeys(proof.regionN)
-        this.keys.keyAt(to.position, step.maxHeight, 'hop')
-        if (!this.keys.byLookupId(keys.lookupIdHex)) this.log('note: the hop region key differs from the cube key at that height; kept the cube key')
-      }
-    } else {
-      const proof = computeSidestepProof(head.position.x, head.position.y, head.position.z, to.position.x, to.position.y, to.position.z, to.plane, head.id)
-      template = sidestepTemplate({
-        createdAt: nowSeconds(), genesisId, previousId: head.id, prevCoordHex: head.coordHex, to: to.position, plane: to.plane, proofHash: proof.proofHash,
-        merkleRoots: [bytesToHex(proof.merkleX), bytesToHex(proof.merkleY), bytesToHex(proof.merkleZ)],
-        openings: [encodeOpenings(proof.openings.x), encodeOpenings(proof.openings.y), encodeOpenings(proof.openings.z)],
-        mnHex: encodeNonce(proof.nonce), lcaHeights: proof.lcaHeights,
-      })
-    }
+    const template = this.prove(step, head, chain[0].id)
     const seconds = (performance.now() - t0) / 1000
-    this.budget.spend(seconds)
+    this.budget.spendMove(seconds)
 
     // Confirm again, immediately before the signature: the machine was busy, and another device may have moved.
     const again = await this.keeper.confirmHead()
@@ -481,6 +530,26 @@ export class Agent {
     const result = await this.outbox.send(entry)
     this.settle()
     return this.moveResult(event, seconds, step.work, notes, target, result, step)
+  }
+
+  /**
+   * The proof of one step, as the template it goes out as: the hop proof or
+   * the sidestep proof from cyberspace-core, bound to the head's id. The
+   * caller confirms the head before and after, because this is the work.
+   */
+  private prove(step: PricedStep, head: ActionEvent, genesisId: string): EventTemplate {
+    const to = step.to
+    if (step.kind === 'hop') {
+      const proof = computeHopProof(head.position.x, head.position.y, head.position.z, to.position.x, to.position.y, to.position.z, to.plane, head.id, this.ceilings().hop)
+      return hopTemplate({ createdAt: nowSeconds(), genesisId, previousId: head.id, prevCoordHex: head.coordHex, to: to.position, plane: to.plane, proofHash: proof.proofHash })
+    }
+    const proof = computeSidestepProof(head.position.x, head.position.y, head.position.z, to.position.x, to.position.y, to.position.z, to.plane, head.id)
+    return sidestepTemplate({
+      createdAt: nowSeconds(), genesisId, previousId: head.id, prevCoordHex: head.coordHex, to: to.position, plane: to.plane, proofHash: proof.proofHash,
+      merkleRoots: [bytesToHex(proof.merkleX), bytesToHex(proof.merkleY), bytesToHex(proof.merkleZ)],
+      openings: [encodeOpenings(proof.openings.x), encodeOpenings(proof.openings.y), encodeOpenings(proof.openings.z)],
+      mnHex: encodeNonce(proof.nonce), lcaHeights: proof.lcaHeights,
+    })
   }
 
   /** Sign and publish a spawn (spec 8.3). Exempt from head confirmation: a spawn is never a link. */
@@ -508,7 +577,7 @@ export class Agent {
     const text = [
       ...notes,
       `${action === 'spawn' ? 'Spawn' : action === 'hop' ? 'Hop' : 'Sidestep'} ${event.id.slice(0, 8)}... signed${step ? ` (h${step.maxHeight}, ${seconds.toFixed(2)} s of work)` : ''}; you now stand at ${where.hex} (${where.planeName}, sector ${where.sector}).`,
-      accepted.length ? `Accepted by ${accepted.join(', ')}${accepted.includes(this.relays.canonical) ? '' : '; the canonical relay has not taken it yet and will be retried in the background (see outbox)'}.` : `No relay has taken it yet${result && !result.ok ? ` (${result.reason})` : ''}; it waits in the outbox and is retried.`,
+      accepted.length ? `Accepted by ${accepted.join(', ')}${accepted.includes(this.relays.canonical) ? '' : '; the canonical relay has not taken it yet and will be retried in the background (see outbox)'}.` : `No relay has taken it yet${result && !result.ok ? ` (${result.reason})` : ''}; it waits in the outbox and is retried once the relays show the chain is clear of it.`,
       Object.keys(refused).length ? `Refused by ${Object.entries(refused).map(([u, r]) => `${u}: ${r}`).join('; ')}.` : '',
       place.hex === target.hex ? 'You are on the target.' : `The target is ${rest.steps} step(s) further (${rest.hops} hop(s), ${rest.sidesteps} sidestep(s), tallest wall h${rest.tallestWall}); call hop again to continue.`,
     ].filter(Boolean).join('\n')
@@ -556,17 +625,12 @@ export class Agent {
     const timeout = Math.min(Math.max(1, input.timeout_seconds), 3600)
     const place = this.keeper.place()
     this.chat.enter(place)
-    await this.presence.enter(place.position)
     const wantPubkey = input.arrival?.pubkey ? parsePubkey(input.arrival.pubkey) : null
     if (input.arrival?.pubkey && !wantPubkey) throw new Refusal('arrival.pubkey must be an npub or a 64-hex pubkey.')
     const within = BigInt(Math.min(Math.max(0, input.arrival?.within_sectors ?? 1), 1))
     const matchesPerson = (p: Person): boolean => (wantPubkey ? p.pubkey === wantPubkey : true) && sectorsApart(p.place.position, place.position) <= within
-    // Already here counts as arrived.
-    if (input.arrival) {
-      const present = this.presence.others().find(matchesPerson)
-      if (present) return { text: `${present.pubkey.slice(0, 12)}... is already here (${sectorsApart(present.place.position, place.position)} sector(s) away).`, data: { happened: 'arrival', already: true, person: { pubkey: present.pubkey, place: describePlace(present.place) } } }
-    }
     const startedAt = nowSeconds()
+    // The listeners are attached before anything is awaited, so a line said the moment this was called is heard.
     return new Promise<ToolResult>((resolve) => {
       let done = false
       const finish = (r: ToolResult): void => {
@@ -587,13 +651,21 @@ export class Agent {
         if (input.chat.addressed && !l.addressed) return
         finish({ text: `Heard ${l.addressed ? 'a line addressed to you' : 'a line'} from ${l.from.slice(0, 12)}... after ${nowSeconds() - startedAt} s (untrusted): "${l.text}" (id ${l.id.slice(0, 8)}...).`, data: { happened: 'chat', line: this.lineRow(l) } })
       }
-      const onAbort = (): void => finish({ text: 'Cancelled.', data: { happened: 'cancelled' } })
+      const onAbort = (): void => finish({ text: 'Canceled.', data: { happened: 'canceled' } })
       const timer = setTimeout(() => finish({ text: `Timed out after ${timeout} s: nothing happened.`, data: { happened: 'timeout', waitedSeconds: timeout } }), timeout * 1000)
       this.presence.on('arrival', onArrival)
       this.chat.on('line', onLine)
       signal?.addEventListener('abort', onAbort, { once: true })
-      // A fresh look at the neighborhood, in case the live subscription missed something.
-      void this.relays.query({ ...neighborhoodFilter(place.position), since: startedAt - 60 }).then((events) => { for (const ev of events) this.presence.ingest(ev) }).catch(() => {})
+      // Then the neighborhood: someone already here counts as arrived, and a fresh look catches what the live subscription missed.
+      void this.presence.enter(place.position).then(async () => {
+        if (done) return
+        if (input.arrival) {
+          const present = this.presence.others().find(matchesPerson)
+          if (present) { finish({ text: `${present.pubkey.slice(0, 12)}... is already here (${sectorsApart(present.place.position, place.position)} sector(s) away).`, data: { happened: 'arrival', already: true, person: { pubkey: present.pubkey, place: describePlace(present.place) } } }); return }
+        }
+        const events = await this.relays.query({ ...neighborhoodFilter(place.position), since: startedAt - 60 }).catch(() => [])
+        for (const ev of events) this.presence.ingest(ev)
+      }).catch(() => {})
     })
   }
 
@@ -613,14 +685,43 @@ export class Agent {
     }
   }
 
-  private summarize(h: Hidden): EntrySummary {
+  /** What an opened item is for the report: labels only, never a secret. A key found is held; a chest sealed to the agent or to a held key is opened. */
+  private summarize(h: Hidden, foundIn: string): EntrySummary {
     const label = h.type === 'message' ? messagePreview(h.text ?? '', 80) : h.type === 'shard' ? (h.shard?.name ?? 'shard') : h.type === 'key' ? (h.key?.name ?? 'key') : (h.chest?.name ?? 'chest')
-    return {
+    const summary: EntrySummary = {
       type: h.type, eventId: h.eventId, author: h.inner.pubkey, at: { x: h.at.x.toString(), y: h.at.y.toString(), z: h.at.z.toString() }, plane: h.plane, createdAt: h.createdAt, label,
       ...(h.type === 'message' && /\bcashu[AB][A-Za-z0-9_-]+/.test(h.text ?? '') ? { coin: true } : {}),
       ...(h.ref ? { byReference: true } : {}),
       ...(h.shard ? { shard: { unit: h.shard.unit, vertices: h.shard.vertices.length, faces: h.shard.faces.length, extent: h.shard.extent, mode: h.shard.mode } } : {}),
     }
+    if (h.key) {
+      this.keys.holdItem({ itemPubkey: h.key.itemPubkey, secretHex: h.key.secretHex, name: h.key.name, about: h.key.about, foundIn, at: nowSeconds() })
+      summary.key = { itemPubkey: h.key.itemPubkey, about: h.key.about }
+    }
+    if (h.chest) {
+      const opener = openerFor(h.chest, this.keys.heldItems(), this.pubkey)
+      if (!opener) {
+        summary.chest = { lock: h.chest.lockPubkey, requires: requiresLabel(h.chest), opened: false }
+      } else {
+        try {
+          const secret = opener.by === 'key' ? opener.key.secretHex : bytesToHex(this.sk)
+          const contents = readContents(openWithSecret(h.chest, secret))
+          summary.chest = {
+            lock: h.chest.lockPubkey, requires: requiresLabel(h.chest), opened: true, openedWith: opener.by === 'key' ? 'held item' : 'own key',
+            contents: contents.map((c) => ({
+              type: c.body.type,
+              label: c.body.type === 'message' ? messagePreview(c.body.text ?? '', 80) : c.body.type === 'shard' ? (c.body.shard?.name ?? 'shard') : c.body.type === 'key' ? (c.body.key?.name ?? 'key') : (c.body.chest?.name ?? 'chest'),
+              author: c.event.pubkey, verified: c.verified,
+            })),
+          }
+          for (const c of contents) if (c.body.key) this.keys.holdItem({ itemPubkey: c.body.key.itemPubkey, secretHex: c.body.key.secretHex, name: c.body.key.name, about: c.body.key.about, foundIn, at: nowSeconds() })
+        } catch (err) {
+          summary.chest = { lock: h.chest.lockPubkey, requires: requiresLabel(h.chest), opened: false }
+          this.log(`chest ${h.eventId.slice(0, 8)} did not open: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      }
+    }
+    return summary
   }
 
   /** Fetch the bags whose lookup ids are these, open each with its key, and note what was found. */
@@ -647,7 +748,7 @@ export class Agent {
         const settings = bagSettingsOf(ev, key.height)
         const bag: OpenedBag = {
           lookupId: key.lookupId, bagId: ev.id, author: ev.pubkey, createdAt: ev.created_at, height: key.height, base: key.base,
-          entries: items.map((h) => this.summarize(h)), missing: refs - resolved, riddle: settings.riddle, hint: settings.hint, at: nowSeconds(),
+          entries: items.map((h) => this.summarize(h, key.lookupId)), missing: refs - resolved, riddle: settings.riddle, hint: settings.hint, at: nowSeconds(),
         }
         this.keys.noteBag(bag)
         bags.push(bag)
@@ -663,19 +764,25 @@ export class Agent {
       for (const e of b.entries) {
         const at = placeOf({ x: BigInt(e.at.x), y: BigInt(e.at.y), z: BigInt(e.at.z) }, e.plane)
         const same = at.hex === here.hex ? 'right here' : `at x ${e.at.x} y ${e.at.y} z ${e.at.z}`
-        out.push(`  ${e.type}${e.coin ? ' (coins)' : ''}${e.byReference ? ' [by reference]' : ''} by ${e.author.slice(0, 8)}... ${same}: "${e.label}"`)
+        let more = ''
+        if (e.key) more = ` (held now; public half ${e.key.itemPubkey.slice(0, 8)}...${e.key.about ? `; "${e.key.about}"` : ''})`
+        if (e.chest) more = e.chest.opened
+          ? ` (opened with your ${e.chest.openedWith}: ${e.chest.contents!.length} item(s): ${e.chest.contents!.map((c) => `${c.type} "${c.label}"${c.verified ? '' : ' (unsigned)'}`).join(', ')})`
+          : ` (sealed to ${e.chest.lock.slice(0, 8)}...; needs ${e.chest.requires})`
+        out.push(`  ${e.type}${e.coin ? ' (coins)' : ''}${e.byReference ? ' [by reference]' : ''} by ${e.author.slice(0, 8)}... ${same}: "${e.label}"${more}`)
       }
     }
     return out
   }
 
-  async find(input: { hint?: { coordinate: CoordinateInput; heights: [number, number, number] }; max_height?: number } = {}): Promise<ToolResult> {
+  async find(input: { hint?: HintInput; max_height?: number } = {}): Promise<ToolResult> {
     const here = this.keeper.place()
     if (!input.hint) {
       const cap = Math.min(MAX_KEY_HEIGHT, Math.max(1, Math.floor(input.max_height ?? SCAN_MAX_HEIGHT)))
-      const t0 = performance.now()
-      const keys = this.keys.scanAround(here.position, cap, 'find')
-      const keyMs = performance.now() - t0
+      const heights = Array.from({ length: cap }, (_, i) => i + 1)
+      const priced = this.keysRefusal(heights)
+      if (priced) throw new Refusal(priced)
+      const { result: keys, ms: keyMs } = this.deriveKeys(heights, () => this.keys.scanAround(here.position, cap, 'find'))
       const { bags, unreadable } = await this.openBags(new Map(keys.map((k) => [k.lookupId, k])), here.plane)
       const text = bags.length === 0
         ? `Nothing hidden in the cubes of height 1 to ${cap} around you (${keys.length} keys, ${keyMs.toFixed(0)} ms).${unreadable.length ? ` Found but could not read: ${unreadable.join('; ')}.` : ''}`
@@ -687,13 +794,13 @@ export class Agent {
     const heights = input.hint.heights
     if (!Array.isArray(heights) || heights.length !== 3 || !heights.every((h) => Number.isInteger(h) && h >= 0 && h <= 85)) throw new Refusal('hint.heights must be three integers from 0 to 85.')
     const point = this.target(input.hint.coordinate, here)
-    const tags = hintTags(point.position, point.plane, heights as HintHeights)
+    const tags = hintTags(point.position, point.plane, heights)
     const hintTag = tags[0]
     const sectorTagsOfHint = tags.slice(1).filter((t) => t[0] !== 'S')
-    const filter: Record<string, unknown> = { kinds: [HIDDEN_KIND] }
-    if (sectorTagsOfHint.length > 0) for (const [k, v] of sectorTagsOfHint) filter[`#${k}`] = [v]
+    const filter: Filter = { kinds: [HIDDEN_KIND] }
+    if (sectorTagsOfHint.length > 0) for (const [k, v] of sectorTagsOfHint) filter[`#${k}` as `#${string}`] = [v]
     else filter.limit = 500
-    const candidates = (await this.relays.query(filter as never)).filter((ev) => {
+    const candidates = (await this.relays.query(filter)).filter((ev) => {
       const h = heightHint(ev)
       const read = parseHint(ev.tags, h ?? 1)
       return read && read.heights.join(',') === heights.join(',') && tagValue(ev, 'hint') === hintTag[1]
@@ -723,8 +830,7 @@ export class Agent {
           }
         }
       }
-      const sweepSeconds = (performance.now() - t0) / 1000
-      this.budget.spend(sweepSeconds)
+      this.budget.spendWork((performance.now() - t0) / 1000)
       if (!match) { unreadable.push(`bag ${ev.id.slice(0, 8)}... by ${ev.pubkey.slice(0, 8)}...: no region in the hinted box has its lookup id; the hint is a claim, and this one is false`); continue }
       const opened = await this.openBags(new Map([[match.lookupId, match]]), point.plane)
       found.push(...opened.bags)
@@ -771,7 +877,7 @@ export class Agent {
       return { entries: [this.sign(shardInnerTemplate(shard, at.position, at.plane, now))], what: `an object (${shard.vertices.length} vertices, inline)` }
     }
     if ('key' in contents) {
-      const key = forgeKey(String(contents.key.name ?? 'key').slice(0, 64), contents.key.about ?? '')
+      const key = forgeKey(String(contents.key.name ?? 'key').slice(0, MAX_ITEM_NAME), contents.key.about ?? '')
       return { entries: [this.sign(keyInnerTemplate(key, at.position, at.plane, now))], what: `a key item "${key.name}" (public half ${key.itemPubkey.slice(0, 8)}...)` }
     }
     if ('chest' in contents) {
@@ -785,25 +891,19 @@ export class Agent {
       if (inner.length === 0) throw new Refusal('A chest needs at least one entry: a message or an object.')
       let sealed
       try { sealed = sealEntries(inner, lock) } catch (err) { throw new Refusal(err instanceof Error ? err.message : String(err)) }
-      const chest = { name: String(contents.chest.name ?? 'chest').slice(0, 64), lockPubkey: lock, senderPubkey: sealed.senderPubkey, requires: contents.chest.requires ?? '', payload: sealed.payload }
+      const chest = { name: String(contents.chest.name ?? 'chest').slice(0, MAX_ITEM_NAME), lockPubkey: lock, senderPubkey: sealed.senderPubkey, requires: (contents.chest.requires ?? '').slice(0, MAX_ITEM_NAME), payload: sealed.payload }
       return { entries: [this.sign(chestInnerTemplate(chest, at.position, at.plane, now))], what: `a chest "${chest.name}" sealed to ${lock.slice(0, 8)}... with ${inner.length} entr${inner.length === 1 ? 'y' : 'ies'}` }
     }
     throw new Refusal('contents must be one of: { message }, { object }, { key: { name } }, { chest: { name, lock, entries } }.')
   }
 
-  async hide(input: { contents: Contents; coordinate: CoordinateInput; height: number; hint_heights?: [number, number, number]; riddle?: string }): Promise<ToolResult> {
-    const here = this.keeper.place()
-    const at = this.target(input.coordinate, here)
-    const height = input.height
+  /** The agent's bag in the cube of `height` at `at`, read before it is written, with the key priced and spent. */
+  private async bagAt(at: Place, height: number): Promise<{ key: HeldKey; keyMs: number; regionKey: Uint8Array; current: NostrEvent | null; carried: BagEntry[] }> {
     if (!Number.isInteger(height) || height < 1 || height > MAX_KEY_HEIGHT) throw new Refusal(`height must be an integer from 1 to ${MAX_KEY_HEIGHT} (a bag's region is at least height 1, spec 7.6; above h${MAX_KEY_HEIGHT} a key costs more than a second).`)
-    const keyRefusal = this.budget.refusal(3 * projectCantorMs(this.calibration.cantorMsByHeight, height) / 1000)
-    if (keyRefusal) throw new Refusal(keyRefusal)
-    const t0 = performance.now()
-    const key = this.keys.keyAt(at.position, height, 'hide')
-    const keyMs = performance.now() - t0
+    const priced = this.keysRefusal([height])
+    if (priced) throw new Refusal(priced)
+    const { result: key, ms: keyMs } = this.deriveKeys([height], () => this.keys.keyAt(at.position, height, 'hide'))
     const regionKey = hexToBytes(key.keyHex)
-    const now = nowSeconds()
-
     // One bag per author per region: read before write, never replace.
     const current = await this.currentBag(key.lookupId)
     let carried: BagEntry[] = []
@@ -814,6 +914,15 @@ export class Agent {
         if (!opens) throw new Refusal(`You already have a bag in that cube (${current.id.slice(0, 8)}...) and it does not open with the key derived now, so replacing it would destroy what is there. Nothing was published.`)
       }
     }
+    return { key, keyMs, regionKey, current, carried }
+  }
+
+  async hide(input: { contents: Contents; coordinate: CoordinateInput; height: number; hint_heights?: [number, number, number]; riddle?: string }): Promise<ToolResult> {
+    const here = this.keeper.place()
+    const at = this.target(input.coordinate, here)
+    const { key, keyMs, regionKey, current, carried } = await this.bagAt(at, input.height)
+    const height = input.height
+    const now = nowSeconds()
     const { entries, what, objectEvent } = await this.entriesFor(input.contents, at, regionKey, now)
     const have = new Set(carried.map(entryKey))
     const merged = [...carried, ...entries.filter((e) => !have.has(entryKey(e)))]
@@ -830,7 +939,7 @@ export class Agent {
     const refs = merged.filter(isReference).length
     const summary: OpenedBag = {
       lookupId: key.lookupId, bagId: bag.id, author: this.pubkey, createdAt, height, base: key.base,
-      entries: opened.map((h) => this.summarize(h)), missing: refs - opened.filter((h) => h.ref).length, riddle, hint, at: now,
+      entries: opened.map((h) => this.summarize(h, key.lookupId)), missing: refs - opened.filter((h) => h.ref).length, riddle, hint, at: now,
     }
     this.keys.noteBag(summary)
     const accepted = entry.accepted
@@ -879,12 +988,8 @@ export class Agent {
 
   /** Hide a reference entry in the agent's bag at a cube: the same read-before-write as hide. */
   private async hideReference(ref: Reference, at: Place, height: number, what: string): Promise<ToolResult> {
-    if (!Number.isInteger(height) || height < 1 || height > MAX_KEY_HEIGHT) throw new Refusal(`height must be an integer from 1 to ${MAX_KEY_HEIGHT}.`)
-    const key = this.keys.keyAt(at.position, height, 'hide')
-    const regionKey = hexToBytes(key.keyHex)
+    const { key, keyMs, regionKey, current, carried } = await this.bagAt(at, height)
     const now = nowSeconds()
-    const current = await this.currentBag(key.lookupId)
-    const carried = current ? await bagEntries(current, regionKey) : []
     const have = new Set(carried.map(entryKey))
     const merged = have.has(entryKey(ref)) ? carried : [...carried, ref]
     const settings = current ? bagSettingsOf(current, height) : { heightTag: true, hint: null, riddle: '' }
@@ -893,9 +998,9 @@ export class Agent {
     const entry = this.outbox.add(bag)
     const result = await this.outbox.send(entry)
     const opened = await unbag(bag, regionKey, (r) => this.resolveReference(r), { at: at.position, plane: at.plane }, height)
-    this.keys.noteBag({ lookupId: key.lookupId, bagId: bag.id, author: this.pubkey, createdAt, height, base: key.base, entries: opened.map((h) => this.summarize(h)), missing: merged.filter(isReference).length - opened.filter((h) => h.ref).length, riddle: settings.riddle, hint: settings.hint, at: now })
-    const text = `Placed ${what} in the h${height} cube at base x ${key.base.x} y ${key.base.y} z ${key.base.z}; bag ${bag.id.slice(0, 8)}... holds ${merged.length} entr${merged.length === 1 ? 'y' : 'ies'}. ${entry.accepted.length ? `Accepted by ${entry.accepted.join(', ')}.` : `No relay accepted it${result.ok ? '' : `: ${result.reason}`}.`}${entry.refused ? ` Refused by ${Object.entries(entry.refused).map(([u, r]) => `${u}: ${r}`).join('; ')}.` : ''}`
-    return { text, data: { bagId: bag.id, lookupId: key.lookupId, cube: { height, base: key.base, plane: at.plane }, entries: merged.length, accepted: entry.accepted, refused: entry.refused ?? {} } }
+    this.keys.noteBag({ lookupId: key.lookupId, bagId: bag.id, author: this.pubkey, createdAt, height, base: key.base, entries: opened.map((h) => this.summarize(h, key.lookupId)), missing: merged.filter(isReference).length - opened.filter((h) => h.ref).length, riddle: settings.riddle, hint: settings.hint, at: now })
+    const text = `Placed ${what} in the h${height} cube at base x ${key.base.x} y ${key.base.y} z ${key.base.z}; bag ${bag.id.slice(0, 8)}... holds ${merged.length} entr${merged.length === 1 ? 'y' : 'ies'}. Key cost ${keyMs.toFixed(0)} ms. ${entry.accepted.length ? `Accepted by ${entry.accepted.join(', ')}.` : `No relay accepted it${result.ok ? '' : `: ${result.reason}`}.`}${entry.refused ? ` Refused by ${Object.entries(entry.refused).map(([u, r]) => `${u}: ${r}`).join('; ')}.` : ''}`
+    return { text, data: { bagId: bag.id, lookupId: key.lookupId, cube: { height, base: key.base, plane: at.plane }, entries: merged.length, keyMs: Math.round(keyMs), accepted: entry.accepted, refused: entry.refused ?? {} } }
   }
 
   // ---- validate_object, budget, outbox -------------------------------------
@@ -903,16 +1008,17 @@ export class Agent {
   validateObject(input: { payload: unknown }): ToolResult {
     const v = validateSnoPayload(input.payload)
     if (!v.ok) return { text: `Not valid: ${v.errors.join(' ')}`, data: { valid: false, errors: v.errors } }
+    const byReference = v.bytes > REFERENCE_THRESHOLD_BYTES
     return {
-      text: `Valid SNO: "${v.shard.name}", ${v.vertices} vertices, ${v.faces} faces, mode ${v.shard.mode}, unit 2^${v.shard.unit} gibsons, ${v.bytes} bytes on the wire${v.bytes > 16_384 ? ' (large: it would be hidden by reference)' : ' (small: it would be carried inline)'}.`,
-      data: { valid: true, name: v.shard.name, vertices: v.vertices, faces: v.faces, mode: v.shard.mode, unit: v.shard.unit, bytes: v.bytes, byReference: v.bytes > 16_384 },
+      text: `Valid SNO: "${v.shard.name}", ${v.vertices} vertices, ${v.faces} faces, mode ${v.shard.mode}, unit 2^${v.shard.unit} gibsons, ${v.bytes} bytes on the wire${byReference ? ' (large: it would be hidden by reference)' : ' (small: it would be carried inline)'}.`,
+      data: { valid: true, name: v.shard.name, vertices: v.vertices, faces: v.faces, mode: v.shard.mode, unit: v.shard.unit, bytes: v.bytes, byReference },
     }
   }
 
   budgetState(): ToolResult {
     const b = this.budget.state()
     return {
-      text: `Work: ${b.remainingSessionSeconds.toFixed(1)} s left of ${b.capSessionSeconds} s this session, at most ${b.capCallSeconds} s per call; ${b.spentSeconds.toFixed(1)} s spent over ${b.moves} move(s). Chat: ${b.chatLinesSaid} line(s) said, ${this.chat.unpromptedAllowance} unprompted line(s) allowed before the next arrival, one line per 5 s, 500 characters. Sidestep cap h${this.config.maxSidestepHeight}; hop ceiling h${this.ceilings().hop} on this machine.`,
+      text: `Work: ${b.remainingSessionSeconds.toFixed(1)} s left of ${b.capSessionSeconds} s this session, at most ${b.capCallSeconds} s per call; ${b.spentSeconds.toFixed(1)} s spent over ${b.moves} move(s) and the keys derived above h${SCAN_MAX_HEIGHT}. Chat: ${b.chatLinesSaid} line(s) said, ${this.chat.unpromptedAllowance} unprompted line(s) allowed before the next arrival, one line per 5 s, 500 characters. Sidestep cap h${this.config.maxSidestepHeight}; hop ceiling h${this.ceilings().hop} on this machine.`,
       data: { ...b, unpromptedAllowance: this.chat.unpromptedAllowance, ceilings: this.ceilings(), maxSidestepHeight: this.config.maxSidestepHeight },
     }
   }
@@ -921,9 +1027,9 @@ export class Agent {
     const s = this.outbox.state()
     const row = (e: typeof s.pending[number]): Record<string, unknown> => ({ id: e.event.id, kind: e.event.kind, action: tagValue(e.event, 'A') ?? null, signedAt: e.signedAt, accepted: e.accepted, refused: e.refused ?? {}, attempts: e.attempts, lastError: e.lastError ?? null, dropped: e.dropped ?? null })
     const text = [
-      s.pending.length ? `${s.pending.length} event(s) not yet on the canonical relay (${this.relays.canonical})${s.nextRetryMs !== null ? `, next retry in about ${Math.round(s.nextRetryMs / 1000)} s` : ''}:\n${s.pending.map((e) => `  ${e.event.id.slice(0, 8)}... kind ${e.event.kind}${tagValue(e.event, 'A') ? ` ${tagValue(e.event, 'A')}` : ''}, accepted by ${e.accepted.length ? e.accepted.join(', ') : 'nobody yet'}, ${e.attempts} attempt(s)${e.lastError ? `, last error: ${e.lastError}` : ''}`).join('\n')}` : 'Nothing pending: every signed event is on the canonical relay or was refused.',
+      s.pending.length ? `${s.pending.length} event(s) not yet on the canonical relay (${this.relays.canonical})${s.nextRetryMs !== null ? `, next retry in about ${Math.round(s.nextRetryMs / 1000)} s` : ''}:\n${s.pending.map((e) => `  ${e.event.id.slice(0, 8)}... kind ${e.event.kind}${tagValue(e.event, 'A') ? ` ${tagValue(e.event, 'A')}` : ''}, accepted by ${e.accepted.length ? e.accepted.join(', ') : 'nobody yet'}, ${e.attempts} attempt(s)${e.lastError ? `, last: ${e.lastError}` : ''}`).join('\n')}` : 'Nothing pending: every signed event is on the canonical relay or was refused.',
       s.refused.length ? `Refused (verbatim, not retried):\n${s.refused.map((e) => `  ${e.event.id.slice(0, 8)}... kind ${e.event.kind}: ${Object.entries(e.refused ?? {}).map(([u, r]) => `${u}: ${r}`).join('; ')}`).join('\n')}` : '',
-      s.dropped.length ? `Dropped at replay:\n${s.dropped.map((e) => `  ${e.event.id.slice(0, 8)}...: ${e.dropped}`).join('\n')}` : '',
+      s.dropped.length ? `Dropped:\n${s.dropped.map((e) => `  ${e.event.id.slice(0, 8)}...: ${e.dropped}`).join('\n')}` : '',
     ].filter(Boolean).join('\n')
     return { text, data: { pending: s.pending.map(row), refused: s.refused.map(row), dropped: s.dropped.map(row), nextRetryMs: s.nextRetryMs, canonical: this.relays.canonical } }
   }
@@ -944,5 +1050,3 @@ export class Agent {
     this.release()
   }
 }
-
-export { placeFromHex }

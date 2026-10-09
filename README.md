@@ -31,7 +31,7 @@ npm install
 npm run build
 ```
 
-`cyberspace-core` and `sno-core` are installed from GitHub at the exact commits ONOSENDAI pins, so the events this server builds are the events ONOSENDAI builds.
+`cyberspace-core` and `sno-core` are installed from GitHub at the exact commits ONOSENDAI pins, so the events this server builds are the events ONOSENDAI builds. Both are pinned as `git+https` URLs; npm records hosted GitHub dependencies as `git+ssh` in the lockfile by design and clones over https first, so `npm ci` needs no SSH key (ONOSENDAI's lockfile reads the same way).
 
 Then run it with a state directory. The directory is created if it does not exist; the key is created on the first run.
 
@@ -95,7 +95,7 @@ Text that comes from cyberspace (chat lines, hidden messages, riddles, object na
 | `say` | `text` (500 characters at most), optional `reply_to` (the id of a heard line) | Seals a kind 23330 chat line to the h12 cube at the live head, exactly as ONOSENDAI does, and publishes it. Enforces the rate rule (one line per five seconds) and the quiet rule (one unprompted line per arrival; a reply to a line that addressed the agent is always allowed). | sent, or refused with the rule it broke |
 | `listen` | `since` (a unix timestamp or `"last"`) | Chat lines heard in the agent's cube and its 26 neighbors since then, decrypted with the keys the server holds. | lines with speaker, bot flag where known, time, text, and whether the line addressed the agent |
 | `wait_for` | `arrival` (`pubkey`, `within_sectors`), `chat` (`addressed`), `timeout_seconds` | Blocks until someone arrives (a given pubkey, or anyone within the 27 sectors), a chat line is heard (optionally one addressed to the agent), or the timeout passes. Honors the client's cancellation. | what happened, or `timeout` |
-| `find` | none, or `hint` (`coordinate` and `heights`), optional `max_height` (default 12, at most 16) | Scans the cubes around the live head from height 1 up to the cap, derives region keys, fetches bags by lookup id, decrypts, and lists the entries: messages, objects with their bounds, coins (a Cashu token in a message), keys and chests by kind, with positions and authors. With a hint, finds the bags that carry it and sweeps the hinted box for each one's region, within the caps. | what was found, where, and what could not be read (references not retrieved, bags that did not open, hints that were false) |
+| `find` | none, or `hint` (`coordinate` and `heights`), optional `max_height` (default 12, at most 16) | Scans the cubes around the live head from height 1 up to the cap, derives region keys, fetches bags by lookup id, decrypts, and lists the entries: messages, objects with their bounds, coins (a Cashu token in a message), keys (held from then on) and chests (opened when sealed to the agent or to a key it holds, with their contents listed), with positions and authors. With a hint, finds the bags that carry it and sweeps the hinted box for each one's region, within the caps. | what was found, where, and what could not be read (references not retrieved, bags that did not open, hints that were false) |
 | `hide` | `contents`, `coordinate`, `height` (1 to 16), optional `hint_heights`, optional `riddle` (280 characters) | Derives the region key for the cube, merges with the agent's existing bag there (one bag per author per region: read before write, never replace), publishes the bag. `contents` is one of `{ "message" }` (may hold a Cashu token), `{ "object" }` (an SNO payload; large ones go by reference as a hidden kind 33331), `{ "key": { "name", "about" } }` (a fresh key item), or `{ "chest": { "name", "lock", "requires", "entries" } }` (entries sealed with NIP-44 to a pubkey). | the bag's id and the cube; the key's cost; the relays that accepted and refused |
 | `place` | `object` or `address`, `coordinate`, `height` | `validate_object`, then `hide` as an object: inline for small payloads, by reference as a hidden kind 33331 (DECK-0003 section 3.4) for large ones. With `address` (`33331:<pubkey>:<d>` or an naddr), places a published public object by reference. | as `hide` |
 | `validate_object` | `payload` | Validation against DECK-0003 section 1.9, each failure in plain words, with sno-core's `fromPayload` as the arbiter. | valid, with the size on the wire, or the errors |
@@ -110,13 +110,13 @@ Prompts: `meet`, the plan for meeting a human at a stop. In v0 it explains that 
 
 | Path | What it is |
 |---|---|
-| `key` | The agent's secret key, 64 hex characters, mode 600. Created on first run. Never printed, never exported. |
-| `lock` | The exclusive lock. A second server started on the same directory refuses to start. A lock left by a process that is no longer running is taken over. |
+| `key` | The agent's secret key, as JSON with a `generatedBy: "cyberspace-mcp"` marker, mode 600. Created on first run. Never printed, never exported. A file without the marker (an nsec, a bare hex secret) is refused: an agent never takes a human's key. |
+| `lock` | The exclusive lock, holding the pid and host of the owner. A second server started on the same directory refuses to start. A lock left on this host by a process that is no longer running is taken over; a lock from another host is never taken over, because this host cannot tell whether its owner still runs (remove it by hand when you are certain). |
 | `config.json` | Settings, as under Options. |
 | `chain.json` | The identity's chain as last resolved: every event of it, which spawn it starts from, which event is the head. |
 | `holders.json` | The relays known to hold this identity's chain: every relay that accepted one of its events or returned one. Head confirmation waits for these. |
-| `outbox.json` | Signed events not yet confirmed by the canonical relay, with their retry state. Replayed at startup. |
-| `keys/` | Region keys the server has derived (`regions.json`) and bags it has opened (`bags.json`). |
+| `outbox.json` | Signed events not yet confirmed by the canonical relay, with their retry state. Replayed at startup: an event no relay has taken yet is sent only when the relays show the chain is clear of it, dropped when they show a fork or a newer spawn, and left pending when they cannot be read. |
+| `keys/` | Region keys the server has derived (`regions.json`), bags it has opened (`bags.json`), and key items it has found and therefore holds (`items.json`). |
 | `calibration.json` | The one-time measurement of what this machine computes in a second, from which every price is quoted. Remeasured after a week or on a different machine. |
 | `chat.json` | Chat lines heard, the time of the last line said, and the quiet-rule state. |
 | `profile.json` | The last kind 0 published, so `identity` republishes only on a change. |
@@ -135,7 +135,7 @@ The rule, from the protocol (section 8.7.3): a client MUST confirm it holds the 
 
 The proof is computed between a first confirmation and a second one, so a head that moved while the machine was working is caught before the signature.
 
-Publishing counts on the first relay that answers OK. If the canonical relay was not among them, the event stays in the outbox and is retried in the background, with the retry state persisted across restarts. A relay's OK-false reason is returned to the agent verbatim, and a refusal is never retried in a loop.
+Publishing counts on the first relay that answers OK. If the canonical relay was not among them, the event stays in the outbox and is retried in the background, with the retry state persisted across restarts. A relay's OK-false reason is returned to the agent verbatim; a final refusal (`blocked`, `invalid`, `restricted`, `pow`, `mute`, `error`) is never retried, while `rate-limited` and `auth-required` are left to the outbox's backoff. An event no relay has taken yet goes out again only after the relays have been read: a fork at its point, or a chain started by another spawn, drops it; relays that cannot be read leave it pending.
 
 Chain status is decided by the chain rules that can be checked from links and tags (the newest spawn, the walk through `previous` links, the fork rule, one `A` tag, each read tag exactly once, sector tags that match the coordinate, continuity of `c` with the last `C`). Proofs are not recomputed: the server built its own proofs with cyberspace-core, and other identities' proofs are a verifier's job.
 
@@ -149,7 +149,9 @@ These are pure functions copied from ONOSENDAI (`arkin0x/onosendai-v2`, branch `
 
 | Here | From | What |
 |---|---|---|
-| `src/chain/events.ts` | `src/lib/events.ts` | The chain resolver: `parseAction`, `actionLink`, `newestSpawn`, `buildChain` with the fork rule and the frozen position, `firstBreak`, `chainGap`, `lookBack`, `sectorTags`, `positionHex` |
+| `src/chain/events.ts` | `src/lib/events.ts` | The chain resolver: `parseAction`, `actionLink`, `newestSpawn`, `buildChain` with the fork rule and the frozen position, `firstBreak`, `chainGap` |
+| `src/space/coords.ts` | `src/lib/events.ts` | `sectorTags`, `positionHex` |
+| `src/chain/builder.ts` | `src/lib/events.ts` | The spawn, hop and sidestep templates, tag for tag |
 | `src/chain/resolve.ts` | `src/lib/chains.ts` | The chain fetch and the head confirmation: `spawnsFilter`, `chainFilter`, `gatherChain`, `confirmChainEvents`, `latestByPubkey`, `mergeEvents`, `parsePubkey` |
 | `src/chain/selfCheck.ts` | `src/lib/chainHold.ts` | `decideSelfCheck` (does this identity have a chain), `refusalText`, `summarizeChain` |
 | `src/chain/holders.ts` | `src/lib/chainHolders.ts` | The relays that hold a chain, persisted |
@@ -160,7 +162,7 @@ These are pure functions copied from ONOSENDAI (`arkin0x/onosendai-v2`, branch `
 | `src/nostr/outbox.ts` | `src/lib/publisher.ts` | The canonical-relay retry with persistence |
 | `src/hidden/crypto.ts` | `src/lib/shardCrypto.ts` | AES-256-GCM sealing to a region key |
 | `src/hidden/hint.ts` | `src/lib/hint.ts` | Hint tags and sector tags for a hinted bag, `parseHint`, `searchExponent` |
-| `src/hidden/bags.ts` | `src/lib/hidden.ts` | Bag templates, items, references, `unbag`, `bagEntries`, `chatInners`, the kind 33331 object template |
+| `src/hidden/bags.ts` | `src/lib/hidden.ts` (at f9db752, the current key and chest item format) | Bag templates, items, references, `unbag`, `bagEntries`, `chatInners`, the kind 33331 object template |
 | `src/hidden/chests.ts` | `src/lib/chests.ts` | Key items and NIP-44 sealed chests (Keys and Chests B1) |
 | `src/chat.ts` | `src/store/useChat.ts`, `src/hooks/useChatFeed.ts` | The chat key choice, `neighborPositions` (the 26 cubes), `mergeLines` |
 | `src/presence.ts` | `src/store/usePresence.ts`, `src/lib/neighborChains.ts` | The 27-sector filter, `inNeighborhood`, the chain verdict for a person |
@@ -180,10 +182,10 @@ These are pure functions copied from ONOSENDAI (`arkin0x/onosendai-v2`, branch `
 
 ## Known limitations of v0
 
-- A proof is computed on the server's thread, so the server is busy for the seconds a hop takes and answers no other call meanwhile. The caps bound this.
+- A proof is computed on the server's thread, so the server is busy for the seconds a hop takes and answers no other call meanwhile. The caps bound this. Moving the proof to a worker thread is a follow-up (M5 in the review of v0).
 - `look` sees exactly the 27 sectors around the agent, and `wait_for` an arrival within them.
 - Chat said before the server started listening is gone: the relay keeps none of it.
-- Keys are derived on request up to h16 (`hide`, `find`, `look`); the passive scan reaches h12, as ONOSENDAI's does.
+- Keys are derived on request up to h16 (`hide`, `find`, `look`); the passive scan reaches h12, as ONOSENDAI's does. Every key above h12 is priced against the caps before it is derived and its time is spent from the session budget.
 - Chain status follows the link and tag rules; proofs are not recomputed.
 - Rides, stations and hyperjumps, HOSAKA, `render`, follow and roam are later steps and are not here.
 

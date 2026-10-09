@@ -27,32 +27,12 @@ import type { NostrEvent } from '../nostr/event.js'
 import { PARTIAL_CHAIN_REASON, mergeAnswers, type RelayAnswer } from '../nostr/relayOutcome.js'
 import type { Relays } from '../nostr/relays.js'
 import { ACTION_KIND } from './builder.js'
-import { RECOGNIZED_ACTIONS, actionLink, buildChain, chainGap, newestSpawn, parseAction, type ActionEvent } from './events.js'
+import { actionLink, chainGap, newestSpawn } from './events.js'
 import type { Holders } from './holders.js'
-
-/** The actions that say where an identity is, and therefore the only ones the position feeds ask for. */
-export const PLACING_ACTIONS: string[] = [...RECOGNIZED_ACTIONS]
-
-/** The newest placing action per pubkey, newest pubkey first. */
-export function latestByPubkey(events: NostrEvent[]): ActionEvent[] {
-  const best = new Map<string, ActionEvent>()
-  for (const ev of events) {
-    const a = parseAction(ev)
-    if (!a) continue
-    const cur = best.get(a.pubkey)
-    if (!cur || isNewerAction(a, cur)) best.set(a.pubkey, a)
-  }
-  return [...best.values()].sort(byNewest)
-}
 
 /** Whether `a` is a newer action than `cur`: the later created_at, and on the same second the larger id. */
 export function isNewerAction(a: { createdAt: number; id: string }, cur: { createdAt: number; id: string }): boolean {
   return a.createdAt > cur.createdAt || (a.createdAt === cur.createdAt && a.id > cur.id)
-}
-
-/** Newest first, in the same order isNewerAction picks. */
-export function byNewest(x: { createdAt: number; id: string }, y: { createdAt: number; id: string }): number {
-  return y.createdAt - x.createdAt || (x.id < y.id ? 1 : -1)
 }
 
 /** Union by id, order preserved: what was there first stays first. */
@@ -68,32 +48,32 @@ export function mergeEvents(existing: NostrEvent[], incoming: NostrEvent[]): Nos
 }
 
 /** Every spawn an identity has signed: few, and what says which chain is current (spec 8.7.3 rule 1). */
-export function spawnsFilter(pubkey: string): Filter {
+function spawnsFilter(pubkey: string): Filter {
   return { kinds: [ACTION_KIND], authors: [pubkey], '#A': ['spawn'] }
 }
 
 /** Every event of the chain a spawn starts, whatever its actions are called. */
-export function chainFilter(pubkey: string, spawnId: string, until?: number): Filter {
+function chainFilter(pubkey: string, spawnId: string, until?: number): Filter {
   return { kinds: [ACTION_KIND], authors: [pubkey], '#e': [spawnId], ...(until !== undefined ? { until } : {}) }
 }
 
 /** The id of the spawn the active chain starts from (spec 8.7.3 rule 1), or null with none. */
-export function newestSpawnId(events: NostrEvent[], pubkey?: string): string | null {
+function newestSpawnId(events: NostrEvent[], pubkey?: string): string | null {
   return newestSpawn(events, pubkey)?.id ?? null
 }
 
 /** The most extra questions one chain fetch asks to fill holes (chainGap). */
-export const MAX_CHAIN_PAGES = 60
+const MAX_CHAIN_PAGES = 60
 
 /** A chain fetch that could not fill a hole: some event of the chain is on no relay asked. */
-export class ChainGapError extends Error {
+class ChainGapError extends Error {
   constructor(readonly events: NostrEvent[]) {
     super(PARTIAL_CHAIN_REASON)
   }
 }
 
 /** One relay's answers to two questions, as one answer: `answered` only when both were answered. */
-export function combineAnswers(first: RelayAnswer[], second: RelayAnswer[]): RelayAnswer[] {
+function combineAnswers(first: RelayAnswer[], second: RelayAnswer[]): RelayAnswer[] {
   const byUrl = new Map(second.map((a) => [a.url, a]))
   const out = first.map((a): RelayAnswer => {
     const b = byUrl.get(a.url)
@@ -107,12 +87,12 @@ export function combineAnswers(first: RelayAnswer[], second: RelayAnswer[]): Rel
 }
 
 /** Every answered relay marked as not having said what the chain is (PARTIAL_CHAIN_REASON). */
-export function markPartial(answers: RelayAnswer[]): RelayAnswer[] {
+function markPartial(answers: RelayAnswer[]): RelayAnswer[] {
   return answers.map((a): RelayAnswer => (a.outcome === 'answered' ? { url: a.url, outcome: 'unreachable', reason: PARTIAL_CHAIN_REASON, events: a.events } : a))
 }
 
 /** Only the events `pubkey` signed. */
-export function ownEvents(events: NostrEvent[], pubkey: string): NostrEvent[] {
+function ownEvents(events: NostrEvent[], pubkey: string): NostrEvent[] {
   return events.every((e) => e.pubkey === pubkey) ? events : events.filter((e) => e.pubkey === pubkey)
 }
 
@@ -178,7 +158,7 @@ export async function fetchChainEvents(relays: Relays, pubkey: string, knownSpaw
 }
 
 /** How long the own-chain check waits for each relay's real answer, per question. */
-export const CHAIN_CHECK_MS = 6000
+const CHAIN_CHECK_MS = 6000
 
 /**
  * The same question, with each relay's answer kept: answered, refused or
@@ -258,7 +238,7 @@ export async function confirmChainEvents(
 }
 
 /** Whether `events` hold a move past `have`: an action naming one of its events as previous, or a newer spawn. */
-export function extendsChain(events: NostrEvent[], have: NostrEvent[]): boolean {
+function extendsChain(events: NostrEvent[], have: NostrEvent[]): boolean {
   const ids = new Set(have.map((e) => e.id))
   const spawnAt = newestSpawn(have)?.created_at ?? -Infinity
   return events.some((e) => {
@@ -267,11 +247,6 @@ export function extendsChain(events: NostrEvent[], have: NostrEvent[]): boolean 
     if (link) return ids.has(link.previousId)
     return e.tags.some((t) => t[0] === 'A' && t[1] === 'spawn') && e.created_at > spawnAt
   })
-}
-
-/** The chain, assembled. */
-export async function fetchChain(relays: Relays, pubkey: string): Promise<ActionEvent[]> {
-  return buildChain(await fetchChainEvents(relays, pubkey), pubkey)
 }
 
 /** Accepts an npub, an nprofile (its relay hints dropped) or 64-char hex; returns hex, or null when it is none of them. */

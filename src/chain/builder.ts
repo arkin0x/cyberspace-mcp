@@ -139,7 +139,7 @@ export function chainTemplateProblem(t: EventTemplate, pubkey: string): string |
     if (n !== 1) return `${key} appears ${n} times; every tag the chain rules read appears exactly once`
   }
   for (const tag of t.tags) {
-    if (READ_TAGS[name].includes(tag[0]) && (tag[1] === undefined || tag[1] === '') && tag[0] !== 'mp') return `${tag[0]} has no value`
+    if (READ_TAGS[name].includes(tag[0]) && (tag[1] === undefined || tag[1] === '')) return `${tag[0]} has no value`
   }
   const C = t.tags.find((x) => x[0] === 'C')![1]
   if (!HEX_64.test(C)) return 'C is not a 32-byte lowercase hex coordinate'

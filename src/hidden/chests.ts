@@ -25,14 +25,10 @@ export function forgeKey(name: string, about = ''): KeyItem {
 }
 
 /** NIP-44 v2 seals at most this many bytes of plaintext. */
-export const NIP44_MAX_PLAINTEXT = 65_535
-
-export function plaintextBytes(entries: BagEntry[]): number {
-  return new TextEncoder().encode(JSON.stringify(entries)).length
-}
+const NIP44_MAX_PLAINTEXT = 65_535
 
 /** Why a list of this many bytes cannot be sealed, in words, or null when it fits. */
-export function sizeRefusal(bytes: number): string | null {
+function sizeRefusal(bytes: number): string | null {
   if (bytes <= NIP44_MAX_PLAINTEXT) return null
   return `Too large to seal: ${bytes} of ${NIP44_MAX_PLAINTEXT} bytes. Take something out.`
 }
@@ -55,7 +51,7 @@ export function sealEntries(entries: BagEntry[], lockPubkey: string): Sealed {
 }
 
 /** The entries a decrypted chest holds. Anything that is not a list is a chest this server cannot read. */
-export function parseChestPlaintext(plaintext: string): BagEntry[] {
+function parseChestPlaintext(plaintext: string): BagEntry[] {
   let parsed: unknown
   try { parsed = JSON.parse(plaintext) } catch { throw new Error('This chest holds something this server cannot read.') }
   if (!Array.isArray(parsed)) throw new Error('This chest holds something this server cannot read.')

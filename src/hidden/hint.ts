@@ -19,14 +19,12 @@ import { positionHex, type Position } from '../space/coords.js'
 /** Bits per axis (spec 2.1); a hint height of 85 leaves that axis open. */
 export const AXIS_BITS = 85
 /** A sector is 2^30 gibsons on a side (spec 10). */
-export const SECTOR_HEIGHT = 30
+const SECTOR_HEIGHT = 30
 /** One height per axis, X, Y, Z. */
 export type HintHeights = [number, number, number]
-/** The sector hint: heights of 30 on all three axes name exactly one sector (spec 7.7). */
-export const SECTOR_HINT: HintHeights = [SECTOR_HEIGHT, SECTOR_HEIGHT, SECTOR_HEIGHT]
 
 /** The base of the aligned run of 2^height values that contains v (spec 4.5, 7.7). */
-export function alignedBase(v: bigint, height: number): bigint {
+function alignedBase(v: bigint, height: number): bigint {
   const h = BigInt(height)
   return (v >> h) << h
 }
@@ -34,11 +32,6 @@ export function alignedBase(v: bigint, height: number): bigint {
 /** Whether these heights are a legal hint for a bag at `bagHeight`: each in [bagHeight, 85] (spec 7.7). */
 export function hintFits(heights: HintHeights, bagHeight: number): boolean {
   return heights.every((h) => Number.isInteger(h) && h >= bagHeight && h <= AXIS_BITS)
-}
-
-/** Whether these heights are the sector hint. */
-export function isSectorHint(heights: HintHeights | null): boolean {
-  return !!heights && heights.every((h) => h === SECTOR_HEIGHT)
 }
 
 /**
@@ -90,16 +83,6 @@ export function parseHint(tags: string[][], bagHeight: number): HintBox | null {
     if (h === AXIS_BITS ? v !== 0n : alignedBase(v, h) !== v) return null
   }
   return { base, plane, heights }
-}
-
-/** Whether a tag is one a hint writes: the hint itself or a sector tag. */
-export function isHintTag(t: string[]): boolean {
-  return t[0] === 'hint' || t[0] === 'X' || t[0] === 'Y' || t[0] === 'Z' || t[0] === 'S'
-}
-
-/** How many regions of height h a box of height boxHeight on every axis holds, as a power of two. */
-export function searchExponent(h: number, boxHeight: number): number {
-  return 3 * Math.max(0, boxHeight - h)
 }
 
 /** The candidates a hinted box holds for a bag at height h: 2^(sum over axes of H - h) (spec 7.7). */
