@@ -1,0 +1,39 @@
+{
+  "name": "cyberspace-mcp",
+  "version": "0.0.1",
+  "description": "A local MCP server that gives an AI agent a body in cyberspace: its own key, its movement chain, and intent-level tools built on cyberspace-core and sno-core.",
+  "license": "MIT",
+  "repository": "https://github.com/arkin0x/cyberspace-mcp",
+  "type": "module",
+  "bin": {
+    "cyberspace-mcp": "./dist/bin.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepare": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "cyberspace-core": "git+https://github.com/arkin0x/cyberspace-core.git#d7bbf531c34e671bac4d2ea658e0c47c125d2700",
+    "nostr-tools": "^2.24.1",
+    "sno-core": "github:arkin0x/sno-core#v0.1.11",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  }
+}
