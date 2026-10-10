@@ -9,14 +9,10 @@
 // server's per-call cap on the first sync of a cold state directory.
 //
 // Fixtures (test/hyperspace/fixtures):
-// - headers-0-6143.bin: records 0..6143 (6144 x 48 bytes) of headers-000.bin
-//   at arkin0x/nth branch headers-v1 (blob sha256 3b1f9c41..., as its
-//   manifest states), served below as three blobs of 2048 under a manifest
-//   built here. Genesis is pinned by the embedded checkpoint at height 0, and
-//   the blob checkpoints at 2047, 4095 and 6143 are the hashes the chain's
-//   own work produces from there, so the whole run is the real chain or the
-//   tests fail. The full blob (2.4 MB) is not committed; the test at the end
-//   reads it from NTH_BLOBS_DIR when that is set.
+// - headers-0-6143.bin: the first 6144 blocks, served as three blobs of 2048
+//   under a manifest in the real format (lineFixture.ts, shared with
+//   rides.test.ts). The full blob (2.4 MB) is not committed; the test at the
+//   end reads it from NTH_BLOBS_DIR when that is set.
 // - headers-29898-36527.bin, the slice behind realRide.test.ts, fills a Line
 //   directly to pin the stop for block 29898 to the landfall arkinox's ride
 //   9c5d55cd arrived at, and his station under it.
@@ -24,89 +20,19 @@
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
 import { coordToHex, hexToCoord } from 'cyberspace-core'
 import { checkpointState, verifyAndDerive } from '../../src/hyperspace/headers.js'
 import { landfallCoord } from '../../src/hyperspace/landfall.js'
 import { Line, LineStore, safeBlobFileName } from '../../src/hyperspace/line.js'
-import { parseManifest, type HeadersManifest } from '../../src/hyperspace/manifest.js'
+import { parseManifest } from '../../src/hyperspace/manifest.js'
 import { planeOfMerkleRoot } from '../../src/hyperspace/stops.js'
 import { GENESIS_HASH } from '../../src/hyperspace/checkpoints.js'
 import type { NostrEvent } from '../../src/nostr/event.js'
+import { MANIFEST_URL, BLOB_SIZE, CHECKPOINTS, blobBytes, fakeFetch, manifestFor, servedFor, sha256Hex, type Served } from './lineFixture.js'
 
-const FIXTURE = new Uint8Array(readFileSync(new URL('./fixtures/headers-0-6143.bin', import.meta.url)))
-const BLOB_SIZE = 2048
-/** Display hashes of the last block of each 2048-block blob, derived from the real chain by the verifier. */
-const CHECKPOINTS: Record<number, string> = {
-  2047: '000000007e8127fe750bed9f48a7c1ee882bb3a36615f9966b95f64074ae3254',
-  4095: '0000000066ca066a388fea7b34b7ff1e0e6f87f97be2a1eb82ed574182664fd4',
-  6143: '00000000c5461cfb9639792f4a50d79743a419f3002a7971c47baa44ac85fe17',
-}
 /** The genesis block's merkle root (display order): a port, since its plane bit is 1. */
 const GENESIS_MERKLE = '4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b'
-const MANIFEST_URL = 'https://blobs.test/headers/manifest.json'
-
-function sha256Hex(bytes: Uint8Array): string {
-  return createHash('sha256').update(bytes).digest('hex')
-}
-
-function blobBytes(ordinal: number, count = BLOB_SIZE): Uint8Array {
-  const start = ordinal * BLOB_SIZE * 48
-  return FIXTURE.slice(start, start + count * 48)
-}
-
-/** A manifest over the first `blobs` blobs of the fixture, in the real format. */
-function manifestFor(blobs: number, overrides: Partial<Record<number, Uint8Array>> = {}): HeadersManifest {
-  const raw = {
-    formatVersion: 1,
-    network: 'mainnet',
-    blobSize: BLOB_SIZE,
-    generatedAtHeight: blobs * BLOB_SIZE - 1,
-    blobs: Array.from({ length: blobs }, (_, ordinal) => ({
-      ordinal, startHeight: ordinal * BLOB_SIZE, count: BLOB_SIZE,
-      sha256: sha256Hex(overrides[ordinal] ?? blobBytes(ordinal)), file: `headers-${String(ordinal).padStart(3, '0')}.bin`,
-    })),
-    checkpoints: Array.from({ length: blobs }, (_, ordinal) => ({ height: (ordinal + 1) * BLOB_SIZE - 1, blockHash: CHECKPOINTS[(ordinal + 1) * BLOB_SIZE - 1] })),
-  }
-  const parsed = parseManifest(raw)
-  if (!parsed) throw new Error('the test manifest is malformed')
-  return parsed
-}
-
-interface Served {
-  manifest: HeadersManifest | null
-  blobs: Partial<Record<number, Uint8Array>>
-  /** URLs fetched, in order. */
-  log: string[]
-}
-
-/** A fetch over the served manifest and blobs; anything else is a 404, a null manifest a 503. */
-function fakeFetch(served: Served): typeof globalThis.fetch {
-  return async (input, init) => {
-    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
-    if (init?.signal?.aborted) {
-      const err = new Error('aborted')
-      err.name = 'AbortError'
-      throw err
-    }
-    served.log.push(url)
-    if (url === MANIFEST_URL) {
-      if (served.manifest === null) return new Response('unavailable', { status: 503 })
-      return new Response(JSON.stringify(served.manifest), { status: 200, headers: { 'content-type': 'application/json' } })
-    }
-    const m = /headers-(\d{3})\.bin$/.exec(url)
-    const bytes = m ? served.blobs[Number(m[1])] : undefined
-    if (!bytes) return new Response('not here', { status: 404 })
-    return new Response(bytes, { status: 200 })
-  }
-}
-
-function servedFor(blobs: number): Served {
-  const out: Served = { manifest: manifestFor(blobs), blobs: {}, log: [] }
-  for (let o = 0; o < blobs; o++) out.blobs[o] = blobBytes(o)
-  return out
-}
 
 /** A clock the test advances; the store reads it for the budget and the timestamps. */
 function fakeClock(start = 1_760_000_000_000): { now: () => number; advance: (ms: number) => void; stepPerRead: number } {

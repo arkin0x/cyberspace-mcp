@@ -50,9 +50,10 @@ import { describePlace, distanceBetween, parseCoordinate, placeOf, spawnPlace, t
 import { planSummary, priceNextStep, type Ceilings, type PricedStep } from './space/plan.js'
 import { KeyStore, MAX_COMPUTE_HEIGHT, SCAN_MAX_HEIGHT, type EntrySummary, type HeldKey, type OpenedBag } from './space/regionKeys.js'
 import { StateDir } from './state/dir.js'
+import { Refusal, type ToolResult } from './tool.js'
+import { Transit } from './transit.js'
 
-/** A tool refusing, with the sentence that says why. */
-export class Refusal extends Error {}
+export { Refusal, type ToolResult } from './tool.js'
 
 export interface AgentConfig {
   stateDir: string
@@ -71,11 +72,13 @@ export interface AgentConfig {
   calibration?: Calibration
   relayMaxWaitMs?: number
   log?: (line: string) => void
-}
-
-export interface ToolResult {
-  text: string
-  data: Record<string, unknown>
+  /** The hyperspace line's manifest URL; the default is the NTH headers-v1 manifest. */
+  manifestUrl?: string
+  /** Worker threads for a ride; 0 computes on the calling thread. Default: the cores available less one. */
+  rideThreads?: number
+  /** Tests: a fetch that serves fixture blobs to the line store, and the ride runner's clock. */
+  lineFetch?: typeof globalThis.fetch
+  rideClock?: () => number
 }
 
 /** The highest cube a key is derived for on request (hide, find, look): a key at h16 is about a second. */
@@ -113,6 +116,8 @@ export class Agent {
   readonly presence: Presence
   readonly budget: Budget
   readonly holders: Holders
+  /** The hyperspace tools: the line, the ride runner, and the ride in flight. */
+  readonly transit: Transit
   calibration: Calibration
   private readonly dir: StateDir
   private readonly sk: Uint8Array
@@ -147,6 +152,10 @@ export class Agent {
     })
     this.keys = new KeyStore(dir)
     this.budget = new Budget(config.capCallSeconds, config.capSessionSeconds)
+    this.transit = new Transit(dir, {
+      pubkey: this.pubkey, keeper: this.keeper, budget: this.budget, outbox: this.outbox, canonical: this.relays.canonical,
+      calibration: () => this.calibration, sign: (t) => this.sign(t), settle: () => this.settle(), refreshChain: () => this.refreshChain(), log: this.log,
+    }, { manifestUrl: config.manifestUrl, fetch: config.lineFetch, threads: config.rideThreads, now: config.rideClock })
     this.chat = new Chat(dir, this.relays, this.keys, { pubkey: this.pubkey, name: () => this.name, sign: (t) => this.sign(t), log: this.log })
     this.presence = new Presence(this.relays, this.pubkey, this.log)
     this.presence.on('arrival', () => this.chat.arrival())
@@ -423,7 +432,7 @@ export class Agent {
     const c = this.ceilings()
     const d = distanceBetween(from, target)
     if (d.maxLca <= Math.max(c.hop, c.sidestep)) return null
-    return `The target is across an h${d.maxLca} wall (${d.chebyshev.toString()} gibsons on the widest axis), and the highest wall this server crosses is h${c.sidestep} (the sidestep cap; hops reach h${c.hop}). Nobody hops that far: a coordinate that distant is reached by hyperspace, which exits only at stops, and rides are not in this version. Meet at a stop, or pick a target within h${c.sidestep}.`
+    return `The target is across an h${d.maxLca} wall (${d.chebyshev.toString()} gibsons on the widest axis), and the highest wall this server crosses is h${c.sidestep} (the sidestep cap; hops reach h${c.hop}). Nobody hops that far: a coordinate that distant is reached by hyperspace, which exits only at stops. Ride the line to the stop nearest it (station, board, ride) and meet there, or pick a target within h${c.sidestep}.`
   }
 
   private stepRefusal(step: PricedStep | null, target: Place, cap?: number): string | null {
@@ -588,6 +597,28 @@ export class Agent {
         remainingToTarget: rest, onTarget: place.hex === target.hex, budget: this.budget.state(),
       },
     }
+  }
+
+  // ---- station, board, ride, ride_status (transit.ts) -----------------------
+
+  /** The line's state, the agent's station, the nearest stops, and a quote for a ride; with `sync`, the line is advanced first. Nothing is signed. */
+  station(input: { sync?: boolean; budget_seconds?: number; destination?: number } = {}): Promise<ToolResult> {
+    return this.transit.station(input)
+  }
+
+  /** Board the line where the agent stands: the entry proof, signed and published as an enter-hyperspace (DECK-0001 3). */
+  board(input: { as_of?: number } = {}): Promise<ToolResult> {
+    return this.transit.board(input)
+  }
+
+  /** Ride the line to a block, over as many calls as the caps need; a hyperjump is signed when the proof is done (DECK-0001 5). */
+  ride(input: { to?: number; budget_seconds?: number; as_of?: number; cancel?: boolean; forget?: boolean } = {}, signal?: AbortSignal): Promise<ToolResult> {
+    return this.transit.ride(input, signal)
+  }
+
+  /** The ride in flight, if any. */
+  rideStatus(): ToolResult {
+    return this.transit.rideStatus()
   }
 
   // ---- say, listen, wait_for ------------------------------------------------
