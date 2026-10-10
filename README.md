@@ -120,6 +120,8 @@ Prompts: `meet`, the plan for meeting a human at a stop. In v0 it explains that 
 | `calibration.json` | The one-time measurement of what this machine computes in a second, from which every price is quoted. Remeasured after a week or on a different machine. |
 | `chat.json` | Chat lines heard, the time of the last line said, and the quiet-rule state. |
 | `profile.json` | The last kind 0 published, so `identity` republishes only on a change. |
+| `line/` | The hyperspace line (`src/hyperspace/line.ts`): the NTH `headers-v1` blobs as fetched, each kept only after it verified by proof of work from genesis through the checkpoints (`headers-NNN.bin`, about 46 MB for the whole chain), the manifest they were read from (`manifest.json`), and `line.json`, which says what is verified up to which height and when the manifest was last read. The blobs are re-verified, never trusted, when a process starts; only what the manifest says is new or changed is fetched again. |
+| `rides/` | What a ride keeps between calls and restarts (`src/hyperspace/rideCache.ts`): `leaves/<previous event id>.log`, one checked line per finished leaf, keyed `<previous event id>:<height>`, and `grind.json`, where the price search of each ride resumes, keyed `<previous event id>:<root>`. A ride interrupted by a cap or a restart continues from here; a line that fails its check is dropped and its leaf recomputed. |
 
 Back the directory up if the agent's identity matters. Never copy it to a second machine and run both: that is two movers on one key, and the chain dies the first time both move.
 
@@ -168,6 +170,9 @@ These are pure functions copied from ONOSENDAI (`arkin0x/onosendai-v2`, branch `
 | `src/presence.ts` | `src/store/usePresence.ts`, `src/lib/neighborChains.ts` | The 27-sector filter, `inNeighborhood`, the chain verdict for a person |
 | `src/space/plan.ts` | `src/lib/movePlan.ts` | The route as steps: `nextAxisMove`, `wallSource`, `nextStep`, `planSummary` |
 | `src/space/calibration.ts` | `src/lib/calibration.ts`, `src/workers/calibrate.worker.ts` | The benchmark and the ceilings it recommends |
+| `src/hyperspace/manifest.ts` | `src/lib/hyperspace/headerSync.ts` (branch `v2`) | The `headers-v1` manifest: its types, the strict parser, blob URLs relative to the manifest |
+| `src/hyperspace/line.ts` | `src/workers/headers.worker.ts`, `src/lib/hyperspace/headerSync.ts`, `src/lib/hyperspace/idb.ts` (branch `v2`) | The walk over the blobs with the chain state carried blob to blob and the manifest checkpoints cross-checked against the embedded ones; the Cache API and IndexedDB become files under `line/`, the Web Worker becomes a time budget per call, and a failed blob stops the walk instead of leaving a gap |
+| `src/hyperspace/rideCache.ts`, `src/hyperspace/rideWorker.ts`, `src/hyperspace/rideRunner.ts` | `src/lib/hyperspace/ridePool.ts`, `src/workers/ride.worker.ts` (branch `v2`) | The ride pool: the pull queue of leaf chunks and nonce ranges over `worker_threads`, the leaf cache and the price-search checkpoint under `rides/`, progress with an ETA, abort; with a time budget per call, a Level 1 self-verification before any proof is returned, and a price in seconds from the calibration added |
 
 ## Implemented here because a library did not have it
 
@@ -187,7 +192,7 @@ These are pure functions copied from ONOSENDAI (`arkin0x/onosendai-v2`, branch `
 - Chat said before the server started listening is gone: the relay keeps none of it.
 - Keys are derived on request up to h16 (`hide`, `find`, `look`); the passive scan reaches h12, as ONOSENDAI's does. Every key above h12 is priced against the caps before it is derived and its time is spent from the session budget.
 - Chain status follows the link and tag rules; proofs are not recomputed.
-- Rides, stations and hyperjumps, HOSAKA, `render`, follow and roam are later steps and are not here.
+- The hyperspace library is here (`src/hyperspace/`: headers, stops, stations, rides, the line store and the ride runner), but the tools that use it (`board`, `ride`, `station`) are a later step; HOSAKA, `render`, follow and roam too.
 
 ## Development
 
@@ -197,7 +202,7 @@ npm test
 npm run build
 ```
 
-Tests run with no network: an in-memory relay (`test/fakeRelay.ts`) implements REQ, EVENT, CLOSE and AUTH at the wire level, and the real relay client runs against it through a fake WebSocket. Nothing in the tests publishes anywhere, and every key in them is generated in memory. The spawn and hop builders are checked against the spec's worked example (section 5.7) and the hint tags against the spec's golden vectors (section 7.7).
+Tests run with no network: an in-memory relay (`test/fakeRelay.ts`) implements REQ, EVENT, CLOSE and AUTH at the wire level, and the real relay client runs against it through a fake WebSocket. Nothing in the tests publishes anywhere, and every key in them is generated in memory. The line store's tests serve real mainnet headers (`test/hyperspace/fixtures/headers-0-6143.bin`, the first 6144 blocks) through an injected fetch; with `NTH_BLOBS_DIR` pointing at a directory holding `headers-000.bin` and `manifest.json` from `arkin0x/nth` branch `headers-v1`, one more test walks the real first blob (2.4 MB, not committed) and pins the stop for block 29898 to the landfall arkinox's ride 9c5d55cd arrived at. The spawn and hop builders are checked against the spec's worked example (section 5.7) and the hint tags against the spec's golden vectors (section 7.7).
 
 ## License
 
