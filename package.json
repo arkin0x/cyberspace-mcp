@@ -10,6 +10,7 @@
   },
   "files": [
     "dist",
+    "docs/agents.md",
     "README.md",
     "LICENSE"
   ],

@@ -6,6 +6,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
+import { readFileSync } from 'node:fs'
 import { z } from 'zod'
 import { Agent, MAX_KEY_HEIGHT, Refusal, type ToolResult } from './agent.js'
 
@@ -19,6 +20,21 @@ const FATAL_RULES = [
   'Mark yourself as a bot. The profile the server publishes says bot: true and names your human as operator.',
   'Quote before you pay, and never exceed your budget. plan_hop prices a move before hop spends anything; both refuse above the caps. Ask your human above them.',
 ]
+
+/**
+ * The guide as the spec repository publishes it (arkin0x/cyberspace
+ * docs/agents.md, merged 2026-10-11), carried here as docs/agents.md and
+ * read beside the build, so an agent gets the whole document from the
+ * resource. The inline rules below stand in when the file is not there (a
+ * build copied without its docs), so an agent is never without them.
+ */
+export function agentsMarkdown(): string {
+  try {
+    return readFileSync(new URL('../docs/agents.md', import.meta.url), 'utf8')
+  } catch {
+    return AGENTS_MD
+  }
+}
 
 const AGENTS_MD = `# agents.md (placeholder)
 
@@ -194,9 +210,9 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   server.registerResource('agents.md', 'cyberspace://agents.md', {
     title: 'agents.md',
-    description: 'The rules for agents in cyberspace that have no undo. A placeholder until docs/agents.md is published in the spec repository.',
+    description: 'The guide for agents in cyberspace: what an agent is, the seven rules with no undo, one key one mover, how to meet a human, the tools, the budget, the profile convention. The same text as docs/agents.md in the spec repository.',
     mimeType: 'text/markdown',
-  }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: 'text/markdown', text: AGENTS_MD }] }))
+  }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: 'text/markdown', text: agentsMarkdown() }] }))
 
   server.registerPrompt('meet', {
     title: 'Meet a human at a stop',
