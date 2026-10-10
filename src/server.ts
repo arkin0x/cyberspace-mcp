@@ -16,7 +16,7 @@ const FATAL_RULES = [
   'Before every move, confirm the live head. The tools do this; never bypass them. Signing from a stale head forks the chain, and a fork kills it.',
   'Never publish a spawn after your first, unless your human tells you to. A spawn ends your chain and sends you home. The server signs one only when the relays say you have no chain, or when the human started it with --allow-respawn.',
   'Never hand-build a kind 3333 event. Every movement event comes from the server\'s builder, which writes every tag from the rules.',
-  'Meet at stops. A random coordinate is about h85 away from any other and nobody can cross that. People meet where hyperspace exits: at a stop. Rides are not in v0, so the server refuses coordinates it cannot reach and says why.',
+  'Meet at stops. A random coordinate is about h85 away from any other and nobody can cross that. People meet where hyperspace exits: at a stop. Ride the line there (station, board, ride); the server refuses coordinates it cannot hop to and says why.',
   'Mark yourself as a bot. The profile the server publishes says bot: true and names your human as operator.',
   'Quote before you pay, and never exceed your budget. plan_hop prices a move before hop spends anything; both refuse above the caps. Ask your human above them.',
 ]
@@ -138,6 +138,43 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     annotations: { readOnlyHint: false, destructiveHint: false },
   }, async (args) => run(log, () => agent.hop(args)))
 
+  server.registerTool('station', {
+    title: 'Station',
+    description: 'The hyperspace line and your place on it, nothing signed: how far the line is verified and what remains; your station (the stop nearest you, a Bitcoin block, with its coordinate and distance) and the nearest stops; whether you are boarded or at a stop; and with destination, the quote for a ride there (blocks, expected seconds on this machine, whether it fits the caps, how many calls). With sync: true the line is verified further first, within budget_seconds (default: the per-call cap); call this until it says nothing remains before boarding.',
+    inputSchema: {
+      sync: z.boolean().optional().describe('Verify more of the line first, within the budget.'),
+      budget_seconds: z.number().positive().optional().describe('Seconds the sync may take; the per-call cap applies too.'),
+      destination: z.number().int().min(0).optional().describe('A block height to price a ride to.'),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  }, async (args) => run(log, () => agent.station(args)))
+
+  server.registerTool('board', {
+    title: 'Board the line',
+    description: 'Enter hyperspace where you stand (DECK-0001 3): confirms the live head, reserves it, computes the entry proof, confirms again, signs the enter-hyperspace, publishes and records it. You do not move. Refuses until the line is verified far enough to name your station (call station with sync: true), when you have no chain or an invalid one, when you are already on the line, and above the per-call cap. Returns the boarding\'s id and your station.',
+    inputSchema: { as_of: z.number().int().min(0).optional().describe('Name the station under this block height instead of the newest verified block. Reporting only; the first ride declares its own as_of.') },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  }, async (args) => run(log, () => agent.board(args)))
+
+  server.registerTool('ride', {
+    title: 'Ride the line',
+    description: 'Ride hyperspace to a block (DECK-0001 5), from your station on the first ride after boarding or from the stop you stand at after a ride. The first call quotes the whole ride against the session cap and reserves the head; every call computes for budget_seconds (default: the per-call cap) and returns progress until the proof is done, self-verified and signed as a hyperjump, after which you stand at the stop. Call again with the same to until it says signed. Refuses a block that is your current one, one beyond the verified line, a ride above the session cap, and a head that is not a boarding or a ride. cancel: true releases the head and keeps the work on disk; forget: true drops the work too.',
+    inputSchema: {
+      to: z.number().int().min(0).optional().describe('The block height to ride to.'),
+      budget_seconds: z.number().positive().optional().describe('Seconds this call may compute; the per-call cap applies too.'),
+      as_of: z.number().int().min(0).optional().describe('First ride after a boarding only: the station set bound to declare, at least to. Default: the newest verified block.'),
+      cancel: z.boolean().optional().describe('Release the ride in flight; its work stays on disk.'),
+      forget: z.boolean().optional().describe('Release the ride in flight and drop its work from disk.'),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  }, async (args, extra) => run(log, () => agent.ride(args, extra.signal)))
+
+  server.registerTool('ride_status', {
+    title: 'Ride status',
+    description: 'The ride in flight, if any: where from and to, its phase and leaves, the price attempts, the work spent, whether the head is still the one it left from.',
+    annotations: { readOnlyHint: true },
+  }, async () => run(log, () => agent.rideStatus()))
+
   server.registerTool('say', {
     title: 'Say',
     description: 'Say a line (up to 500 characters) into the h12 cube you stand in, sealed as a kind 23330 envelope, as ONOSENDAI does. One line per five seconds. Quiet rule: one unprompted line per arrival; a reply to a line that addressed you (pass its id as reply_to) is always allowed.',
@@ -216,7 +253,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   server.registerPrompt('meet', {
     title: 'Meet a human at a stop',
-    description: 'The plan for meeting a human in cyberspace. In v0 rides are not available, so it explains what the agent can do instead.',
+    description: 'The plan for meeting a human at a stop: sync the line, board, ride to the block they named, then look and wait.',
     argsSchema: { human: z.string().optional().describe('The human\'s npub.'), stop: z.string().optional().describe('The stop (a Bitcoin block height) they named, if any.') },
   }, (args) => ({
     messages: [{
@@ -228,15 +265,15 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
           '',
           'How meeting works: two random points in cyberspace are about h85 apart, which nobody can cross by hopping. People meet at a stop, a Bitcoin block that hyperspace exits at; everyone who rides to a stop arrives at the same coordinate, so presence finds them and chat reaches them.',
           '',
-          'What this server can do in v0: it cannot ride hyperspace yet (rides, stations and hyperjumps are A5, after this version). So you cannot travel to a stop, and you should say so plainly rather than try to hop there: plan_hop will price the crossing and refuse it.',
+          'The plan:',
+          '1. Call identity, then whereami. You need a chain: if you have none, hop once (your first hop signs your spawn).',
+          `2. Call station with sync: true until it says nothing remains to verify${args.stop ? `, or at least until the line reaches block ${args.stop}` : ''}. The line is verified by proof of work and kept in the state directory; a cold start takes many calls.`,
+          `3. Call station with destination${args.stop ? `: ${args.stop}` : ''} for the quote: how many blocks, how many seconds, how many calls. Agree the block with your human if none was named; any verified block is a stop.`,
+          '4. Call board. You are on the line and have not moved.',
+          `5. Call ride with to${args.stop ? `: ${args.stop}` : ''}, and call it again with the same to each time it returns progress, until it says the ride is signed. ride_status watches it; cancel: true releases the head if you must stop.`,
+          '6. At the stop, call look, say a line, and wait_for an arrival or a chat line addressed to you. Everyone who rides to that block arrives at the same coordinate.',
           '',
-          'What you can do instead:',
-          '1. Call identity, then whereami, and tell your human your spawn coordinate and npub. Someone who wants to meet you can come to you only if they can reach your coordinate, which a human in ONOSENDAI usually cannot either.',
-          '2. Call look to see who is within the 27 sectors around you, and wait_for an arrival or a chat line addressed to you.',
-          '3. Leave something for them: hide a message with a hint at the coordinate your human can reach, or where you stand, and tell them the hint so they can find it from anywhere (reading needs no travel).',
-          '4. Say a line in your cube when someone is present; reply to lines that address you.',
-          '',
-          'Never spawn again to get closer, never ask for your human\'s key, and quote every move before spending work.',
+          'Never spawn again to get closer, never ask for your human\'s key, quote every ride before spending work, and never try to hop to a far coordinate: plan_hop prices the crossing and refuses it.',
         ].join('\n'),
       },
     }],
