@@ -40,8 +40,10 @@ import { hintFits, hintTags, parseHint, hintCandidatesExponent, type HintHeights
 import { lookReport, type ChainFacts } from './look.js'
 import { bytesToHex, hexToBytes, nowSeconds, signEvent, tagValue, type EventTemplate, type NostrEvent } from './nostr/event.js'
 import { Outbox, type GuardVerdict } from './nostr/outbox.js'
+import { unwrapMessage, wrapMessage } from './nostr/dm.js'
 import { mergeAnswers } from './nostr/relayOutcome.js'
-import { DEFAULT_RELAY, Relays, normalizeRelay, type PublishResult } from './nostr/relays.js'
+import { DEFAULT_RELAY, GENERAL_RELAYS, Relays, normalizeRelay, type PublishResult } from './nostr/relays.js'
+import { OperatorChannel } from './operator.js'
 import { Presence, neighborhoodFilter, sectorsApart, type Person } from './presence.js'
 import { profileTemplate, type ProfileFields } from './profile.js'
 import { validateSnoPayload } from './sno.js'
@@ -79,6 +81,8 @@ export interface AgentConfig {
   /** Tests: a fetch that serves fixture blobs to the line store, and the ride runner's clock. */
   lineFetch?: typeof globalThis.fetch
   rideClock?: () => number
+  /** Where the operator's kind 10050 and kind 3 are looked up besides the configured relays. Default GENERAL_RELAYS; tests pass fake ones. */
+  lookupRelays?: string[]
 }
 
 /** The highest cube a key is derived for on request (hide, find, look): a key at h16 is about a second. */
@@ -118,6 +122,8 @@ export class Agent {
   readonly holders: Holders
   /** The hyperspace tools: the line, the ride runner, and the ride in flight. */
   readonly transit: Transit
+  /** The private NIP-17 channel to the operator: inbox, message_operator, STRATEGY. */
+  readonly operatorChannel: OperatorChannel
   calibration: Calibration
   private readonly dir: StateDir
   private readonly sk: Uint8Array
@@ -159,6 +165,45 @@ export class Agent {
     this.chat = new Chat(dir, this.relays, this.keys, { pubkey: this.pubkey, name: () => this.name, sign: (t) => this.sign(t), log: this.log })
     this.presence = new Presence(this.relays, this.pubkey, this.log)
     this.presence.on('arrival', () => this.chat.arrival())
+    this.operatorChannel = new OperatorChannel({
+      pubkey: this.pubkey, relays: this.relays, dir, operator: () => this.operatorOfProfile(), operatorProblem: () => this.operatorProblem(), lookupRelays: config.lookupRelays ?? GENERAL_RELAYS,
+      sign: (t) => this.sign(t),
+      wrap: (recipient, text) => wrapMessage({ senderSk: this.sk, recipient, text, now: nowSeconds() }),
+      unwrap: (wrap) => unwrapMessage(wrap, this.sk),
+      now: nowSeconds, log: this.log, maxWaitMs: config.relayMaxWaitMs,
+    })
+  }
+
+  /**
+   * The operator the agent's own kind 0 names: the p tag marked operator in
+   * the profile this server last signed. Only that operator gives orders; a
+   * configured operator the profile does not carry yet gives none until
+   * identity publishes it.
+   */
+  operatorOfProfile(): string | null {
+    const last = this.dir.readJson<ProfileFile | null>('profile.json', null)
+    const hex = last?.tags?.find((t) => t[0] === 'p' && t[3] === 'operator')?.[1]
+    return hex && /^[0-9a-f]{64}$/.test(hex) ? hex : null
+  }
+
+  /**
+   * Why the profile's operator may not give orders: the human configured an
+   * operator (--operator or config.json) and the profile names someone else.
+   * identity takes an operator from the model too, so text from cyberspace
+   * that talked the model into naming a stranger must not make the stranger
+   * its commander. Null when they agree or none was configured.
+   */
+  operatorProblem(): string | null {
+    if (!this.config.operator) return null
+    const configured = parsePubkey(this.config.operator)
+    const named = this.operatorOfProfile()
+    if (!configured || !named || configured === named) return null
+    return `Your profile names ${nip19.npubEncode(named)} as operator, but your human started this server with operator ${nip19.npubEncode(configured)}. Only the operator your human configured gives orders, so no DM is read or sent until they agree. Call identity without operator to publish the configured one again.`
+  }
+
+  /** Copy the operator's DM inbox relays (kind 10050), in the background; a failure is logged and retried by the next DM tool. */
+  private syncOperator(): void {
+    void this.operatorChannel.sync().catch((err) => this.log(`operator inbox sync: ${err instanceof Error ? err.message : String(err)}`))
   }
 
   /** Whether the chain's truth is being read from a relay other than the default canonical one. */
@@ -201,6 +246,7 @@ export class Agent {
     if (sent.length || dropped.length || waiting.length) this.log(`outbox replay: ${sent.length} sent, ${dropped.length} dropped, ${waiting.length} waiting for the relays`)
     for (const d of dropped) this.log(`dropped ${d.event.id.slice(0, 8)}: ${d.dropped}`)
     this.settle()
+    this.syncOperator()
   }
 
   /**
@@ -328,6 +374,7 @@ export class Agent {
       publish = result.ok && entry.accepted.length > 0
         ? { status: 'published', eventId: event.id, accepted: entry.accepted, refused }
         : { status: 'refused', eventId: event.id, refused, reason: result.ok ? 'no relay accepted it' : result.reason }
+      this.syncOperator()
     }
     await this.refreshChain()
     const now = nowSeconds()
@@ -342,8 +389,9 @@ export class Agent {
         : `Profile NOT published: ${publish.reason}${Object.keys(publish.refused).length ? `. Each relay said: ${Object.entries(publish.refused).map(([u, r]) => `${u}: ${r}`).join('; ')}` : ''}. The relay's words are verbatim; this server will not retry a refusal. Give the agent a relay of its own with --relay for its profile.`,
       operator ? '' : 'No operator was given: pass --operator <npub> at startup or `operator` to this tool so the profile names your human.',
       this.nonDefaultCanonical ? `WARNING: the chain's truth is being read from ${this.relays.canonical}, not the default canonical relay ${DEFAULT_RELAY}. A spawn signed because this relay shows no chain could derezz a chain this identity has elsewhere.` : '',
+      this.operatorChannel.strategyLine(),
     ].filter(Boolean).join('\n')
-    return { text, data: { npub: this.npub, pubkey: this.pubkey, spawn: describePlace(spawn), chain, profile: publish, operator: operator ? { hex: operator, npub: nip19.npubEncode(operator) } : null, canonical: this.relays.canonical, nonDefaultCanonical: this.nonDefaultCanonical } }
+    return { text, data: { npub: this.npub, pubkey: this.pubkey, spawn: describePlace(spawn), chain, profile: publish, operator: operator ? { hex: operator, npub: nip19.npubEncode(operator) } : null, canonical: this.relays.canonical, nonDefaultCanonical: this.nonDefaultCanonical, strategy: this.operatorChannel.strategy() } }
   }
 
   // ---- whereami -------------------------------------------------------------
@@ -354,8 +402,8 @@ export class Agent {
     const place = this.keeper.place()
     const chain = this.chainFacts(now)
     const where = describePlace(place)
-    const text = `You stand at ${where.hex}: ${where.planeName}, sector ${where.sector}, x ${where.x} y ${where.y} z ${where.z}. Chain ${chain.status}${chain.headId ? `, head ${chain.headId.slice(0, 8)}... signed ${chain.headAge} s ago` : ', no spawn yet: this is your spawn coordinate'}.${chain.words ? ` ${chain.words}` : ''}`
-    return { text, data: { where, chain, secondsSinceHead: chain.headAge } }
+    const text = `You stand at ${where.hex}: ${where.planeName}, sector ${where.sector}, x ${where.x} y ${where.y} z ${where.z}. Chain ${chain.status}${chain.headId ? `, head ${chain.headId.slice(0, 8)}... signed ${chain.headAge} s ago` : ', no spawn yet: this is your spawn coordinate'}.${chain.words ? ` ${chain.words}` : ''}\n${this.operatorChannel.strategyLine()}`
+    return { text, data: { where, chain, secondsSinceHead: chain.headAge, strategy: this.operatorChannel.strategy() } }
   }
 
   // ---- look -----------------------------------------------------------------
@@ -619,6 +667,18 @@ export class Agent {
   /** The ride in flight, if any. */
   rideStatus(): ToolResult {
     return this.transit.rideStatus()
+  }
+
+  // ---- inbox, message_operator (operator.ts) --------------------------------
+
+  /** New orders from the operator since the last read, oldest first, the current STRATEGY, and the ignored count. Marks them read. */
+  inbox(): Promise<ToolResult> {
+    return this.operatorChannel.inbox()
+  }
+
+  /** A private NIP-17 DM to the operator, with the agent's own copy. */
+  messageOperator(input: { text: string }): Promise<ToolResult> {
+    return this.operatorChannel.message(input.text)
   }
 
   // ---- say, listen, wait_for ------------------------------------------------
@@ -1075,6 +1135,7 @@ export class Agent {
     if (this.stopped) return
     this.stopped = true
     this.outbox.stop()
+    this.operatorChannel.stop()
     this.chat.stop()
     this.presence.stop()
     this.relays.close()

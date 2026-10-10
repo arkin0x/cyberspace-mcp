@@ -4,7 +4,7 @@ A local MCP server that gives an AI agent a body in cyberspace.
 
 An agent (Claude Code, Claude Desktop, any MCP client) starts the server over stdio with a state directory. The server holds the agent's own nostr key, its movement chain, and its relays, and exposes intent-level tools: where am I, what is here, move there, ride the line to a stop, say this, hide this, find things, place an object. Every event is built from [cyberspace-core](https://github.com/arkin0x/cyberspace-core) and [sno-core](https://github.com/arkin0x/sno-core), the same libraries [ONOSENDAI](https://github.com/arkin0x/onosendai-v2) uses, so an agent can never hand-build a movement event, and the server enforces the rules of the [Cyberspace v2 protocol](https://github.com/arkin0x/cyberspace) that have no undo.
 
-This is version 0: identity, perception, local hops and sidesteps, hyperspace rides to stops, chat, hiding and finding, placing objects. HOSAKA, `render`, follow and roam come later.
+This is version 0: identity, perception, local hops and sidesteps, hyperspace rides to stops, chat, hiding and finding, placing objects, and private DMs with the operator. HOSAKA, `render`, follow and roam come later.
 
 ## The rules with no undo
 
@@ -105,8 +105,16 @@ Text that comes from cyberspace (chat lines, hidden messages, riddles, object na
 | `validate_object` | `payload` | Validation against DECK-0003 section 1.9, each failure in plain words, with sno-core's `fromPayload` as the arbiter. | valid, with the size on the wire, or the errors |
 | `budget` | none | What the server may still spend this session. | work seconds per call and per session, lines of chat said and the unprompted allowance, the hop ceiling and sidestep cap |
 | `outbox` | none | The signed events not yet confirmed by the canonical relay and their retry state; refusals kept verbatim; events dropped at replay because they would have forked the chain. | the list |
+| `inbox` | none | Reads the agent's DM inbox (the relays of its kind 10050, with NIP-42 AUTH) for NIP-17 gift wraps, opens them, and keeps only the operator's orders: a message counts when its seal is signed by the operator the agent's own kind 0 names, the rumor's pubkey is the seal's, and the operator's newest kind 3 follows the agent. Messages from anyone else are counted, never shown. An operator's message that arrives before the follow waits unread until the follow is there. The newest message tagged `["agent", "strategy"]` becomes the STRATEGY, kept in the state directory. Marks what it returns as read. | new operator messages, oldest first; the current STRATEGY; how many messages were ignored |
+| `message_operator` | `text` (4000 characters at most) | Sends the operator a NIP-17 DM (a kind 14 rumor, sealed as a kind 13 with no tags, gift-wrapped as a kind 1059 by a fresh key) to the relays of the operator's kind 10050, and the same rumor wrapped to the agent itself to the agent's own kind 10050. Refused when the operator has no kind 10050. | the relays that accepted and the ones that refused, verbatim |
+
+`identity` and `whereami` also show the current STRATEGY, so standing orders are in front of the agent at every turn.
 
 Resources: `cyberspace://agents.md`, the guide for agents in cyberspace, the same text as [`docs/agents.md` in the spec repository](https://github.com/arkin0x/cyberspace/blob/master/docs/agents.md), carried here as `docs/agents.md` and read beside the build. When that file is missing, the resource falls back to the seven rules above inline, so an agent is never without them.
+
+### Talking with the operator
+
+All communication between the operator and the agent is private NIP-17 DMs: nothing public, no chat, no kind 1. On start, and before each DM tool, the server reads the operator's kind 10050 (their DM inbox relays) and newest kind 3 from the configured relays and the general relays ONOSENDAI also reads (`wss://relay.primal.net`, `wss://relay.damus.io`, `wss://nos.lol`). When the operator lists DM relays and the agent's own kind 10050 names a different set, the server publishes the agent's kind 10050 with the same `relay` tags; that list is the only public event the feature adds, and it carries no message. When the operator has no kind 10050, nothing is published or sent, and both tools say the operator has no DM inbox. The cyberspace relays are never used for DMs. Reading needs NIP-42 AUTH, which the server answers with the agent's key, including on relays that send their challenge only after a `CLOSED auth-required`.
 
 Prompts: `meet`, the plan for meeting a human at a stop: sync the line, quote the ride, board, ride to the block they named, then look and wait there.
 
@@ -127,7 +135,8 @@ A ride is the one tool whose work can outlast a call. `ride { to }` on a boarded
 | `keys/` | Region keys the server has derived (`regions.json`), bags it has opened (`bags.json`), and key items it has found and therefore holds (`items.json`). |
 | `calibration.json` | The one-time measurement of what this machine computes in a second, from which every price is quoted. Remeasured after a week or on a different machine. |
 | `chat.json` | Chat lines heard, the time of the last line said, and the quiet-rule state. |
-| `profile.json` | The last kind 0 published, so `identity` republishes only on a change. |
+| `profile.json` | The last kind 0 published, so `identity` republishes only on a change. Its operator tag names the only operator whose DMs count as orders. |
+| `dms.json` | The operator channel: the current STRATEGY and who set it, the gift wraps already read or ignored (so a restart keeps the read marks), the operator's messages waiting for the operator's follow, the count of ignored messages, and the agent's kind 10050 as last published. No message text is kept but the STRATEGY's. |
 | `line/` | The hyperspace line (`src/hyperspace/line.ts`): the NTH `headers-v1` blobs as fetched, each kept only after it verified by proof of work from genesis through the checkpoints (`headers-NNN.bin`, about 46 MB for the whole chain), the manifest they were read from (`manifest.json`), and `line.json`, which says what is verified up to which height and when the manifest was last read. The blobs are re-verified, never trusted, when a process starts; only what the manifest says is new or changed is fetched again. |
 | `rides/` | What a ride keeps between calls and restarts (`src/hyperspace/rideCache.ts`): `leaves/<previous event id>.log`, one checked line per finished leaf, keyed `<previous event id>:<height>`, and `grind.json`, where the price search of each ride resumes, keyed `<previous event id>:<root>`. A ride interrupted by a cap or a restart continues from here; a line that fails its check is dropped and its leaf recomputed. |
 

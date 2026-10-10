@@ -38,6 +38,14 @@ import { GuardedWebSocket } from './websocket.js'
 /** The canonical relay (brief, ruling 9). Configurable; this is the default. */
 export const DEFAULT_RELAY = 'wss://onosendai.feeds.relay.tools'
 
+/**
+ * Where a person's contact list (kind 3) and DM relay list (kind 10050) are
+ * most likely to be found, besides the configured relays: ONOSENDAI's
+ * GENERAL_RELAYS (src/lib/contacts.ts), so both sides look in the same
+ * places. The cyberspace relays hold movement, not these.
+ */
+export const GENERAL_RELAYS = ['wss://relay.primal.net', 'wss://relay.damus.io', 'wss://nos.lol']
+
 /** ws:// or wss:// with a real host; null for anything else. */
 export function normalizeRelay(input: string): string | null {
   const s = input.trim()
@@ -224,7 +232,15 @@ export class Relays {
     await this.authAll(urls)
     const results = await Promise.allSettled(urls.map(async (url) => {
       const relay = await this.ensureRelay(url)
-      return relay.publish(event)
+      try {
+        return await relay.publish(event)
+      } catch (err) {
+        // A relay that wants AUTH before it takes an event (some DM inboxes do) and sent its challenge only now: answer it and send once more.
+        if (!/^auth-required\b/i.test(err instanceof Error ? err.message : String(err))) throw err
+        if (!(await this.challengeOf(relay, 1000))) throw err
+        await relay.auth((t) => this.sign(t))
+        return relay.publish(event)
+      }
     }))
     const accepted: string[] = []
     const reasons: Record<string, string> = {}
@@ -311,7 +327,8 @@ export class Relays {
               if (settled) return
               if (/^auth-required:/i.test(reason) && !authTried) {
                 authTried = true
-                relay.auth((t) => this.sign(t)).then(
+                // Some relays (grain among them) send their challenge with or after the CLOSED rather than on connect: wait for it briefly.
+                this.challengeOf(relay, Math.min(1000, remaining())).then(() => relay.auth((t) => this.sign(t))).then(
                   () => { if (!settled) open() },
                   (err) => finish({ url: norm, outcome: 'refused', reason: `auth-required: ${err instanceof Error ? err.message : String(err)}`, events: got() }),
                 )
@@ -329,6 +346,13 @@ export class Relays {
       }
       open()
     })
+  }
+
+  /** The relay's NIP-42 challenge, waited for up to `ms` when it has not come yet. */
+  private async challengeOf(relay: AbstractRelay, ms: number): Promise<string | undefined> {
+    const r = relay as unknown as AuthRelay
+    for (let waited = 0; !r.challenge && waited < ms; waited += 40) await new Promise((res) => setTimeout(res, 40))
+    return r.challenge
   }
 
   /** One-shot query, each relay asked and answered on its own, then closed. */

@@ -25,6 +25,12 @@ export interface FakePolicy {
   reachable: boolean
   /** Milliseconds each message takes in each direction. */
   latencyMs: number
+  /** The challenge is sent only after an unauthenticated REQ, right after its CLOSED, not on connect. */
+  challengeOnReq: boolean
+  /** Gift wraps (kind 1059) are served only to the client authenticated as their p tag, as an inbox relay serves them. */
+  protectWraps: boolean
+  /** Events are taken only from an authenticated client; with challengeOnReq the challenge follows the refusal. */
+  requireAuthToPublish: boolean
 }
 
 const DEFAULT_POLICY: FakePolicy = {
@@ -34,11 +40,16 @@ const DEFAULT_POLICY: FakePolicy = {
   mute: false,
   reachable: true,
   latencyMs: 0,
+  challengeOnReq: false,
+  protectWraps: false,
+  requireAuthToPublish: false,
 }
 
 interface Connection {
   socket: FakeSocket
   authed: boolean
+  /** The pubkey the client authenticated as. */
+  authedAs: string | null
   challenge: string
   subs: Map<string, Filter[]>
 }
@@ -106,15 +117,15 @@ export class FakeRelay {
     for (const conn of this.conns) {
       if (this.policy.silent) continue
       for (const [subid, filters] of conn.subs) {
-        if (matchFilters(filters, ev)) this.reply(conn, ['EVENT', subid, ev])
+        if (matchFilters(filters, ev) && this.mayRead(conn, ev)) this.reply(conn, ['EVENT', subid, ev])
       }
     }
   }
 
   connect(socket: FakeSocket): Connection {
-    const conn: Connection = { socket, authed: false, challenge: `challenge-${++challengeCounter}`, subs: new Map() }
+    const conn: Connection = { socket, authed: false, authedAs: null, challenge: `challenge-${++challengeCounter}`, subs: new Map() }
     this.conns.add(conn)
-    if (this.policy.requireAuth && !this.policy.silent) this.reply(conn, ['AUTH', conn.challenge])
+    if (this.policy.requireAuth && !this.policy.challengeOnReq && !this.policy.silent) this.reply(conn, ['AUTH', conn.challenge])
     return conn
   }
 
@@ -126,9 +137,15 @@ export class FakeRelay {
     conn.socket.deliver(JSON.stringify(msg), this.policy.latencyMs)
   }
 
-  private stored(filters: Filter[]): NostrEvent[] {
+  /** Whether this connection may be handed this event: a protected gift wrap only to its recipient. */
+  private mayRead(conn: Connection, ev: NostrEvent): boolean {
+    if (!this.policy.protectWraps || ev.kind !== 1059) return true
+    return !!conn.authedAs && ev.tags.some((t) => t[0] === 'p' && t[1] === conn.authedAs)
+  }
+
+  private stored(conn: Connection, filters: Filter[]): NostrEvent[] {
     const limit = filters.reduce((m, f) => (f.limit !== undefined ? Math.min(m, f.limit) : m), Infinity)
-    const out = this.all().filter((ev) => matchFilters(filters, ev))
+    const out = this.all().filter((ev) => matchFilters(filters, ev) && this.mayRead(conn, ev))
     return Number.isFinite(limit) ? out.slice(0, limit) : out
   }
 
@@ -143,10 +160,11 @@ export class FakeRelay {
       const filters = msg.slice(2) as Filter[]
       if (this.policy.requireAuth && !conn.authed) {
         this.reply(conn, ['CLOSED', subid, 'auth-required: we only serve authenticated clients'])
+        if (this.policy.challengeOnReq) this.reply(conn, ['AUTH', conn.challenge])
         return
       }
       conn.subs.set(subid, filters)
-      for (const ev of this.stored(filters)) this.reply(conn, ['EVENT', subid, ev])
+      for (const ev of this.stored(conn, filters)) this.reply(conn, ['EVENT', subid, ev])
       if (!this.policy.mute) this.reply(conn, ['EOSE', subid])
       return
     }
@@ -158,6 +176,11 @@ export class FakeRelay {
       const ev = msg[1] as NostrEvent
       if (!ev || !verifyEvent(ev)) {
         this.reply(conn, ['OK', ev?.id ?? '', false, 'invalid: bad signature'])
+        return
+      }
+      if (this.policy.requireAuthToPublish && !conn.authed) {
+        this.reply(conn, ['OK', ev.id, false, 'auth-required: publishing needs authentication'])
+        if (this.policy.challengeOnReq) this.reply(conn, ['AUTH', conn.challenge])
         return
       }
       const refusal = this.policy.refuse(ev)
@@ -177,6 +200,7 @@ export class FakeRelay {
       const relay = ev?.tags?.find((t) => t[0] === 'relay')?.[1]
       const ok = !!ev && ev.kind === 22242 && verifyEvent(ev) && challenge === conn.challenge && !!relay && normalizeURL(relay) === this.url
       conn.authed = ok
+      conn.authedAs = ok ? ev.pubkey : null
       this.reply(conn, ['OK', ev?.id ?? '', ok, ok ? '' : 'auth-required: bad auth event'])
       return
     }
