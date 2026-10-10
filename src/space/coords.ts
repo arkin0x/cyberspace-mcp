@@ -37,6 +37,11 @@ export interface Place {
 /** The edge of an axis: 2^85 gibsons. */
 export const AXIS_LIMIT = 1n << BigInt(AXIS_BITS)
 
+/** One cell's side at a scale, in gibsons: 2^scaleExp. ONOSENDAI's space.stepFor, here for src/hyperspace/station.ts. */
+export function stepFor(scaleExp: number): bigint {
+  return 1n << BigInt(scaleExp)
+}
+
 /** Section 10: per-axis sector tags plus the combined one, all base-10, no padding. */
 export function sectorTags(p: Position): string[][] {
   const sid = xyzToSectorId(p.x, p.y, p.z)

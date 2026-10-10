@@ -3,7 +3,9 @@
 // Ported from ONOSENDAI src/lib/events.ts at commit 8e4d0e3 (branch
 // feat/keys-and-chests): parseAction, actionLink, newestSpawn, buildChain
 // with the fork rule and the frozen position, firstBreak, chainGap, lookBack
-// and the helpers they share. The templates that build events are not here:
+// and the helpers they share, plus openBracket from the same source at
+// 18eded9 (branch v2), added with lookBack's export for
+// src/hyperspace/ride.ts (lineStateOf). The templates that build events are not here:
 // they are in builder.ts, the one module that writes kind 3333. Trimmed from
 // the original: the RuleChange dating (when each rule took effect, which
 // ONOSENDAI uses to apologize for a chain that was valid when signed) and
@@ -647,12 +649,23 @@ export function chainGap(events: NostrEvent[], spawnId: string): { until: number
 }
 
 /**
+ * The enter-virtual of the bracket open at the end of `chain` (up to and
+ * including index `at` when given), or null when the identity is not inside
+ * a game there. A chain may end inside a bracket (spec 8.11.4 rule 7).
+ */
+export function openBracket(chain: ActionEvent[], at = chain.length - 1): ActionEvent | null {
+  const a = chain[at]
+  if (!a || (a.role !== 'enter' && a.role !== 'virtual' && !(a.role === 'broken' && a.bracketId))) return null
+  return chain.find((e) => e.id === a.bracketId && e.role === 'enter') ?? null
+}
+
+/**
  * The action that rules looking back from index `at` see (spec 8.9 rule 4,
  * 8.11.4 rule 8): the nearest recognized action before it, with skipped and
  * broken events passed over and a closed bracket standing for the action
  * before its enter-virtual.
  */
-function lookBack(chain: ActionEvent[], at: number): ActionEvent | null {
+export function lookBack(chain: ActionEvent[], at: number): ActionEvent | null {
   let j = Math.min(at, chain.length) - 1
   while (j >= 0) {
     const a = chain[j]
