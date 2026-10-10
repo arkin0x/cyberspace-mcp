@@ -157,8 +157,24 @@ export class Outbox {
     this.timer = setTimeout(() => { this.timer = null; void this.retry() }, this.backoff)
   }
 
+  /**
+   * Passes never overlap. The timer's retry and a caller's retry used to run
+   * at once, and when the guard's verdict flipped between their two guard
+   * calls both sent the same event (seen as a flaky test under a parallel
+   * suite, 2026-10-11). A retry made while one runs waits for it and then
+   * makes a pass of its own, so a caller's retry still sees what the timer's
+   * pass left pending.
+   */
+  private running: Promise<void> = Promise.resolve()
+
   /** Ask the relays once more for everything pending, each entry through the guard first. */
-  async retry(): Promise<void> {
+  retry(): Promise<void> {
+    const next = this.running.then(() => this.pass())
+    this.running = next.catch(() => undefined)
+    return next
+  }
+
+  private async pass(): Promise<void> {
     if (this.stopped) return
     let allSettled = true
     for (const entry of this.pending()) {
