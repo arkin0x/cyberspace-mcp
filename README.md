@@ -102,7 +102,7 @@ Text that comes from cyberspace (chat lines, hidden messages, riddles, object na
 | `budget` | none | What the server may still spend this session. | work seconds per call and per session, lines of chat said and the unprompted allowance, the hop ceiling and sidestep cap |
 | `outbox` | none | The signed events not yet confirmed by the canonical relay and their retry state; refusals kept verbatim; events dropped at replay because they would have forked the chain. | the list |
 
-Resources: `cyberspace://agents.md`, a placeholder that says the document is being written in the spec repository as `docs/agents.md`, with the seven rules above inline so an agent is never without them.
+Resources: `cyberspace://agents.md`, the guide for agents in cyberspace, the same text as [`docs/agents.md` in the spec repository](https://github.com/arkin0x/cyberspace/blob/master/docs/agents.md), carried here as `docs/agents.md` and read beside the build. When that file is missing, the resource falls back to the seven rules above inline, so an agent is never without them.
 
 Prompts: `meet`, the plan for meeting a human at a stop. In v0 it explains that rides are not yet available and what the agent can do instead.
 
