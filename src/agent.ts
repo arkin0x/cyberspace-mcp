@@ -54,7 +54,8 @@ import { objectHandle, renderShard, type NamedView } from './render.js'
 import { validateSnoPayload } from './sno.js'
 import { hopCeiling, loadOrMeasure, projectCantorMs, type Calibration } from './space/calibration.js'
 import { describePlace, distanceBetween, distanceWords, parseCoordinate, placeFromHex, placeOf, spawnPlace, type CoordinateInput, type Place } from './space/coords.js'
-import { freeNeighbor } from './space/neighbors.js'
+import { apartOnBestAxis, nearestClear, overlapping, spacingFor, type Body } from './space/personalSpace.js'
+import { AvatarSizes } from './avatarSizes.js'
 import { planSummary, priceNextStep, type Ceilings, type PricedStep } from './space/plan.js'
 import { KeyStore, MAX_COMPUTE_HEIGHT, SCAN_MAX_HEIGHT, type EntrySummary, type HeldKey, type OpenedBag } from './space/regionKeys.js'
 import { StateDir } from './state/dir.js'
@@ -128,6 +129,15 @@ const MAX_SWEEP_CANDIDATES = 1 << 16
 /** The objects opened this session that render can draw by id; the oldest is forgotten past this. */
 const OBJECTS_REMEMBERED = 64
 
+/** A person the agent's avatar must not overlap (space/personalSpace.ts). */
+interface Occupant extends Body {
+  pubkey: string
+  /** How the refusal names them. */
+  words: string
+  /** Their profile has not been read: protected until it says bot. */
+  unknown: boolean
+}
+
 interface ProfileFile {
   content: string
   tags: string[][]
@@ -156,6 +166,8 @@ export class Agent {
   readonly keys: KeyStore
   readonly chat: Chat
   readonly presence: Presence
+  /** How far each nearby person's avatar reaches, read in the background (avatarSizes.ts). */
+  readonly avatars: AvatarSizes
   readonly budget: Budget
   readonly holders: Holders
   /** The hyperspace tools: the line, the ride runner, and the ride in flight. */
@@ -231,6 +243,9 @@ export class Agent {
     })
     this.presence = new Presence(this.relays, this.pubkey, this.log)
     this.presence.on('arrival', () => this.chat.arrival())
+    this.avatars = new AvatarSizes(this.relays, this.log)
+    // Someone arrives: their avatar is read now, so its size is known before the agent plans a landing near them.
+    this.presence.on('arrival', (p: Person) => this.avatars.want([p.pubkey]))
     this.operatorChannel = new OperatorChannel({
       pubkey: this.pubkey, relays: this.relays, dir, operator: () => this.operatorOfProfile(), operatorProblem: () => this.operatorProblem(), lookupRelays: config.lookupRelays ?? GENERAL_RELAYS,
       sign: (t) => this.sign(t),
@@ -342,6 +357,9 @@ export class Agent {
     this.settle()
     this.syncOperator()
     this.travel.start()
+    // The agent's own avatar and its operator's, read in the background, for the rule that the two never overlap.
+    const operator = this.operatorOfProfile()
+    this.avatars.want(operator ? [this.pubkey, operator] : [this.pubkey])
     // A watch left on keeps watching across a restart, and reads what the operator did meanwhile.
     this.follow.refresh()
     // A HOSAKA ride a restart left in hand is followed again in the background, with no ride call.
@@ -566,56 +584,90 @@ export class Agent {
     return { text: report.text, data: { ...report.data, keyMs: Math.round(keyMs) } }
   }
 
-  // ---- nobody's gibson (arkinox, 2026-10-11) --------------------------------
+  // ---- nobody's space (arkinox, 2026-10-11) ---------------------------------
   //
   // "don't ever let the agent land on the exact same gibson as the user,
   // because that is uncomfortable. Unless the situation requires it (game
-  // entry, for example, enforces a single gibson entry point)." Every
-  // coordinate the agent chooses to land on (hop, plan_hop, the follow
-  // tool's aim) is checked against the people the server knows: the
+  // entry, for example, enforces a single gibson entry point)." Then, seeing
+  // XOR's avatar beside him: "the avatar is larger than 1 gibson, so I don't
+  // want him to be adjacent to me. avatar overlap feels wrong." So the agent
+  // never stands where its avatar would overlap a person's: on some axis the
+  // two centers are at least both avatars' radii plus a gibson apart
+  // (space/personalSpace.ts says how ONOSENDAI sizes an avatar). Every
+  // coordinate the agent chooses to land on (hop, plan_hop, the follow tool's
+  // aim, a roam step) is checked against the people the server knows: the
   // operator wherever the follow watch or presence last saw them, and every
-  // other avatar in the 27 sectors that is not known to be a bot (an
-  // unknown profile is protected; bots may share a gibson). There is no
-  // override. A point the protocol fixes (a ride exits exactly at its stop)
-  // is the one exception, and the ride's result says so (fixedPointNote).
+  // other avatar in the 27 sectors that is not known to be a bot (an unknown
+  // profile is protected; bots may overlap bots). Each person's avatar is
+  // their kind 11333 when it has been read (avatarSizes.ts, in the
+  // background), else the default. There is no override. A point the
+  // protocol fixes (a ride exits exactly at its stop) is the one exception,
+  // and the ride's result says so (fixedPointNote).
 
-  /** Who stands where, by hex coordinate, from memory: the operator and every avatar nearby not known to be a bot. */
-  private occupants(): Map<string, { pubkey: string; words: string; unknown: boolean }> {
-    const out = new Map<string, { pubkey: string; words: string; unknown: boolean }>()
+  /** Who stands where: the operator and every avatar nearby not known to be a bot, with how far their avatar reaches. From memory. */
+  private occupants(): Occupant[] {
+    const out = new Map<string, Occupant>()
     const operator = this.operatorOfProfile()
     const seen = this.follow.latest()
+    const put = (pubkey: string, place: Place, words: string, unknown: boolean): void => {
+      out.set(pubkey, { pubkey, place, words, unknown, radius: this.avatars.radius(pubkey) })
+    }
     for (const p of this.presence.others()) {
       const isOperator = p.pubkey === operator
       if (!isOperator && p.profile?.bot === true) continue
       // Presence keeps the operator where they last were nearby; the watch's verified move, when newer, is where they are.
       if (isOperator && seen && seen.at >= p.lastActive) continue
       const name = p.profile?.name ? `${p.profile.name} (${p.pubkey.slice(0, 8)}...)` : `${p.pubkey.slice(0, 8)}...`
-      out.set(p.place.hex, { pubkey: p.pubkey, words: isOperator ? 'Your operator' : p.profile ? `The human ${name}` : `${name}, not known to be a bot,`, unknown: !isOperator && !p.profile })
+      put(p.pubkey, p.place, isOperator ? 'Your operator' : p.profile ? `The human ${name}` : `${name}, not known to be a bot,`, !isOperator && !p.profile)
     }
-    if (seen && operator) out.set(seen.coordHex, { pubkey: operator, words: 'Your operator', unknown: false })
-    return out
+    if (seen && operator) put(operator, placeFromHex(seen.coordHex), 'Your operator', false)
+    return [...out.values()]
+  }
+
+  /** How far the agent's own avatar reaches, in gibsons: what set_avatar last published, else its kind 11333 as read, else the default. */
+  private myRadius(): number {
+    return this.avatars.radius(this.pubkey)
+  }
+
+  /** Whether the agent may stand at `p`: clear of every person's avatar. For roam's candidates. */
+  private clearForMe(p: Place): boolean {
+    const mine = this.myRadius()
+    return overlapping(p, this.occupants(), mine).length === 0
+  }
+
+  /** The words for one person's box: how far their avatar reaches, and how far apart the two must stand. */
+  private spaceWords(who: Occupant, mine: number): string {
+    const avatar = this.avatars.describe(who.pubkey)
+    const theirs = avatar.name ? `Their avatar "${avatar.name}" reaches ${who.radius.toFixed(2)} gibsons from its center on each axis` : `Their avatar reaches ${who.radius.toFixed(2)} gibsons from its center on each axis (${avatar.read ? 'the default' : 'the default until theirs is read'})`
+    return `${theirs} and yours ${mine.toFixed(2)}, so you keep at least ${spacingFor(mine, who.radius)} gibsons from them on some axis (both avatars and a gibson between, at true scale: at coarser zooms every avatar nearby overlaps on screen by design)`
   }
 
   /**
-   * Why the agent may not land on `landing`, or null: a person stands on
-   * that exact gibson. The refusal names the free gibson beside them that is
-   * cheapest from `from`, so the model can retry there in one call. With
-   * `fetch`, a profile not read yet is read first: a bot there is no bar.
+   * Why the agent may not land on `landing`, or null: its avatar there would
+   * overlap a person's. The refusal names the clear coordinate nearest it
+   * that is cheapest from `from`, so the model can retry there in one call.
+   * With `fetch`, a profile not read yet is read first: a bot there is no
+   * bar. Avatar sizes are never waited for: an avatar not read yet counts
+   * as the default.
    */
   private async gibsonRefusal(landing: Place, from: Place, fetch = true): Promise<string | null> {
+    const mine = this.myRadius()
     let occ = this.occupants()
-    let who = occ.get(landing.hex)
-    if (who?.unknown && fetch) {
+    let hit = overlapping(landing, occ, mine)
+    if (hit.some((o) => o.unknown) && fetch) {
       await this.presence.fetchProfiles()
       occ = this.occupants()
-      who = occ.get(landing.hex)
+      hit = overlapping(landing, occ, mine)
     }
+    const who = hit[0]
     if (!who) return null
-    const free = freeNeighbor(landing, from, new Set([...occ.keys(), landing.hex]))
-    return `${who.words} stands on ${landing.hex}, and you never land on the exact gibson a person stands on: it is uncomfortable for them. ${free ? (free.hex === from.hex ? 'You already stand beside it: stay.' : `Land beside them instead, at ${free.hex} (free, one gibson off): call plan_hop or hop with that target.`) : 'Every gibson beside it is taken; wait for them to move.'}`
+    const free = nearestClear(landing, from, occ, mine)
+    const apart = apartOnBestAxis(landing, who)
+    const where = apart === 0n ? `stands on ${landing.hex}` : `stands at ${who.place.hex}, ${apart.toString()} gibson${apart === 1n ? '' : 's'} from ${landing.hex}`
+    return `${who.words} ${where}, and your avatar never overlaps a person's: it is uncomfortable for them. ${this.spaceWords(who, mine)}. ${free ? (free.hex === from.hex ? 'You already stand clear of them, just outside: stay.' : `Land just outside instead, at ${free.hex} (clear of every avatar nearby): call plan_hop or hop with that target.`) : 'No coordinate near it is clear; wait for them to move.'}`
   }
 
-  /** The rule for one step: neither the target (a route toward a person's gibson is refused at its first step, not its last) nor where this step lands may be a person's gibson. */
+  /** The rule for one step: neither the target (a route toward a person is refused at its first step, not its last) nor where this step lands may overlap a person's avatar. */
   private async landingRefusal(step: PricedStep, target: Place, from: Place, fetch = true): Promise<string | null> {
     return (await this.gibsonRefusal(target, from, fetch)) ?? (step.to.hex !== target.hex ? this.gibsonRefusal(step.to, from, fetch) : null)
   }
@@ -623,15 +675,22 @@ export class Agent {
   /**
    * The exception, said where it applies: a point the protocol fixes (a ride
    * exits exactly at its stop; a game's single entry gibson) may be shared,
-   * and when a person stands on it the agent is told to step one gibson off
-   * afterward, to the free neighbor plan_hop can price.
+   * and when the agent's avatar there overlaps a person's it is told to step
+   * off afterward, by enough gibsons to clear their avatar, to the clear
+   * coordinate nearest the stop, with that step's price.
    */
-  fixedPointNote(at: Place, why: string): { text: string; data: { why: string; sharedWith: string[]; stepOff: string | null } } {
+  fixedPointNote(at: Place, why: string): { text: string; data: { why: string; sharedWith: string[]; stepOff: string | null; stepOffGibsons: string | null; stepOffSeconds: number | null } } {
+    const mine = this.myRadius()
     const occ = this.occupants()
-    const who = occ.get(at.hex)
-    const free = who ? freeNeighbor(at, at, new Set([...occ.keys(), at.hex])) : null
-    const text = `${why} That is a single point the protocol fixes, so the rule against landing on a person's gibson yields here.${who ? ` ${who.words} stands on this exact gibson: step one gibson off now${free ? `, to ${free.hex} (plan_hop prices it)` : ''}.` : ''}`
-    return { text, data: { why, sharedWith: who ? [who.pubkey] : [], stepOff: free?.hex ?? null } }
+    const hit = overlapping(at, occ, mine)
+    const who = hit[0]
+    const free = who ? nearestClear(at, at, occ, mine) : null
+    const step = free && free.hex !== at.hex ? priceNextStep(at, free, this.ceilings(), this.calibration) : null
+    const gibsons = free ? distanceBetween(at, free).chebyshev : null
+    const price = step ? ` (one ${step.kind} of h${step.maxHeight}, about ${step.seconds.toFixed(2)} s here; plan_hop prices it)` : ''
+    const stepWords = free ? `step off by ${gibsons!.toString()} gibsons now, to ${free.hex}${price}` : 'step off as soon as a clear coordinate opens near it'
+    const text = `${why} That is a single point the protocol fixes, so the rule that your avatar never overlaps a person's yields here.${who ? ` ${who.words} ${apartOnBestAxis(at, who) === 0n ? 'stands on this exact gibson' : `stands ${apartOnBestAxis(at, who).toString()} gibsons from it`}, so your avatars overlap. ${this.spaceWords(who, mine)}. ${stepWords[0].toUpperCase()}${stepWords.slice(1)}.` : ''}`
+    return { text, data: { why, sharedWith: hit.map((o) => o.pubkey), stepOff: free?.hex ?? null, stepOffGibsons: gibsons?.toString() ?? null, stepOffSeconds: step ? Number(step.seconds.toFixed(2)) : null } }
   }
 
   // ---- plan_hop and hop -----------------------------------------------------
@@ -932,8 +991,8 @@ export class Agent {
 
   /**
    * Turn the follow watch on or off, and report where the operator is now:
-   * how far, the free gibson beside them to aim for (never their own
-   * gibson), and what plan_hop says about getting there within the caps, or
+   * how far, the clear coordinate just outside their avatar to aim for
+   * (never inside it: arkinox, 2026-10-11), and what plan_hop says about getting there within the caps, or
    * that it needs a ride. Marks the operator's newest move as seen. Never
    * moves the agent.
    */
@@ -950,6 +1009,8 @@ export class Agent {
     const on = this.follow.on
     if (!on) return { text: 'Follow watch off. Call follow_operator with on: true to watch your operator\'s moves and see where they are.', data: { on: false } }
     const watchWords = 'Follow watch on: when your operator moves, orders_waiting reports it and your waker wakes you.'
+    // Their avatar's size is read alongside, never waited for: by the time the chain read answers it is usually in.
+    this.avatars.want([op, this.pubkey])
     // A fresh read of the operator's chain, the same read the watch runs on a move.
     this.follow.refresh()
     await this.follow.resolveNow()
@@ -964,25 +1025,26 @@ export class Agent {
     const me = this.keeper.place()
     const there = placeFromHex(latest.coordHex)
     const move = this.moveData(latest)
-    const taken = new Set(this.occupants().keys())
-    taken.add(there.hex)
-    const beside = freeNeighbor(there, me, taken)
-    if (!beside) throw new Refusal(`Every gibson beside your operator at ${latest.coordHex} is taken; wait for them to move.`)
+    // Just outside the operator's box (their avatar, yours and a gibson between), never inside it.
+    const occ = this.occupants()
+    if (!occ.some((o) => o.pubkey === op)) occ.push({ pubkey: op, place: there, words: 'Your operator', unknown: false, radius: this.avatars.radius(op) })
+    const beside = nearestClear(there, me, occ, this.myRadius())
+    if (!beside) throw new Refusal(`No coordinate near your operator at ${latest.coordHex} is clear of every avatar; wait for them to move.`)
     const target = describePlace(beside)
     const besideAlready = beside.hex === me.hex
     const plan = besideAlready ? null : await this.planFrom(me, beside)
     const needsRide = this.routeRefusal(me, placeFromHex(target.hex)) !== null
     const advice = besideAlready
-      ? 'You already stand beside your operator: no move is needed.'
+      ? 'You already stand just outside your operator\'s avatar: no move is needed.'
       : needsRide
         ? 'Too far to hop: a coordinate that distant is reached by riding the line to the stop nearest it (station, board, ride). Follow your STRATEGY; if you cannot reach them, tell your operator with message_operator.'
         : plan!.data.refused
           ? `Not within your caps: ${plan!.data.refused as string} Follow your STRATEGY; tell your operator with message_operator if you cannot follow.`
-          : `Within your caps: hop with target ${target.hex} to stand beside them (one step per hop call; plan_hop says how many remain). Moving is your decision, guided by your STRATEGY.`
+          : `Within your caps: hop with target ${target.hex} to stand just outside their avatar (one step per hop call; plan_hop says how many remain). Moving is your decision, guided by your STRATEGY.`
     const text = [
       watchWords,
       `Your operator is at ${latest.coordHex} (${move.planeName}), by a ${latest.action} signed ${new Date(latest.at * 1000).toISOString()} (event ${latest.eventId.slice(0, 8)}..., verified on their chain). From you: ${move.distance}.`,
-      `Aim for ${target.hex}, the free gibson beside them: never land on your operator's own gibson.`,
+      `Aim for ${target.hex}, just outside your operator's avatar: never stand where your avatar would overlap theirs. ${this.spaceWords(occ.find((o) => o.pubkey === op)!, this.myRadius())}.`,
       plan ? `plan_hop: ${plan.text}` : '',
       advice,
       ...notes.map((n) => `Note: ${n}`),
@@ -1018,7 +1080,8 @@ export class Agent {
    * roaming on or off and sets the interval; orders_waiting then reports
    * roamDue once the interval has passed since the last step. With neither,
    * suggests the next destination: one hop away in a random direction,
-   * priced and within the caps, never on a person's gibson, preferring cubes
+   * priced and within the caps, never where the agent's avatar would overlap a
+   * person's, preferring cubes
    * not visited lately; and marks the step taken. Never moves the agent.
    */
   async roam(input: { on?: boolean; every_minutes?: number } = {}): Promise<ToolResult> {
@@ -1050,12 +1113,12 @@ export class Agent {
       candidates: this.config.roamCandidates ? this.config.roamCandidates(from, c.hop) : roamCandidates(from, c.hop),
       price: (target) => priceNextStep(from, target, c, this.calibration),
       refusal: (step, target) => this.stepRefusal(step, target),
-      // Every person the server knows of nearby, and the operator wherever the follow watch saw them; a profile not read yet is protected.
-      taken: new Set(this.occupants().keys()),
+      // Every person the server knows of nearby, and the operator wherever the follow watch saw them, with their avatars' boxes; a profile not read yet is protected.
+      blocked: (p) => !this.clearForMe(p),
       visited: this.roaming.visited(),
     })
     const skippedWords = [
-      found.skipped.people ? `${found.skipped.people} on a person's gibson` : '',
+      found.skipped.people ? `${found.skipped.people} too close to a person (avatars would overlap)` : '',
       found.skipped.refused ? `${found.skipped.refused} over your caps` : '',
       found.skipped.notOneHop ? `${found.skipped.notOneHop} not one hop away` : '',
       found.skipped.visited ? `${found.skipped.visited} in cubes visited lately` : '',
@@ -1072,7 +1135,7 @@ export class Agent {
     const nextDue = this.roaming.dueAt()
     const text = [
       `Roam suggestion: ${where.hex} (${where.planeName}, sector ${where.sector}), ${distanceWords(distanceBetween(from, target))}, ${fresh ? 'a cube you have not been to lately' : 'a cube you have been to lately (nothing fresh fits your caps)'}.`,
-      `One ${step.kind} of h${step.maxHeight}, about ${step.seconds.toFixed(2)} s here, within your caps; nobody stands on that gibson.${this.keeper.status() === 'none' ? ' You have no chain yet: hop will sign your spawn first.' : ''}`,
+      `One ${step.kind} of h${step.maxHeight}, about ${step.seconds.toFixed(2)} s here, within your caps; your avatar there overlaps nobody's.${this.keeper.status() === 'none' ? ' You have no chain yet: hop will sign your spawn first.' : ''}`,
       `To go: hop with target ${where.hex}, then look, and tell your operator with message_operator if you saw something worth telling. Moving is your decision: your STRATEGY and your operator's orders come first.`,
       `This counts as your roam step${nextDue ? `; the next is due at ${new Date(nextDue * 1000).toISOString()}` : ''}.`,
     ].join('\n')
@@ -1742,6 +1805,8 @@ export class Agent {
     this.lastAvatarAt = event.created_at
     const entry = this.outbox.add(event)
     const result = await this.outbox.send(entry)
+    // The size the personal-space rule gives the agent's own avatar from now on (space/personalSpace.ts).
+    if (entry.accepted.length) this.avatars.set(this.pubkey, shard)
     const relayWords = entry.accepted.length ? `Accepted by ${entry.accepted.join(', ')}.` : `No relay accepted it${result.ok ? '' : `: ${result.reason}`}.`
     const refusedWords = entry.refused ? ` Refused by ${Object.entries(entry.refused).map(([u, r]) => `${u}: ${r}`).join('; ')}.` : ''
     if (!shard) {
