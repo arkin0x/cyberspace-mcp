@@ -261,13 +261,15 @@ describe('an agent on a fresh key', () => {
     expect((whereB.data.chain as { status: string }).status).toBe('valid')
     await b.chat.listening()
 
-    const heardByB = heardLine(b.chat, 'hello echo, is anyone here?')
-    const said = await a.say({ text: 'hello echo, is anyone here?' })
+    // Addressed by mention, as ONOSENDAI's @ writes it; a plain name does not address (arkinox, 2026-10-11).
+    const hello = `hello nostr:${b.npub}, is anyone here?`
+    const heardByB = heardLine(b.chat, hello)
+    const said = await a.say({ text: hello })
     expect((said.data.accepted as string[]).length).toBeGreaterThan(0)
     await heardByB
     const heard = b.listen({ since: 0 })
     const lines = heard.data.lines as Array<{ id: string; text: string; from: string; addressed: boolean }>
-    expect(lines.map((l) => l.text)).toContain('hello echo, is anyone here?')
+    expect(lines.map((l) => l.text)).toContain(hello)
     expect(lines.find((l) => l.from === a.pubkey)?.addressed).toBe(true)
 
     await expect(a.say({ text: 'too soon' })).rejects.toThrow(/Too soon/)
@@ -325,10 +327,11 @@ describe('an agent on a fresh key', () => {
     b.chat.lastSaidAt = null
     b.chat.arrival()
     const waiting = a.waitFor({ chat: { addressed: true }, timeout_seconds: 10 })
-    await b.say({ text: 'ferryman, over here' })
+    const over = `nostr:${a.npub} over here`
+    await b.say({ text: over })
     const r = await waiting
     expect(r.data.happened).toBe('chat')
-    expect((r.data.line as { text: string }).text).toBe('ferryman, over here')
+    expect((r.data.line as { text: string }).text).toBe(over)
   }, 30_000)
 
   it('the outbox shows what the canonical relay refused, verbatim', () => {

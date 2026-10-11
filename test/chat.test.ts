@@ -37,8 +37,8 @@ describe('merging lines', () => {
 
 describe('addressing', () => {
   const me = { pubkey: 'ab'.repeat(32), npub: 'npub1testing', name: 'ferryman' }
-  it('matches the name as a whole word, the npub, and the hex pubkey', () => {
-    expect(addressesMe('hello Ferryman, are you there?', me)).toBe(true)
+  it('matches the npub and the hex pubkey, never the plain name (arkinox, 2026-10-11: by tag only)', () => {
+    expect(addressesMe('hello Ferryman, are you there?', me)).toBe(false)
     expect(addressesMe('hey npub1testing', me)).toBe(true)
     expect(addressesMe(`for ${'ab'.repeat(32)} only`, me)).toBe(true)
   })

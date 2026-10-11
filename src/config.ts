@@ -6,6 +6,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { HOSAKA_DEFAULT_URL } from './hosaka.js'
+import { DEFAULT_CHAT_WAKE_MINUTES } from './chat.js'
 import { DEFAULT_RELAY } from './nostr/relays.js'
 import { parseNwc, Secret } from './nwc.js'
 import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS } from './wallet.js'
@@ -33,6 +34,8 @@ export interface Settings {
   maxDailySats: number
   /** The public travel log: the human's switch, never the model's (arkinox, 2026-10-11). */
   travelLog: TravelLogSettings
+  /** Least minutes between two wakes for strangers' chat lines that address the agent (arkinox, 2026-10-11). */
+  chatWakeMinutes: number
 }
 
 const DEFAULTS = {
@@ -44,6 +47,7 @@ const DEFAULTS = {
   hosakaUrl: HOSAKA_DEFAULT_URL,
   maxPaymentSats: DEFAULT_MAX_PAYMENT_SATS,
   maxDailySats: DEFAULT_MAX_DAILY_SATS,
+  chatWakeMinutes: DEFAULT_CHAT_WAKE_MINUTES,
 } as const
 
 export interface ParsedArgs {
@@ -62,6 +66,7 @@ export interface ParsedArgs {
   maxDailySats?: number
   travelLog?: boolean
   travelLogMaxPerDay?: number
+  chatWakeMinutes?: number
   help?: boolean
 }
 
@@ -89,11 +94,14 @@ Usage: cyberspace-mcp --state <dir> [options]
                                 Default ${DEFAULTS.maxDailySats}; 0 turns paying off.
   --travel-log                  Let log_travel post public kind 1 notes about the agent's travels. Off by default.
   --travel-log-max-per-day <n>  The most travel log notes in any 24 hours. Default ${DEFAULT_TRAVEL_PER_DAY}
+  --chat-wake-minutes <n>       A stranger's chat line that addresses the agent is reported for
+                                waking at most once per this many minutes, in total and per
+                                speaker; the operator's always. Default ${DEFAULTS.chatWakeMinutes}
   --help                        This text.
 
 The same keys may live in <state>/config.json: relays, operator, name, about,
 capCallSeconds, capSessionSeconds, maxSidestepHeight, allowRespawn, hosakaUrl,
-nwc, maxPaymentSats, maxDailySats, and travelLog: { "enabled": true,
+nwc, maxPaymentSats, maxDailySats, chatWakeMinutes, and travelLog: { "enabled": true,
 "maxPerDay": 6, "tagOperator": false }. The wallet string may also be the "nwc" key
 of <state>/wallet.json, which the server only reads.`
 
@@ -154,6 +162,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case '--max-daily-sats': out.maxDailySats = sats(a, next()); break
       case '--travel-log': out.travelLog = true; break
       case '--travel-log-max-per-day': out.travelLogMaxPerDay = Math.max(1, Math.floor(num(a, next()))); break
+      case '--chat-wake-minutes': out.chatWakeMinutes = num(a, next()); break
       case '--help': case '-h': out.help = true; break
       // An argument that looks like a wallet string is never echoed, even into an error (arkinox, 2026-10-11).
       default: throw new Error(`unknown argument ${/walletconnect|secret=/i.test(a) ? '(it looks like a wallet connection string, so it is not repeated here; use --nwc <uri>)' : JSON.stringify(a)}; try --help`)
@@ -176,6 +185,7 @@ interface FileConfig {
   maxPaymentSats?: unknown
   maxDailySats?: unknown
   travelLog?: unknown
+  chatWakeMinutes?: unknown
 }
 
 /** <state>/wallet.json, which the human writes and the server only reads: {"nwc": "nostr+walletconnect://..."}. */
@@ -232,6 +242,7 @@ export function settingsFrom(args: ParsedArgs, file: FileConfig, walletFile: Wal
     maxPaymentSats: args.maxPaymentSats ?? (file.maxPaymentSats !== undefined ? sats('config.json maxPaymentSats', file.maxPaymentSats) : DEFAULTS.maxPaymentSats),
     maxDailySats: args.maxDailySats ?? (file.maxDailySats !== undefined ? sats('config.json maxDailySats', file.maxDailySats) : DEFAULTS.maxDailySats),
     travelLog: travelLogSettings(args, file.travelLog),
+    chatWakeMinutes: args.chatWakeMinutes ?? posNum(file.chatWakeMinutes) ?? DEFAULTS.chatWakeMinutes,
   }
 }
 

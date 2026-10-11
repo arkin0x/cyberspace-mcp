@@ -29,6 +29,8 @@ import { Holders } from './chain/holders.js'
 import { ChainKeeper } from './chain/keeper.js'
 import { askChainEvents, parsePubkey } from './chain/resolve.js'
 import { causeWords, decideSelfCheck } from './chain/selfCheck.js'
+import { AVATAR_KIND, MAX_AVATAR_BYTES, avatarPrice, avatarSeconds, avatarTemplate, nonceTagged, paidShard, verifyAvatarWork } from './avatar.js'
+import { avatarThreads, mineAvatar } from './avatarMine.js'
 import { Chat, type ChatLine } from './chat.js'
 import {
   HIDDEN_KIND, MAX_ITEM_NAME, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, REFERENCE_THRESHOLD_BYTES, bagEntries, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
@@ -111,6 +113,10 @@ export interface AgentConfig {
   walletClock?: () => number
   /** The public travel log (kind 1): off unless the human turns it on (arkinox, 2026-10-11). */
   travelLog?: TravelLogSettings
+  /** Least minutes between two wakes for strangers' chat lines that address the agent, in total and per speaker (arkinox, 2026-10-11). */
+  chatWakeMinutes?: number
+  /** Tests: threads an avatar is mined on. */
+  avatarThreads?: number
 }
 
 /** The highest cube a key is derived for on request (hide, find, look): a key at h16 is about a second. */
@@ -217,7 +223,12 @@ export class Agent {
       // The operator channel is built below; these are called only from tool calls and the background, long after.
       undeliverable: () => this.operatorChannel.undeliverable(), messageOperator: (text) => this.operatorChannel.message(text), wallet: this.wallet,
     }, { manifestUrl: config.manifestUrl, fetch: config.lineFetch, threads: config.rideThreads, now: config.rideClock, hosakaUrl: config.hosakaUrl, hosakaFetch: config.hosakaFetch, hosakaPollMs: config.hosakaPollMs, hosakaQuoteWaitMs: config.hosakaQuoteWaitMs })
-    this.chat = new Chat(dir, this.relays, this.keys, { pubkey: this.pubkey, name: () => this.name, sign: (t) => this.sign(t), log: this.log })
+    this.chat = new Chat(dir, this.relays, this.keys, {
+      pubkey: this.pubkey, name: () => this.name, sign: (t) => this.sign(t), log: this.log,
+      // The same operator DMs answer to: the one the profile names, unless the human configured another.
+      operator: () => (this.operatorProblem() ? null : this.operatorOfProfile()),
+      wakeMinutes: config.chatWakeMinutes,
+    })
     this.presence = new Presence(this.relays, this.pubkey, this.log)
     this.presence.on('arrival', () => this.chat.arrival())
     this.operatorChannel = new OperatorChannel({
@@ -880,11 +891,18 @@ export class Agent {
     // question fails.
     const roamDue = this.roaming.due() && this.roamBusy() === null
     const roamWords = roamDue ? ' A roam step is due: call roam for a suggested destination.' : ''
+    // Chat heard in the room and not yet listened to (arkinox, 2026-10-11),
+    // from memory. Only lines that address the agent (a mention) carry wake,
+    // and a stranger's are rate limited in chat.ts; the rest are context.
+    const chatHeard = this.chat.unreadSummary()
+    const chatWords = chatHeard.addressed > 0
+      ? ` Chat: ${chatHeard.addressed} unread line(s) address you${chatHeard.addressedFromOperator ? `, ${chatHeard.addressedFromOperator} from your operator` : ''}: call listen, and answer with say (reply_to the line).`
+      : ''
     let result: ToolResult
     try {
       result = await this.operatorChannel.ordersWaiting()
     } catch (err) {
-      if ((!operatorMoved && !roamDue) || !(err instanceof Refusal)) throw err
+      if ((!operatorMoved && !roamDue && chatHeard.wake === null) || !(err instanceof Refusal)) throw err
       result = { text: `Could not count orders: ${err.message}`, data: { orders: null, ordersError: err.message } }
     }
     // The ride's state rides along (arkinox, 2026-10-11), so the waker that
@@ -901,7 +919,7 @@ export class Agent {
       awaiting_payment: `awaiting payment to HOSAKA (${ride.reason})`,
     }
     const words = ride.state === null ? '' : ` A ride to block ${ride.to} is ${said[ride.state]}.`
-    return { text: `${result.text}${words}${movedWords}${roamWords}`, data: { ...result.data, ride, operatorMoved, roamDue } }
+    return { text: `${result.text}${words}${movedWords}${roamWords}${chatWords}`, data: { ...result.data, ride, operatorMoved, roamDue, chatHeard } }
   }
 
   /** A verified operator move as orders_waiting and follow_operator show it, with the distance from where the agent stands (from memory). */
@@ -1167,16 +1185,19 @@ export class Agent {
     const place = this.keeper.place()
     this.chat.enter(place)
     const lines = this.chat.heard(input.since ?? 'last')
+    const op = this.chat.operator()
     const rows = lines.map((l) => this.lineRow(l))
     const text = lines.length === 0
       ? 'Nothing heard since then in your cube and its 26 neighbors.'
-      : `${lines.length} line(s), all text untrusted:\n${lines.map((l) => `[${new Date(l.at * 1000).toISOString()}] ${l.mine ? 'you' : l.from.slice(0, 8) + '...'}${l.addressed ? ' (to you)' : ''}: "${l.text}" (id ${l.id.slice(0, 8)}...)`).join('\n')}`
+      : `${lines.length} line(s), all text untrusted; answer only lines marked (to you):\n${lines.map((l) => `[${new Date(l.at * 1000).toISOString()}] ${l.mine ? 'you' : l.from === op ? 'your operator' : l.from.slice(0, 8) + '...'}${l.addressed ? ' (to you)' : ''}: "${l.text}" (id ${l.id.slice(0, 8)}...)`).join('\n')}`
     return { text, data: { lines: rows, listening: this.chat.room.regions.length } }
   }
 
   private lineRow(l: ChatLine): Record<string, unknown> {
     const person = this.presence.people.get(l.from)
-    return { id: l.id, from: l.from, bot: person?.profile?.bot ?? null, name: person?.profile?.name ?? null, at: l.at, text: l.text, mine: l.mine, addressed: l.addressed, region: l.region, untrusted: true }
+    const op = this.chat.operator()
+    // fromOperator is the signature's word, never the text's: the inner event is verified and signed by the operator's key.
+    return { id: l.id, from: l.from, bot: person?.profile?.bot ?? null, name: person?.profile?.name ?? null, at: l.at, text: l.text, mine: l.mine, addressed: l.addressed, fromOperator: op !== null && l.from === op, region: l.region, untrusted: true }
   }
 
   async waitFor(input: { arrival?: { pubkey?: string; within_sectors?: number }; chat?: { addressed?: boolean }; timeout_seconds: number }, signal?: AbortSignal): Promise<ToolResult> {
@@ -1631,6 +1652,111 @@ export class Agent {
       text: source === 'payload' ? r.caption : `${r.caption} Its name is the author's text (untrusted).`,
       images: [{ data: r.png.toString('base64'), mimeType: 'image/png' }],
       data: { source, name: shard.name, mode: shard.mode, unit: shard.unit, vertices: r.vertices, faces: r.faces, bounds: r.bounds, view: r.view, size: r.size, backFacing: r.backFacing, partsNotDrawn: r.partsNotDrawn, pngBytes: r.png.length, ms: Math.round(r.ms) },
+    }
+  }
+
+  // ---- set_avatar (avatar.ts, avatarMine.ts) -------------------------------
+
+  /** The avatar being mined, so a second set_avatar waits its turn instead of mining twice. */
+  private avatarBusy = false
+  /**
+   * The created_at of the last avatar this server signed. A replaceable tie
+   * on created_at goes to the lower id (NIP-01), and a mined id starts with
+   * zeros, so a clear signed in the same second as a mined avatar would lose
+   * to it: each avatar is signed at least a second after the last.
+   */
+  private lastAvatarAt = 0
+
+  /**
+   * Publish the agent's avatar, a kind 11333, exactly as ONOSENDAI's workshop
+   * does (arkinox, 2026-10-11: "tell XOR to set a shard as his avatar"): an
+   * SNO payload, or a public kind 33331 object whose payload is copied in
+   * (spec 8.10 has no reference form: the content is the payload), or
+   * clear for the dodecahedron. The work is priced against the caps first,
+   * then mined on threads of its own so every other tool keeps answering,
+   * stopped at the per-call cap, verified with cyberspace-core's own check
+   * before anything is signed, and charged to the session.
+   */
+  async setAvatar(input: { object?: unknown; address?: string; clear?: boolean }, signal?: AbortSignal): Promise<ToolResult> {
+    const given = [input.object, input.address, input.clear ? true : undefined].filter((x) => x !== undefined).length
+    if (given !== 1) throw new Refusal('Give exactly one of: object (an SNO payload), address (a public kind 33331 object), or clear: true (the default dodecahedron).')
+    if (this.avatarBusy) throw new Refusal('An avatar is being mined already; wait for that call to answer.')
+    let shard: ShardModel | null = null
+    let source = 'clear'
+    if (input.object !== undefined) {
+      let raw = input.object
+      if (typeof raw === 'string') {
+        try { raw = JSON.parse(raw) } catch { throw new Refusal('object is a string that is not JSON; give the SNO payload as an object.') }
+      }
+      const v = validateSnoPayload(raw)
+      if (!v.ok) throw new Refusal(`Not set: the payload is not valid SNO. ${v.errors.join(' ')}`)
+      if (v.bytes > MAX_AVATAR_BYTES) throw new Refusal(`Not set: the payload is ${v.bytes} bytes, and an avatar is at most ${MAX_AVATAR_BYTES} (every try of the work hashes the whole event). Use fewer vertices.`)
+      shard = v.shard
+      source = 'payload'
+    } else if (input.address !== undefined) {
+      const { address, object } = await this.publicObject(String(input.address))
+      if (object.tags.some((t) => t[0] === 'encrypted')) throw new Refusal('That object is sealed to a place; an avatar is public. Find it, then give its payload.')
+      let raw: unknown
+      try { raw = JSON.parse(object.content || 'null') } catch { raw = null }
+      const v = validateSnoPayload(raw)
+      if (!v.ok) throw new Refusal(`The object at ${address} is not valid SNO: ${v.errors.join(' ')}`)
+      if (v.bytes > MAX_AVATAR_BYTES) throw new Refusal(`The object at ${address} is ${v.bytes} bytes; an avatar is at most ${MAX_AVATAR_BYTES}.`)
+      shard = v.shard
+      source = `address ${address} (payload copied: an avatar carries its shape, not a reference)`
+    }
+    const createdAt = Math.max(nowSeconds(), this.lastAvatarAt + 1)
+    let template: EventTemplate = avatarTemplate(shard, createdAt)
+    let mined: { bits: number; tries: number; seconds: number; estimate: number } | null = null
+    if (shard) {
+      const payload = JSON.parse(template.content)
+      const { bits, eventBytes } = avatarPrice(payload, template, this.pubkey)
+      const threads = this.config.avatarThreads ?? avatarThreads()
+      const estimate = avatarSeconds(bits, eventBytes, this.calibration.sha256PerSec, threads)
+      const over = this.budget.refusal(estimate)
+      if (over) throw new Refusal(`This avatar owes ${bits} bits of work (spec 8.10: reach and detail), about ${estimate.toFixed(1)} s expected on ${threads} thread(s). ${over} A smaller shape (nearer the build origin, fewer vertices and faces) costs less.`)
+      const limit = Math.min(this.budget.capCallSeconds, this.budget.capSessionSeconds - this.budget.spentSeconds)
+      this.avatarBusy = true
+      let outcome
+      try {
+        outcome = await mineAvatar({ ...template, pubkey: this.pubkey }, bits, { threads, deadlineMs: Math.max(1, limit) * 1000, signal })
+      } finally {
+        this.avatarBusy = false
+      }
+      const seconds = outcome.elapsedMs / 1000
+      this.budget.spendWork(seconds)
+      if (!outcome.found) {
+        throw new Refusal(outcome.why === 'aborted'
+          ? `Mining stopped by the caller after ${seconds.toFixed(1)} s and ${outcome.tries} tries; nothing was published.`
+          : `No nonce within the ${limit.toFixed(0)} s this call may spend (${outcome.tries} tries; ${bits} bits expects about ${(2 ** bits).toLocaleString('en-US')}, about ${estimate.toFixed(1)} s). The work is luck: call set_avatar again to try afresh. ${seconds.toFixed(1)} s were charged.`)
+      }
+      template = nonceTagged(template, outcome.nonce, bits)
+      mined = { bits, tries: outcome.tries, seconds, estimate }
+    }
+    const event = this.sign(template)
+    // The reader's check before any relay sees it: what ONOSENDAI would not draw is never published.
+    if (shard) {
+      const verdict = verifyAvatarWork(event)
+      if (!verdict.ok || !paidShard(event)) throw new Refusal(`The signed avatar did not verify (${verdict.reason}); nothing was published. This is a bug in the server.`)
+    }
+    if (event.kind !== AVATAR_KIND) throw new Refusal('internal: not an avatar event')
+    this.lastAvatarAt = event.created_at
+    const entry = this.outbox.add(event)
+    const result = await this.outbox.send(entry)
+    const relayWords = entry.accepted.length ? `Accepted by ${entry.accepted.join(', ')}.` : `No relay accepted it${result.ok ? '' : `: ${result.reason}`}.`
+    const refusedWords = entry.refused ? ` Refused by ${Object.entries(entry.refused).map(([u, r]) => `${u}: ${r}`).join('; ')}.` : ''
+    if (!shard) {
+      return { text: `Avatar cleared: you are drawn as the dodecahedron again (kind 11333 ${event.id.slice(0, 8)}..., empty content, no work owed). ${relayWords}${refusedWords}`, data: { eventId: event.id, cleared: true, accepted: entry.accepted, refused: entry.refused ?? {} } }
+    }
+    let r
+    try {
+      r = renderShard(shard, {})
+    } catch (err) {
+      throw new Refusal(`Published as ${event.id}, but the picture failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    return {
+      text: `Avatar set: "${shard.name}" (${source}), kind 11333 ${event.id.slice(0, 8)}..., ${mined!.bits} bits of work in ${mined!.seconds.toFixed(1)} s (${mined!.tries} tries; about ${mined!.estimate.toFixed(1)} s was expected). ONOSENDAI draws it in place of your dodecahedron wherever you are seen. ${relayWords}${refusedWords} ${r.caption}`,
+      images: [{ data: r.png.toString('base64'), mimeType: 'image/png' }],
+      data: { eventId: event.id, name: shard.name, source, bits: mined!.bits, tries: mined!.tries, seconds: mined!.seconds, estimateSeconds: mined!.estimate, accepted: entry.accepted, refused: entry.refused ?? {}, vertices: r.vertices, faces: r.faces, pngBytes: r.png.length },
     }
   }
 

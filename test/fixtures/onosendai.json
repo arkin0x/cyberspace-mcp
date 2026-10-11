@@ -1,0 +1,71 @@
+{
+  "note": "Made with ONOSENDAI code at 26a8f31 (feat/chat-mentions, PR #305: src/lib/avatar.ts, avatarMine.ts, client.ts, hidden.ts, mentions.ts) and sno-core v0.1.11, by a one-off script (arkinox, 2026-10-11). Test keys only.",
+  "avatar": {
+    "event": {
+      "kind": 11333,
+      "created_at": 1800000000,
+      "tags": [
+        [
+          "name",
+          "Wedge"
+        ],
+        [
+          "client",
+          "ONOSENDAI"
+        ],
+        [
+          "nonce",
+          "3421",
+          "16"
+        ]
+      ],
+      "content": "{\"v\":2,\"name\":\"Wedge\",\"unit\":0,\"extent\":8,\"mode\":\"solid\",\"vertices\":[[0,0,0],[1,0,0],[0,1,0],[0,0,-1]],\"ticks\":[-4],\"colors\":[238,238,238,238],\"faces\":[[0,1,2],[0,2,3],[0,3,1],[1,3,2]]}",
+      "pubkey": "989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f",
+      "id": "000061a3310b78eb26d7a90a30ebc09bc75397f0fff066337f71b352e400b7c5",
+      "sig": "141c49ec4817b49f6aa1f90b73eb0bf6e3f5d874f3d68f3aea09f2e8f7c6f664eb23ca99ceea0cdae7f30dd624eacdac6ba9bbd0b1be70fe545568195d9f740f"
+    },
+    "required": 16
+  },
+  "chat": {
+    "keyHex": "030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dc",
+    "lookupId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "height": 12,
+    "envelope": {
+      "kind": 23330,
+      "created_at": 1800000002,
+      "content": "",
+      "tags": [
+        [
+          "d",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        [
+          "encrypted",
+          "aes-256-gcm",
+          "njQjh51UQgM9KRA8ENCoA8+tvkylCt6LkKMozyLfkHbyevTNMUhvwavfDtB2bMFC4CLUqWcRENWG2/vc1zPYCHrhufNdf3UlDabmATvo/+BVO4yTRUNUZg4X8rNhD41+iF/GC+u9gu9xg5Ty7B6UcFWb/6XjxR+jctUsnvci9eFjrLx7nlWnSjyQRg57/GDLAcE2tymr3gsyO7Nml75H7JL8ljssrGODXIV2PyvospfxlXBIq4RxKJwtuEj5GZZm0Mo7QF1+kk1iJFbiZLflEmkIR283AQ1LXFdmlY5WHu463zBdv48EJ1BVQL5EE1wAjvz5B3VmxQ1SAgxlZeZIxHUlWSALA0yWYcukJaHwSttoZXCgWR+icAUTB/vc0uOvvXuPFJ9Od97zHcVddciHLVULgZ2soomRQWfJ92y9np8wYnR/rUaDYQl1Z+f8jHUVAq5CJ+AQeyG5fnFisyex+DYjGGU7mAHrAiUWkfBPTPdmrKHYXk234ENsd8PFZ0Qgr7K6KgmXLgKS6mxsvYy7HBcOiysxl0CT0IpkHmKnzCZsmvMeGQ122cSivuSx+QEqpLc1EAwF0W1zjxOMhrCk9OOEPB9IdBeA7lmRxvz0Gqn9AHFZpZbYAUl6eFBOZt6b3fT7jF7+2c6sqIMYTJjxVkQRfErieY3P8SrmemZDcOnIaj9nx44shJ4ZOj254y2vloqeujBSW8ptqNBo8+FfQ8Fw1zm3PodmjaeV31op/szoK5s9mTbNyQ1NkwCjK8+y/ZI+DJXCVVnVtHYW4sOu+iw2dMoR/ly3QKHTbWqOT8WKmv2EE5aW7MHHR9a7fdZevFk4u0P/SkwdPFbmsNYR4ZiAGkpDNZzMSpk5egae4XuBk4ZXa8IlQ9hAlUm6dxXJvlBpQkS7RP76RAH786GradviEgPPyEOvhqCwoLeIEPzCZ/r39mtHhJevxg4Z3HcLo4J3JZlOY8ojhgPj4nbz7WKiEePm4FxdqK6pbMQduTUcKyTrZm3XcER4e5r2DhRGjqtK0XU885CPKDEIVdle4OQhghe0r1w9OidAuIJJv8VUJXbNq3uaWzOdje7CJFjYNa+GFbdkipsi4K3YkrmjTWc8ykgQ6iiDEcWITOKi4nC6lBEUvZS7wLtcJ2NfIhJvReOQLAbYk/WFQHH2KLBJEP5/tglC/aVBk1vC6LU2xbTo9xbCsP6LGoiEbsCewoxQJ8HEP/Xdef8fqqsPiq/PqI63gSnoHT+wTx+Xt6b8itmHaMYa816Ie8TSaird7Bw1sgGc1ueQJPaLw/UqjVKWIZ4OOX2q6dHLtA9lzcguHlNu0qfN3m4KTkPfkCXfIzedxn32IrXrxjkGD5VIbh9oWAGwgbeLP+OCSRVWiBm1L/zPmvA87cy259reL31vcvb5hKuaViqHI/jAxPxoSB6SquOm7qfcokaIQsfu8Wtr/xhFUIVn2aAZGs2cePs04Nv/U9sFmSemHMFdWnyrzcB/+uxnjSUKPXGu5WcXsrawpKfEMO2NAyKScWaQTLljDD6WJ0qtiYqrR11v7qEpX4FgRbv3y6aoXaQoA/vsswXfWAYCtRP9bHtwgrFcZaC6FCMQUSNClW1qf82Jv628RGG8KKlFJw6+LL7pog=="
+        ],
+        [
+          "version",
+          "2"
+        ],
+        [
+          "h",
+          "12"
+        ],
+        [
+          "client",
+          "ONOSENDAI"
+        ]
+      ],
+      "pubkey": "989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f",
+      "id": "62f15327b1f549cf50c9b7c815d05416782c8e00134ea4223617b973fb207fbd",
+      "sig": "4c9652648196fd4a939fb87c6286e18a91e6030b00c1e352174206fd8d98f84e98393d51fb6fef963858c3ffdcdf7385919077ecdc350828266387bac8155450"
+    },
+    "speaker": "989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f",
+    "mentioned": "56b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b2920967",
+    "lines": [
+      "nostr:npub126ej3vcv306c883yqkr50pu5pz7mxcjpmjwzulrpn74p9v5jp9ns5f9e49 you made it",
+      "hey everyone"
+    ]
+  }
+}
