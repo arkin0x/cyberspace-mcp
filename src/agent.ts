@@ -45,7 +45,7 @@ import { mergeAnswers } from './nostr/relayOutcome.js'
 import { DEFAULT_RELAY, GENERAL_RELAYS, Relays, normalizeRelay, type PublishResult } from './nostr/relays.js'
 import { OperatorChannel } from './operator.js'
 import { Presence, neighborhoodFilter, sectorsApart, type Person } from './presence.js'
-import { profileTemplate, type ProfileFields } from './profile.js'
+import { profileTemplate, type ProfileFields, MAX_PICTURE_URL, pictureUrl, publishedFields } from './profile.js'
 import { validateSnoPayload } from './sno.js'
 import { hopCeiling, loadOrMeasure, projectCantorMs, type Calibration } from './space/calibration.js'
 import { describePlace, distanceBetween, parseCoordinate, placeOf, spawnPlace, type CoordinateInput, type Place } from './space/coords.js'
@@ -362,14 +362,25 @@ export class Agent {
 
   // ---- identity -------------------------------------------------------------
 
-  async identity(input: { name?: string; about?: string; operator?: string } = {}): Promise<ToolResult> {
+  async identity(input: { name?: string; about?: string; picture?: string; operator?: string } = {}): Promise<ToolResult> {
     const operatorRaw = input.operator ?? this.config.operator
     const operator = operatorRaw ? parsePubkey(operatorRaw) : null
     if (operatorRaw && !operator) throw new Refusal(`The operator must be an npub or a 64-hex pubkey; got ${JSON.stringify(operatorRaw)}.`)
     if (input.name !== undefined) this.name = input.name
-    const fields: ProfileFields = { name: input.name ?? this.config.name, about: input.about ?? this.config.about, operator: operator ?? undefined }
-    const template = profileTemplate(fields, nowSeconds())
+    const picture = input.picture === undefined ? undefined : input.picture.trim() === '' ? '' : pictureUrl(input.picture)
+    if (picture === null) throw new Refusal(`The picture must be an https URL of at most ${MAX_PICTURE_URL} characters; got ${JSON.stringify(input.picture)}.`)
     const last = this.dir.readJson<ProfileFile | null>('profile.json', null)
+    // A field left out keeps what the last published profile said, then the
+    // configuration (arkinox, 2026-10-11: setting the picture must not drop
+    // the about, nor a later call the picture). An empty picture removes it.
+    const had = publishedFields(last?.content)
+    const fields: ProfileFields = {
+      name: input.name ?? had.name ?? this.config.name,
+      about: input.about ?? had.about ?? this.config.about,
+      picture: picture === '' ? undefined : picture ?? had.picture,
+      operator: operator ?? undefined,
+    }
+    const template = profileTemplate(fields, nowSeconds())
     let publish: { status: 'unchanged' } | { status: 'published'; eventId: string; accepted: string[]; refused: Record<string, string> } | { status: 'refused'; eventId: string; refused: Record<string, string>; reason: string }
     if (last && last.content === template.content && JSON.stringify(last.tags) === JSON.stringify(template.tags) && last.accepted.length > 0) {
       publish = { status: 'unchanged' }

@@ -112,8 +112,8 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   server.registerTool('identity', {
     title: 'Identity',
-    description: 'Create or load this agent\'s own key and publish (or update) its kind 0 profile with bot: true and the operator p tag. Returns the npub, the spawn coordinate, whether a chain exists and its status, and your operator\'s current STRATEGY. Call this first.',
-    inputSchema: { name: z.string().optional(), about: z.string().optional(), operator: z.string().optional().describe('The human\'s npub.') },
+    description: 'Create or load this agent\'s own key and publish (or update) its kind 0 profile (name, about, picture) with bot: true and the operator p tag. Fields left out keep what the profile already says. Returns the npub, the spawn coordinate, whether a chain exists and its status, and your operator\'s current STRATEGY. Call this first.',
+    inputSchema: { name: z.string().optional(), about: z.string().optional(), picture: z.string().optional().describe('An https URL of an image for your avatar; an empty string removes it.'), operator: z.string().optional().describe('The human\'s npub.') },
     annotations: { readOnlyHint: false, idempotentHint: true },
   }, async (args) => run(log, () => agent.identity(args)))
 
