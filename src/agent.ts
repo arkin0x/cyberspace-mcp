@@ -81,6 +81,10 @@ export interface AgentConfig {
   /** Tests: a fetch that serves fixture blobs to the line store, and the ride runner's clock. */
   lineFetch?: typeof globalThis.fetch
   rideClock?: () => number
+  /** The HOSAKA API rides are bought from (--hosaka-url, config.json hosakaUrl); the default is the production API ONOSENDAI uses. */
+  hosakaUrl?: string
+  /** Tests: a fetch that serves a fake HOSAKA. */
+  hosakaFetch?: typeof globalThis.fetch
   /** Where the operator's kind 10050 and kind 3 are looked up besides the configured relays. Default GENERAL_RELAYS; tests pass fake ones. */
   lookupRelays?: string[]
 }
@@ -161,7 +165,9 @@ export class Agent {
     this.transit = new Transit(dir, {
       pubkey: this.pubkey, keeper: this.keeper, budget: this.budget, outbox: this.outbox, canonical: this.relays.canonical,
       calibration: () => this.calibration, sign: (t) => this.sign(t), settle: () => this.settle(), refreshChain: () => this.refreshChain(), log: this.log,
-    }, { manifestUrl: config.manifestUrl, fetch: config.lineFetch, threads: config.rideThreads, now: config.rideClock })
+      // The operator channel is built below; these are called only from tool calls, long after.
+      undeliverable: () => this.operatorChannel.undeliverable(), messageOperator: (text) => this.operatorChannel.message(text),
+    }, { manifestUrl: config.manifestUrl, fetch: config.lineFetch, threads: config.rideThreads, now: config.rideClock, hosakaUrl: config.hosakaUrl, hosakaFetch: config.hosakaFetch })
     this.chat = new Chat(dir, this.relays, this.keys, { pubkey: this.pubkey, name: () => this.name, sign: (t) => this.sign(t), log: this.log })
     this.presence = new Presence(this.relays, this.pubkey, this.log)
     this.presence.on('arrival', () => this.chat.arrival())
@@ -660,12 +666,12 @@ export class Agent {
   }
 
   /** Ride the line to a block, over as many calls as the caps need; a hyperjump is signed when the proof is done (DECK-0001 5). */
-  ride(input: { to?: number; budget_seconds?: number; as_of?: number; cancel?: boolean; forget?: boolean } = {}, signal?: AbortSignal): Promise<ToolResult> {
+  ride(input: { to?: number; budget_seconds?: number; as_of?: number; cancel?: boolean; forget?: boolean; prover?: 'local' | 'hosaka' } = {}, signal?: AbortSignal): Promise<ToolResult> {
     return this.transit.ride(input, signal)
   }
 
   /** The ride in flight, if any. */
-  rideStatus(): ToolResult {
+  rideStatus(): Promise<ToolResult> {
     return this.transit.rideStatus()
   }
 

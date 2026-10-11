@@ -196,7 +196,7 @@ describe('the hyperspace tools, on a fresh key over the fixture line', () => {
     a.budget.spentSeconds = spent
     await expect(a.ride({ cancel: true })).rejects.toThrow(Refusal)
     expect(a.keeper.moving).toBe(false)
-    expect(a.rideStatus().data.inFlight).toBe(false)
+    expect((await a.rideStatus()).data.inFlight).toBe(false)
   })
 
   it('ride: progress over two budgeted calls with the head reserved between them, then a hyperjump the reader and Level 1 accept, its cache forgotten only once recorded', async () => {
@@ -219,7 +219,7 @@ describe('the hyperspace tools, on a fresh key over the fixture line', () => {
     expect(a.keeper.moving).toBe(true)
     await expect(a.hop({ target: { dx: 1 } })).rejects.toThrow(/already in flight/)
     await expect(a.ride({ to: to + 1 })).rejects.toThrow(new RegExp(`A ride to block ${to} is in flight`))
-    const status = a.rideStatus()
+    const status = await a.rideStatus()
     expect(status.data).toMatchObject({ inFlight: true, stale: false })
     expect(status.text).toContain(`Ride to block ${to}`)
 
@@ -264,7 +264,7 @@ describe('the hyperspace tools, on a fresh key over the fixture line', () => {
 
     expect(a.here().hex).toBe(parsed.coordHex)
     expect(a.keeper.moving).toBe(false)
-    expect(a.rideStatus().data.inFlight).toBe(false)
+    expect((await a.rideStatus()).data.inFlight).toBe(false)
     expect(a.budget.state().moves).toBe(3)
     expect((await a.station()).data.onLine).toMatchObject({ boarded: true, atStop: to })
   }, 120_000)
@@ -303,7 +303,7 @@ describe('the hyperspace tools, on a fresh key over the fixture line', () => {
     expect(canceled.text).toContain('kept on disk')
     expect(a.keeper.moving).toBe(false)
     expect(existsSync(leavesFile)).toBe(true)
-    expect(a.rideStatus().data.inFlight).toBe(false)
+    expect((await a.rideStatus()).data.inFlight).toBe(false)
     const forgot = await a.ride({ forget: true })
     expect(forgot.data.forgot).toBe(prev.id)
     expect(existsSync(leavesFile)).toBe(false)

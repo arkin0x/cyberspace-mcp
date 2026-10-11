@@ -163,21 +163,22 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   server.registerTool('ride', {
     title: 'Ride the line',
-    description: 'Ride hyperspace to a block (DECK-0001 5), from your station on the first ride after boarding or from the stop you stand at after a ride. The first call quotes the whole ride against the session cap and reserves the head; every call computes for budget_seconds (default: the per-call cap) and returns progress until the proof is done, self-verified and signed as a hyperjump, after which you stand at the stop. Call again with the same to until it says signed. Refuses a block that is your current one, one beyond the verified line, a ride above the session cap, and a head that is not a boarding or a ride. cancel: true releases the head and keeps the work on disk; forget: true drops the work too.',
+    description: 'Ride hyperspace to a block (DECK-0001 5), from your station on the first ride after boarding or from the stop you stand at after a ride. The first call quotes the whole ride against the session cap and reserves the head; every call computes for budget_seconds (default: the per-call cap) and returns progress until the proof is done, self-verified and signed as a hyperjump, after which you stand at the stop. Call again with the same to until it says signed. Refuses a block that is your current one, one beyond the verified line, a ride above the session cap, and a head that is not a boarding or a ride. cancel: true releases the head and keeps the work on disk; forget: true drops the work too. With prover: "hosaka" the proof is bought from HOSAKA instead: the job is submitted, its Lightning invoice is sent to your operator by DM, and the call returns at once (you hold no wallet and never pay; HOSAKA\'s compute does not count against your caps). Watch it with ride_status; when it says done, call ride with the same to, and the proof is verified here at Level 1 and signed exactly as a local one.',
     inputSchema: {
       to: z.number().int().min(0).optional().describe('The block height to ride to.'),
       budget_seconds: z.number().positive().optional().describe('Seconds this call may compute; the per-call cap applies too.'),
       as_of: z.number().int().min(0).optional().describe('First ride after a boarding only: the station set bound to declare, at least to. Default: the newest verified block.'),
       cancel: z.boolean().optional().describe('Release the ride in flight; its work stays on disk.'),
       forget: z.boolean().optional().describe('Release the ride in flight and drop its work from disk.'),
+      prover: z.enum(['local', 'hosaka']).optional().describe('Who computes the proof: "local" (default, this machine, within the caps) or "hosaka" (HOSAKA computes it; your operator pays the invoice sent to them by DM).'),
     },
     annotations: { readOnlyHint: false, destructiveHint: false },
   }, async (args, extra) => run(log, () => agent.ride(args, extra.signal)))
 
   server.registerTool('ride_status', {
     title: 'Ride status',
-    description: 'The ride in flight, if any: where from and to, its phase and leaves, the price attempts, the work spent, whether the head is still the one it left from.',
-    annotations: { readOnlyHint: true },
+    description: 'The ride in flight, if any: where from and to, its phase and leaves, the price attempts, the work spent, whether the head is still the one it left from. For a HOSAKA ride it asks HOSAKA where the job stands: awaiting_payment (the operator has not paid yet), computing, done (call ride to verify and sign), failed, or expired (the invoice lapsed unpaid; ride asks for a fresh one). It starts a job the operator has paid for, and never signs or buys anything.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   }, async () => run(log, () => agent.rideStatus()))
 
   server.registerTool('say', {
@@ -295,7 +296,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
           `2. Call station with sync: true until it says nothing remains to verify${args.stop ? `, or at least until the line reaches block ${args.stop}` : ''}. The line is verified by proof of work and kept in the state directory; a cold start takes many calls.`,
           `3. Call station with destination${args.stop ? `: ${args.stop}` : ''} for the quote: how many blocks, how many seconds, how many calls. Agree the block with your human if none was named; any verified block is a stop.`,
           '4. Call board. You are on the line and have not moved.',
-          `5. Call ride with to${args.stop ? `: ${args.stop}` : ''}, and call it again with the same to each time it returns progress, until it says the ride is signed. ride_status watches it; cancel: true releases the head if you must stop.`,
+          `5. Call ride with to${args.stop ? `: ${args.stop}` : ''}, and call it again with the same to each time it returns progress, until it says the ride is signed. ride_status watches it; cancel: true releases the head if you must stop. A ride too long for your caps can be bought from HOSAKA with prover: "hosaka" if your operator agrees: they get the invoice by DM and pay it, ride_status says when the proof is done, and ride with the same to signs it.`,
           '6. At the stop, call look, say a line, and wait_for an arrival or a chat line addressed to you. Everyone who rides to that block arrives at the same coordinate.',
           '',
           'Never spawn again to get closer, never ask for your human\'s key, quote every ride before spending work, and never try to hop to a far coordinate: plan_hop prices the crossing and refuses it.',

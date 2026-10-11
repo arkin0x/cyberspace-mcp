@@ -5,6 +5,7 @@
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { HOSAKA_DEFAULT_URL } from './hosaka.js'
 import { DEFAULT_RELAY } from './nostr/relays.js'
 
 export interface Settings {
@@ -17,6 +18,8 @@ export interface Settings {
   capSessionSeconds: number
   maxSidestepHeight: number
   allowRespawn: boolean
+  /** The HOSAKA API a ride with prover "hosaka" is bought from. */
+  hosakaUrl: string
 }
 
 const DEFAULTS = {
@@ -25,6 +28,7 @@ const DEFAULTS = {
   capSessionSeconds: 600,
   maxSidestepHeight: 24,
   allowRespawn: false,
+  hosakaUrl: HOSAKA_DEFAULT_URL,
 } as const
 
 export interface ParsedArgs {
@@ -37,6 +41,7 @@ export interface ParsedArgs {
   capSessionSeconds?: number
   maxSidestepHeight?: number
   allowRespawn?: boolean
+  hosakaUrl?: string
   help?: boolean
 }
 
@@ -53,10 +58,25 @@ Usage: cyberspace-mcp --state <dir> [options]
   --cap-session-seconds <n>     The most compute the session may spend. Default ${DEFAULTS.capSessionSeconds}
   --max-sidestep-height <h>     Sidesteps above this height are refused. Default ${DEFAULTS.maxSidestepHeight}
   --allow-respawn               Let hop sign a new spawn on a dead or frozen chain.
+  --hosaka-url <url>            The HOSAKA API rides are bought from (ride with prover "hosaka";
+                                your operator pays the invoice). Default ${DEFAULTS.hosakaUrl}
   --help                        This text.
 
 The same keys may live in <state>/config.json: relays, operator, name, about,
-capCallSeconds, capSessionSeconds, maxSidestepHeight, allowRespawn.`
+capCallSeconds, capSessionSeconds, maxSidestepHeight, allowRespawn, hosakaUrl.`
+
+/** An http(s) URL without a trailing slash, or a thrown sentence. */
+export function apiUrl(flag: string, value: string | undefined): string {
+  if (!value) throw new Error(`${flag} needs a URL`)
+  let u: URL
+  try {
+    u = new URL(value)
+  } catch {
+    throw new Error(`${flag} must be an http(s) URL; got ${JSON.stringify(value)}`)
+  }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new Error(`${flag} must be an http(s) URL; got ${JSON.stringify(value)}`)
+  return value.replace(/\/+$/, '')
+}
 
 function num(flag: string, value: string | undefined): number {
   if (value === undefined) throw new Error(`${flag} needs a value`)
@@ -81,6 +101,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case '--cap-session-seconds': out.capSessionSeconds = num(a, next()); break
       case '--max-sidestep-height': out.maxSidestepHeight = Math.floor(num(a, next())); break
       case '--allow-respawn': out.allowRespawn = true; break
+      case '--hosaka-url': out.hosakaUrl = apiUrl(a, next()); break
       case '--help': case '-h': out.help = true; break
       default: throw new Error(`unknown argument ${JSON.stringify(a)}; try --help`)
     }
@@ -97,6 +118,7 @@ interface FileConfig {
   capSessionSeconds?: unknown
   maxSidestepHeight?: unknown
   allowRespawn?: unknown
+  hosakaUrl?: unknown
 }
 
 /** config.json in the state directory, or an empty object when there is none or it is not JSON. */
@@ -126,5 +148,6 @@ export function settingsFrom(args: ParsedArgs, file: FileConfig): Settings {
     capSessionSeconds: args.capSessionSeconds ?? posNum(file.capSessionSeconds) ?? DEFAULTS.capSessionSeconds,
     maxSidestepHeight: args.maxSidestepHeight ?? (posNum(file.maxSidestepHeight) !== undefined ? Math.floor(posNum(file.maxSidestepHeight)!) : DEFAULTS.maxSidestepHeight),
     allowRespawn: args.allowRespawn ?? (typeof file.allowRespawn === 'boolean' ? file.allowRespawn : DEFAULTS.allowRespawn),
+    hosakaUrl: args.hosakaUrl ?? (str(file.hosakaUrl) !== undefined ? apiUrl('config.json hosakaUrl', str(file.hosakaUrl)) : DEFAULTS.hosakaUrl),
   }
 }

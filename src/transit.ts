@@ -18,6 +18,18 @@
 // as its as_of and the station under it as its from_height; a later ride
 // starts at the previous ride's B and declares no as_of (DECK-0001 4.3,
 // 5.2); and there is no zero-length ride (arkinox, 2026-10-07).
+//
+// A ride can also be bought from HOSAKA (ride with prover: "hosaka"; arkinox,
+// 2026-10-11, for XOR's 661,038-block ride). The plan is the same plan, the
+// head is reserved the same way, and the proof HOSAKA returns goes through
+// the same Level 1 self-verification the local runner does before any event
+// is built, then through the same templates, reader check and publish. What
+// differs is who pays: HOSAKA's invoice is sent to the operator by DM, the
+// operator pays it or not, and the agent holds no wallet and spends nothing,
+// so HOSAKA's compute is not counted against the caps (only the local
+// verification is). The job lives in <state>/hosaka-ride.json with its
+// idempotency key, so a restart resumes polling the same job and an answer
+// lost on the way back asks again for that job, never a second one.
 
 import { availableParallelism } from 'node:os'
 import { join } from 'node:path'
@@ -26,9 +38,10 @@ import type { Budget } from './budget.js'
 import { chainTemplateProblem, enterHyperspaceTemplate, hyperjumpTemplate } from './chain/builder.js'
 import { buildChain, chainStatus, firstBreak, lookBack, openBracket, type ActionEvent } from './chain/events.js'
 import type { ChainKeeper } from './chain/keeper.js'
+import { HOSAKA_DEFAULT_URL, HosakaError, createHosaka, honorsKeys, rideIdempotencyKey, rideResultOf, rideService, type HosakaClient, type HosakaJob } from './hosaka.js'
 import { computeEnterProof } from './hyperspace/enter.js'
 import { LineStore, type LineStatus, type StationResult, type Stop, type SyncResult } from './hyperspace/line.js'
-import { lineStateOf, rideBlocks, zeroLengthRideRefusal, type LineState } from './hyperspace/ride.js'
+import { lineStateOf, rideBlocks, verifyRideLevel1, zeroLengthRideRefusal, type LineState, type RideProof, type RideVerifyResult } from './hyperspace/ride.js'
 import { RideRunner, estimateRideSeconds, type RideProgress, type RideRunResult } from './hyperspace/rideRunner.js'
 import { maxAxisLca } from './hyperspace/station.js'
 import { nowSeconds, type EventTemplate, type NostrEvent } from './nostr/event.js'
@@ -51,6 +64,10 @@ export interface TransitBody {
   settle: () => void
   refreshChain: () => Promise<void>
   log: (line: string) => void
+  /** Why a DM to the operator could not be sent now, or null (operator.ts undeliverable). */
+  undeliverable: () => Promise<string | null>
+  /** The message_operator tool's own path: a NIP-17 DM to the operator. */
+  messageOperator: (text: string) => Promise<ToolResult>
 }
 
 export interface TransitOptions {
@@ -62,6 +79,24 @@ export interface TransitOptions {
   threads?: number
   /** Tests: the ride runner's clock. */
   now?: () => number
+  /** The HOSAKA API rides are bought from; the default is the production API ONOSENDAI uses. */
+  hosakaUrl?: string
+  /** Tests: a fetch that serves a fake HOSAKA. */
+  hosakaFetch?: typeof globalThis.fetch
+}
+
+/** What a ride is, whoever computes its proof: what the signature will need. */
+interface RidePlan {
+  previousId: string
+  prevCoordHex: string
+  genesisId: string
+  fromHeight: number
+  toHeight: number
+  /** Declared on the first ride after a boarding; undefined on a ride from a stop. */
+  asOf: number | undefined
+  chained: boolean
+  blocks: number
+  notes: string[]
 }
 
 /**
@@ -72,16 +107,7 @@ export interface TransitOptions {
  * (rideCache.ts); this record holds only what the signature will need and
  * what the agent asks about.
  */
-interface Flight {
-  previousId: string
-  prevCoordHex: string
-  genesisId: string
-  fromHeight: number
-  toHeight: number
-  /** Declared on the first ride after a boarding; undefined on a ride from a stop. */
-  asOf: number | undefined
-  chained: boolean
-  blocks: number
+interface Flight extends RidePlan {
   quotedSeconds: number
   release: () => void
   startedAt: number
@@ -90,8 +116,55 @@ interface Flight {
   lastCallSeconds: number
   progress: RideProgress | null
   computing: boolean
-  notes: string[]
 }
+
+/**
+ * Where a HOSAKA ride stands, as the tools name it. `submitting` is a submit
+ * whose answer has not come back; the rest are the job's own states as the
+ * agent reads them. The head is reserved in the first four.
+ */
+export type HosakaRideState = 'submitting' | 'awaiting_payment' | 'computing' | 'done' | 'failed' | 'expired'
+
+const HOLDS_HEAD: ReadonlySet<HosakaRideState> = new Set(['submitting', 'awaiting_payment', 'computing', 'done'])
+
+/** Past the invoice's expiry by this much with the node still saying pending, the invoice is taken as lapsed. */
+const EXPIRY_GRACE_S = 30
+
+/** A ride bought from HOSAKA, between calls and across restarts: <state>/hosaka-ride.json. */
+interface HosakaRide {
+  version: 1
+  apiUrl: string
+  /** The submit's idempotency key; every submit for this ride sends it (hosaka.ts rideIdempotencyKey). */
+  key: string
+  state: HosakaRideState
+  previousId: string
+  prevCoordHex: string
+  genesisId: string
+  fromHeight: number
+  toHeight: number
+  asOf: number | null
+  chained: boolean
+  blocks: number
+  createdAt: number
+  jobId: string | null
+  pollToken: string | null
+  costMsats: number | null
+  invoice: { depositId: string; bolt11: string; amountMsats: number; expiresAt: number; status: string } | null
+  /** The invoice the operator was sent, by deposit id, and when. */
+  dm: { depositId: string; at: number } | null
+  dmError: string | null
+  /** The job was paid from the agent's HOSAKA balance (a refund of a failed job), with no invoice. */
+  paidFromBalance: boolean
+  proof: RideProof | null
+  /** HOSAKA's proof failed the agent's own Level 1 check: it is never signed, and asking again returns the same proof. */
+  badProof: boolean
+  error: string | null
+  progressPercent: number | null
+  etaSeconds: number | null
+  polledAt: number | null
+}
+
+const HOSAKA_FILE = 'hosaka-ride.json'
 
 /** How many stops `station` lists around the agent. */
 const NEAREST_STOPS = 5
@@ -150,17 +223,28 @@ export class Transit {
   readonly store: LineStore
   readonly runner: RideRunner
   readonly threads: number
+  readonly hosaka: HosakaClient
   private flight: Flight | null = null
+  private hosakaRide: HosakaRide | null
+  private hosakaRelease: (() => void) | null = null
+  /** One HOSAKA call sequence at a time: a ride_status during a ride call waits for it rather than racing it. */
+  private hosakaBusy: Promise<unknown> = Promise.resolve()
 
-  constructor(dir: StateDir, private readonly body: TransitBody, options: TransitOptions = {}) {
+  constructor(private readonly dir: StateDir, private readonly body: TransitBody, options: TransitOptions = {}) {
     this.store = LineStore.open(join(dir.path, 'line'), { manifestUrl: options.manifestUrl, fetch: options.fetch })
     this.threads = options.threads ?? Math.max(1, availableParallelism() - 1)
     this.runner = RideRunner.open(join(dir.path, 'rides'), { threads: this.threads, now: options.now })
+    this.hosaka = createHosaka({ apiUrl: options.hosakaUrl ?? HOSAKA_DEFAULT_URL, sign: body.sign, fetch: options.hosakaFetch })
+    const saved = dir.readJson<HosakaRide | null>(HOSAKA_FILE, null)
+    this.hosakaRide = saved?.version === 1 ? saved : null
+    // A restart in the middle of a paid ride: the head is reserved again before
+    // any tool runs, so no hop can sign from the head the proof is bound to.
+    if (this.hosakaRide && HOLDS_HEAD.has(this.hosakaRide.state)) this.holdHead()
   }
 
   /** Whether a ride holds the head between calls. */
   get riding(): boolean {
-    return this.flight !== null
+    return this.flight !== null || this.hosakaRide !== null
   }
 
   // ---- station ---------------------------------------------------------------
@@ -410,15 +494,28 @@ export class Transit {
    * call runs the ride for its budget (the per-call cap by default) and
    * returns progress until the proof is done, verified at Level 1 by the
    * runner, and signed. `cancel` releases the head and keeps the cache;
-   * `forget` drops the cache too.
+   * `forget` drops the cache too. With prover "hosaka" the proof is bought
+   * instead (startHosaka); a HOSAKA ride in hand is continued by the same
+   * call, whatever prover is named, so that one key never has two rides.
    */
-  async ride(input: { to?: number; budget_seconds?: number; as_of?: number; cancel?: boolean; forget?: boolean } = {}, signal?: AbortSignal): Promise<ToolResult> {
+  async ride(input: { to?: number; budget_seconds?: number; as_of?: number; cancel?: boolean; forget?: boolean; prover?: 'local' | 'hosaka' } = {}, signal?: AbortSignal): Promise<ToolResult> {
     const budgetSeconds = input.budget_seconds
     if (budgetSeconds !== undefined && (!Number.isFinite(budgetSeconds) || budgetSeconds <= 0)) throw new Refusal('budget_seconds must be a positive number of seconds.')
     if (input.as_of !== undefined && !isHeight(input.as_of)) throw new Refusal('as_of must be a block height: a non-negative integer.')
-    if (input.cancel || input.forget) return this.releaseRide(!!input.forget)
+    if (input.prover !== undefined && input.prover !== 'local' && input.prover !== 'hosaka') throw new Refusal('prover must be "local" (this machine computes the proof) or "hosaka" (HOSAKA computes it, and your operator pays its invoice).')
+    if (input.cancel || input.forget) return this.hosakaRide ? this.serial(() => this.cancelHosaka(this.hosakaRide!, !!input.forget)) : this.releaseRide(!!input.forget)
     const to = input.to
     if (!isHeight(to)) throw new Refusal('Say which block to ride to: to, a block height. Or pass cancel: true to release a ride in flight, or forget: true to drop its cache too.')
+    const bought = this.hosakaRide
+    if (bought) {
+      if (bought.toHeight !== to) throw new Refusal(`A HOSAKA ride to block ${bought.toHeight} is in hand (${this.hosakaWords(bought)}). Call ride with to: ${bought.toHeight} to continue it, ride_status to watch it, or cancel: true to let it go before riding elsewhere.`)
+      if (input.prover === 'local') throw new Refusal(`A HOSAKA ride to block ${to} is in hand (${this.hosakaWords(bought)}); computing the same ride here as well would be a second ride from one head. Cancel it first to ride locally.`)
+      return this.serial(() => this.continueHosaka(bought))
+    }
+    if (input.prover === 'hosaka') {
+      if (this.flight) throw new Refusal(`A ride to block ${this.flight.toHeight} is computing on this machine (${this.flightWords(this.flight)}). Cancel it first (its work stays on disk) to buy the ride from HOSAKA instead.`)
+      return this.serial(() => this.startHosaka(to, input.as_of))
+    }
     if (this.flight?.computing) throw new Refusal(`The ride to block ${this.flight.toHeight} is computing in another call right now; wait for that call to return, then call ride again.`)
     if (this.flight && this.flight.toHeight !== to) {
       throw new Refusal(`A ride to block ${this.flight.toHeight} is in flight (${this.flightWords(this.flight)}). Call ride with to: ${this.flight.toHeight} to continue it, ride_status to watch it, or cancel: true to release the head before riding elsewhere.`)
@@ -432,9 +529,12 @@ export class Transit {
     return this.continueRide(this.flight!, budgetSeconds, signal)
   }
 
-  /** The first call: the chain, the line, the station, the quote, then the reservation. */
-  private async startRide(to: number, asOfInput: number | undefined): Promise<void> {
-    const { keeper, budget } = this.body
+  /**
+   * What a ride from the agent's head to `to` would be, whoever computes it:
+   * the chain, the line, the station or the stop, the as_of, the blocks.
+   * Refuses in words; reserves nothing.
+   */
+  private async planRide(to: number, asOfInput: number | undefined): Promise<RidePlan> {
     await this.body.refreshChain()
     const chain = this.chainToExtend('ride')
     const state = lineStateOf(chain)
@@ -465,11 +565,19 @@ export class Transit {
     const zero = zeroLengthRideRefusal(fromHeight, to, chained)
     if (zero) throw new Refusal(zero)
     const blocks = rideBlocks(fromHeight, to).length
+    return { previousId: state.previousId, prevCoordHex: state.coordHex, genesisId: chain[0].id, fromHeight, toHeight: to, asOf, chained, blocks, notes }
+  }
+
+  /** The first call of a ride computed here: the plan, the quote against the session cap, then the reservation. */
+  private async startRide(to: number, asOfInput: number | undefined): Promise<void> {
+    const { keeper, budget } = this.body
+    const plan = await this.planRide(to, asOfInput)
+    const { blocks, fromHeight } = plan
     const seconds = estimateRideSeconds(this.body.calibration(), blocks, this.threads)
     const b = budget.state()
     if (!(seconds <= b.remainingSessionSeconds)) {
       const calls = Math.max(1, Math.ceil(seconds / b.capCallSeconds))
-      throw new Refusal(`A ride of ${blocks} block(s) from block ${fromHeight} to block ${to} is expected to take about ${seconds.toFixed(1)} s on this machine (${threadWords(this.threads)}), and the session has ${b.remainingSessionSeconds.toFixed(1)} s of its ${b.capSessionSeconds} s left. One call is capped at ${b.capCallSeconds} s, so the ride would span about ${calls} call(s); the per-call cap bounds one call and the session cap bounds the whole ride. Pick a nearer block, or ask your human to raise the session cap or start a new session.`)
+      throw new Refusal(`A ride of ${blocks} block(s) from block ${fromHeight} to block ${to} is expected to take about ${seconds.toFixed(1)} s on this machine (${threadWords(this.threads)}), and the session has ${b.remainingSessionSeconds.toFixed(1)} s of its ${b.capSessionSeconds} s left. One call is capped at ${b.capCallSeconds} s, so the ride would span about ${calls} call(s); the per-call cap bounds one call and the session cap bounds the whole ride. Pick a nearer block, ask your human to raise the session cap or start a new session, or buy the ride from HOSAKA with prover: "hosaka" (your operator pays its invoice).`)
     }
     let release: () => void
     try {
@@ -477,10 +585,7 @@ export class Transit {
     } catch (err) {
       throw new Refusal(words(err))
     }
-    this.flight = {
-      previousId: state.previousId, prevCoordHex: state.coordHex, genesisId: chain[0].id, fromHeight, toHeight: to, asOf, chained, blocks, quotedSeconds: seconds,
-      release, startedAt: Date.now(), calls: 0, workSeconds: 0, lastCallSeconds: 0, progress: null, computing: false, notes,
-    }
+    this.flight = { ...plan, quotedSeconds: seconds, release, startedAt: Date.now(), calls: 0, workSeconds: 0, lastCallSeconds: 0, progress: null, computing: false }
   }
 
   /**
@@ -546,15 +651,10 @@ export class Transit {
     const again = await keeper.confirmHead()
     if (again) throw new Refusal(`${again} The ride's proof is finished and kept on disk: call ride again with to: ${flight.toHeight} once the relays answer, and it is signed without being recomputed.`)
     this.refuseIfMoved(flight)
-    const head = keeper.head()!
     const toCoordHex = line.stopCoordHex(flight.toHeight)!
     let event: NostrEvent
     try {
-      event = this.signChainEvent(hyperjumpTemplate({
-        createdAt: createdAtAfter(head), genesisId: flight.genesisId, previousId: flight.previousId, prevCoordHex: flight.prevCoordHex, toCoordHex,
-        fromHeight: flight.fromHeight, toHeight: flight.toHeight, ...(flight.asOf !== undefined ? { asOf: flight.asOf } : {}),
-        rootHex: result.proof.rootHex, mp: result.proof.mp, mnHex: result.proof.mnHex,
-      }), 'ride')
+      event = this.signRide(flight, result.proof)
     } catch (err) {
       // A bug, not a refusal: the head is released so the agent is not stuck, and the cache is kept.
       this.dropFlight(flight, false)
@@ -622,8 +722,28 @@ export class Transit {
     return { text, data: { done: false, inFlight: true, ride: this.flightData(flight), budget: b } }
   }
 
-  /** The ride in flight, read only. */
-  rideStatus(): ToolResult {
+  /**
+   * The ride in flight. Read only for a ride computed here. For a HOSAKA ride
+   * it asks HOSAKA where the job stands, and moves a paid job along (claims
+   * the operator's payment and starts the job, which HOSAKA charges once);
+   * it never signs a hyperjump and never asks for a new job or invoice.
+   */
+  async rideStatus(): Promise<ToolResult> {
+    const rec = this.hosakaRide
+    if (rec) {
+      return this.serial(async () => {
+        const cur = this.hosakaRide
+        if (!cur) return this.localRideStatus()
+        const stale = this.body.keeper.head()?.id !== cur.previousId
+        const notes = stale ? ['The head is no longer the one this ride departs from, so its proof can never be signed; the next ride call lets it go.'] : await this.pollHosaka(cur, false)
+        const result = this.hosakaResult(cur, notes)
+        return { ...result, data: { ...result.data, stale } }
+      })
+    }
+    return this.localRideStatus()
+  }
+
+  private localRideStatus(): ToolResult {
     const flight = this.flight
     const state = lineStateOf(this.body.keeper.chain())
     const onLine = state === null ? 'You are not on the line; board first.' : state.fromHeight === null ? 'You are boarded; ride to a block to travel.' : `You stand at the stop for block ${state.fromHeight}; ride again, or hop to leave the line.`
@@ -653,7 +773,463 @@ export class Transit {
     }
   }
 
+  // ---- HOSAKA rides ------------------------------------------------------------
+
+  /** Run HOSAKA call sequences one after another, so a status poll never races a ride call over the same job. */
+  private serial<T>(work: () => Promise<T>): Promise<T> {
+    const next = this.hosakaBusy.then(work, work)
+    this.hosakaBusy = next.catch(() => {})
+    return next
+  }
+
+  private saveHosaka(): void {
+    this.dir.writeJson(HOSAKA_FILE, this.hosakaRide)
+  }
+
+  /** Reserve the head for the HOSAKA ride, if it is not reserved already. Throws the keeper's words when a move holds it. */
+  private holdHead(): void {
+    if (!this.hosakaRelease) this.hosakaRelease = this.body.keeper.reserve()
+  }
+
+  private letGoOfHead(): void {
+    this.hosakaRelease?.()
+    this.hosakaRelease = null
+  }
+
+  /** Forget the HOSAKA ride: the file, the record and the reservation. */
+  private dropHosaka(): void {
+    this.hosakaRide = null
+    this.saveHosaka()
+    this.letGoOfHead()
+  }
+
+  /** Set the state, and hold or release the head to match it. */
+  private setHosakaState(rec: HosakaRide, state: HosakaRideState): void {
+    rec.state = state
+    if (!HOLDS_HEAD.has(state)) this.letGoOfHead()
+  }
+
+  private hosakaWhere(): string {
+    return `HOSAKA at ${this.hosaka.apiUrl}`
+  }
+
+  /**
+   * Buy a ride from HOSAKA: the plan, then every check that can refuse before
+   * an invoice exists (the operator can be sent a DM, HOSAKA sells rides and
+   * honors idempotency keys, the head is confirmed), then the reservation,
+   * the record with its key, the submit, and the invoice to the operator.
+   * Returns at once: payment is the operator's, in their own time.
+   */
+  private async startHosaka(to: number, asOfInput: number | undefined): Promise<ToolResult> {
+    const { keeper } = this.body
+    if (this.hosakaRide) throw new Refusal(`A HOSAKA ride to block ${this.hosakaRide.toHeight} is already in hand (${this.hosakaWords(this.hosakaRide)}).`)
+    const plan = await this.planRide(to, asOfInput)
+    const undeliverable = await this.body.undeliverable()
+    if (undeliverable) throw new Refusal(`${undeliverable} A HOSAKA ride is paid by your operator from an invoice sent to them by DM, so with no way to send it nothing was submitted to HOSAKA and no invoice exists.`)
+    let provider
+    try {
+      provider = await this.hosaka.provider()
+    } catch (err) {
+      throw new Refusal(`${this.hosakaWhere()} could not be asked what it sells: ${words(err)}. Nothing was submitted.`)
+    }
+    const service = rideService(provider)
+    if (!service) throw new Refusal(`${this.hosakaWhere()} does not sell rides (its /api/v1/provider lists no ride service). Nothing was submitted. Ride on this machine instead (station with destination quotes it), or tell your operator.`)
+    if (service.maxBlocks !== null && plan.blocks > service.maxBlocks) throw new Refusal(`${this.hosakaWhere()} computes rides of at most ${service.maxBlocks} block(s), and this one passes ${plan.blocks}. Nothing was submitted. Pick a nearer block.`)
+    if (!honorsKeys(provider)) throw new Refusal(`${this.hosakaWhere()} does not say it honors idempotency keys, so a submit whose answer was lost could not be asked about again without the risk of a second job and a second invoice. Nothing was submitted.`)
+    try {
+      this.holdHead()
+    } catch (err) {
+      throw new Refusal(words(err))
+    }
+    try {
+      // The proof will be bound to this head (DECK-0001 5.3): confirm it before anyone pays for it.
+      const unconfirmed = await keeper.confirmHead()
+      if (unconfirmed) throw new Refusal(`${unconfirmed} Nothing was submitted to HOSAKA: a proof is bought only for a head the relays confirm.`)
+      if (keeper.head()?.id !== plan.previousId) throw new Refusal(`The head moved while planning: the relays hold a newer move (${keeper.head()?.id.slice(0, 8)}...), adopted now. Nothing was submitted; call ride again from where you stand.`)
+    } catch (err) {
+      this.letGoOfHead()
+      throw err
+    }
+    const rec: HosakaRide = {
+      version: 1, apiUrl: this.hosaka.apiUrl, key: rideIdempotencyKey(plan.previousId, plan.fromHeight, plan.toHeight), state: 'submitting',
+      previousId: plan.previousId, prevCoordHex: plan.prevCoordHex, genesisId: plan.genesisId, fromHeight: plan.fromHeight, toHeight: plan.toHeight,
+      asOf: plan.asOf ?? null, chained: plan.chained, blocks: plan.blocks, createdAt: Date.now(),
+      jobId: null, pollToken: null, costMsats: null, invoice: null, dm: null, dmError: null, paidFromBalance: false, proof: null, badProof: false,
+      error: null, progressPercent: null, etaSeconds: null, polledAt: null,
+    }
+    // On disk before the submit goes out, so an answer lost on the way back, or a crash, asks again with this key.
+    this.hosakaRide = rec
+    this.saveHosaka()
+    const notes = [...plan.notes, ...(await this.submitHosaka(rec, 'fresh'))]
+    notes.push(...(await this.deliverInvoice(rec)))
+    return this.hosakaResult(rec, notes)
+  }
+
+  /**
+   * Submit the ride with its key. A lost answer leaves the record in
+   * `submitting`, to be asked again with the same key; a refusal drops a
+   * ride that has no job yet and is reported in HOSAKA's words.
+   */
+  private async submitHosaka(rec: HosakaRide, why: 'fresh' | 'again'): Promise<string[]> {
+    let job: HosakaJob
+    try {
+      job = await this.hosaka.submitRide(rec.previousId, rec.fromHeight, rec.toHeight, rec.key)
+    } catch (err) {
+      if (err instanceof HosakaError && err.answerLost) {
+        this.setHosakaState(rec, rec.jobId ? rec.state : 'submitting')
+        this.saveHosaka()
+        return [`HOSAKA's answer to the submit was lost (${err.message}). It may have made the job; the next ride call asks again with the same idempotency key, which gets back that job and never a second one or a second invoice.`]
+      }
+      if (why === 'fresh' || !rec.jobId) {
+        this.dropHosaka()
+        throw new Refusal(`${this.hosakaWhere()} refused the ride: ${words(err)}. No job was made and no invoice exists; the head is released.`)
+      }
+      throw new Refusal(`${this.hosakaWhere()} refused to start the job again: ${words(err)}. The ride stays in hand; cancel: true lets it go.`)
+    }
+    if (job.idempotency_key !== undefined && job.idempotency_key !== rec.key) {
+      // A server that echoes some other key is not keeping ours; nothing more is asked of it on its own.
+      rec.error = 'HOSAKA echoed a different idempotency key than the one sent'
+    }
+    if (job.status === 'computing' && job.balance_debited && !job.deposit) rec.paidFromBalance = true
+    this.absorb(rec, job)
+    this.saveHosaka()
+    return job.idempotent_replay ? ['HOSAKA answered with the job this ride already had (same idempotency key): nothing new was made or charged.'] : []
+  }
+
+  /** Fold a job answer into the record. */
+  private absorb(rec: HosakaRide, job: HosakaJob): void {
+    if (typeof job.id === 'string' && job.id) rec.jobId = job.id
+    if (typeof job.poll_token === 'string' && job.poll_token) rec.pollToken = job.poll_token
+    if (typeof job.cost_msats === 'number') rec.costMsats = job.cost_msats
+    const d = job.deposit
+    if (d && typeof d.bolt11 === 'string' && typeof d.deposit_id === 'string') {
+      rec.invoice = { depositId: d.deposit_id, bolt11: d.bolt11, amountMsats: Number(d.amount_msats) || 0, expiresAt: Number(d.expires_at) || 0, status: d.status }
+    }
+    rec.polledAt = Date.now()
+    const progress = (job.result ?? null) as { progress_percent?: unknown; eta_seconds?: unknown } | null
+    if (job.status === 'computing' && progress && typeof progress === 'object') {
+      rec.progressPercent = typeof progress.progress_percent === 'number' ? progress.progress_percent : rec.progressPercent
+      rec.etaSeconds = typeof progress.eta_seconds === 'number' ? progress.eta_seconds : rec.etaSeconds
+    }
+    switch (job.status) {
+      case 'completed': {
+        const r = rideResultOf(job)
+        if (typeof r === 'string') {
+          rec.error = `HOSAKA says the job completed, but ${r}`
+          rec.badProof = true
+          this.setHosakaState(rec, 'failed')
+        } else if (r.previous_event_id !== rec.previousId || r.from_height !== rec.fromHeight || r.to_height !== rec.toHeight) {
+          rec.error = `HOSAKA returned a proof for another ride (head ${String(r.previous_event_id).slice(0, 8)}..., blocks ${r.from_height} to ${r.to_height})`
+          rec.badProof = true
+          this.setHosakaState(rec, 'failed')
+        } else {
+          rec.proof = { rootHex: r.root, mp: r.mp, mnHex: r.mn }
+          rec.error = null
+          this.setHosakaState(rec, 'done')
+        }
+        break
+      }
+      case 'failed':
+        rec.error = job.error || 'HOSAKA gave no reason'
+        this.setHosakaState(rec, 'failed')
+        break
+      case 'computing':
+        rec.error = null
+        this.setHosakaState(rec, 'computing')
+        break
+      case 'pending':
+        this.setHosakaState(rec, rec.invoice && rec.invoice.status === 'expired' ? 'expired' : 'awaiting_payment')
+        break
+    }
+  }
+
+  /**
+   * Send the operator the invoice the job waits on, once per invoice. A DM
+   * that cannot be delivered is retried by the next ride or ride_status call;
+   * the invoice is in the tool's answer too.
+   */
+  private async deliverInvoice(rec: HosakaRide): Promise<string[]> {
+    const inv = rec.invoice
+    if (rec.state !== 'awaiting_payment' || !inv || inv.status !== 'pending' || rec.dm?.depositId === inv.depositId) return []
+    const sats = Math.ceil(inv.amountMsats / 1000)
+    const costSats = rec.costMsats !== null ? Math.ceil(rec.costMsats / 1000) : null
+    const minutes = Math.max(0, Math.round((inv.expiresAt - Date.now() / 1000) / 60))
+    const text = [
+      `HOSAKA invoice for my hyperspace ride: ${sats} sats.`,
+      `It pays HOSAKA to compute the proof for one ride, from block ${rec.fromHeight} to block ${rec.toHeight} (${rec.blocks} blocks), departing from my chain head ${rec.previousId.slice(0, 8)}. I check the proof myself before I sign anything.`,
+      costSats !== null && costSats !== sats ? `The job costs ${costSats} sats; ${sats} sats are due now (HOSAKA invoices whole sats, and anything already in my HOSAKA balance counts).` : '',
+      `It expires ${new Date(inv.expiresAt * 1000).toISOString()} (about ${minutes} min). If you do not pay, nothing happens: the invoice lapses and I stay where I am. I hold no wallet and pay nothing myself.`,
+      `Job ${rec.jobId ?? '(unknown)'} at ${rec.apiUrl}.`,
+      '',
+      inv.bolt11,
+    ].filter((l, i) => l !== '' || i === 5).join('\n')
+    try {
+      await this.body.messageOperator(text)
+      rec.dm = { depositId: inv.depositId, at: Date.now() }
+      rec.dmError = null
+      this.saveHosaka()
+      return [`The invoice (${sats} sats) was sent to your operator by DM.`]
+    } catch (err) {
+      rec.dmError = words(err)
+      this.saveHosaka()
+      return [`The invoice could NOT be sent to your operator: ${rec.dmError} The next ride or ride_status call tries again; the invoice is also below, to pass on another way your operator asked for.`]
+    }
+  }
+
+  /**
+   * Ask HOSAKA where the job stands and move it along as far as the
+   * operator's payment allows: a paid invoice is claimed and the job started
+   * (HOSAKA charges once, in one transaction, however often it is asked), a
+   * computing job is read with its poll token. `again` is the ride call's
+   * license to do what costs a decision: submit with the key again after a
+   * lost answer or a failed job, and ask for a fresh invoice for an expired one.
+   */
+  private async pollHosaka(rec: HosakaRide, again: boolean): Promise<string[]> {
+    const notes: string[] = []
+    if (rec.apiUrl !== this.hosaka.apiUrl) {
+      // The job lives at the HOSAKA it was bought from; another one would not know it, and a submit there would be a second job.
+      notes.push(`This ride was bought from HOSAKA at ${rec.apiUrl}, but this server now talks to ${this.hosaka.apiUrl}, so the job was not asked about. Ask your human to start the server with --hosaka-url ${rec.apiUrl} again, or cancel: true to let the ride go.`)
+      return notes
+    }
+    try {
+      if (rec.state === 'submitting' || (again && rec.state === 'failed' && !rec.badProof)) {
+        if (!again) return notes
+        const provider = await this.hosaka.provider()
+        if (!honorsKeys(provider)) {
+          notes.push(`${this.hosakaWhere()} no longer says it honors idempotency keys, so the submit is not asked again (it could make a second job). Ask your operator whether a job ${rec.jobId ?? 'for this ride'} was paid; cancel: true lets the ride go.`)
+          return notes
+        }
+        if (rec.state === 'failed') {
+          this.holdHead()
+          notes.push('Starting the failed job again with the same key: HOSAKA refunded the failed job to this agent\'s HOSAKA balance, so the new job is paid from that refund, not by a new payment.')
+        }
+        notes.push(...(await this.submitHosaka(rec, 'again')))
+      } else if (rec.state === 'expired' && again) {
+        this.holdHead()
+        // /start credits an invoice paid even past its expiry; otherwise it issues a fresh one for the operator.
+        this.absorb(rec, await this.hosaka.startJob(rec.jobId!))
+      } else if (rec.state === 'awaiting_payment' && rec.jobId) {
+        const inv = rec.invoice
+        if (inv) {
+          const dep = await this.hosaka.claimDeposit(inv.depositId)
+          inv.status = dep.status
+          if (dep.status === 'settled') {
+            notes.push('Your operator paid the invoice; HOSAKA starts the job now.')
+            this.absorb(rec, await this.hosaka.startJob(rec.jobId))
+          } else if (dep.status === 'expired' || Date.now() / 1000 > inv.expiresAt + EXPIRY_GRACE_S) {
+            inv.status = 'expired'
+            this.setHosakaState(rec, 'expired')
+          }
+        } else {
+          this.absorb(rec, await this.hosaka.startJob(rec.jobId))
+        }
+      } else if (rec.state === 'computing' && rec.jobId && rec.pollToken) {
+        this.absorb(rec, await this.hosaka.getJob(rec.jobId, rec.pollToken))
+      } else if (rec.state === 'computing' && rec.jobId) {
+        // No poll token survived (an answer that carried none): /start answers a running job with where it stands.
+        this.absorb(rec, await this.hosaka.startJob(rec.jobId))
+      }
+    } catch (err) {
+      if (err instanceof Refusal) throw err
+      notes.push(`${this.hosakaWhere()} could not be asked about the job just now: ${words(err)}. Nothing changed; ask again later.`)
+    } finally {
+      if (this.hosakaRide === rec) {
+        // A retry that went nowhere leaves the ride waiting on a decision, and a ride waiting on one holds no head.
+        if (!HOLDS_HEAD.has(rec.state)) this.letGoOfHead()
+        this.saveHosaka()
+      }
+    }
+    notes.push(...(await this.deliverInvoice(rec)))
+    return notes
+  }
+
+  /** Whether the head is still the one the HOSAKA ride departs from; drops the ride and refuses when it is not. */
+  private refuseIfHosakaStale(rec: HosakaRide): void {
+    const head = this.body.keeper.head()
+    if (head?.id === rec.previousId) return
+    const paid = this.hosakaPaid(rec)
+    this.dropHosaka()
+    throw new Refusal(`The head moved since the HOSAKA ride to block ${rec.toHeight} was bought: the relays hold a newer move (${head ? `${head.id.slice(0, 8)}...` : 'none'}). HOSAKA's proof is bound to the old head (DECK-0001 5.3) and can never be signed, so the ride was let go.${paid ? ` Its job (${rec.jobId}) was paid; tell your operator with message_operator.` : rec.state === 'awaiting_payment' ? ' Its invoice was not paid; tell your operator not to pay it.' : ''} Board or ride again from where you stand.`)
+  }
+
+  /** A ride call on a HOSAKA ride in hand: move it along, and sign it once its proof is in and verified. */
+  private async continueHosaka(rec: HosakaRide): Promise<ToolResult> {
+    if (this.hosakaRide !== rec) throw new Refusal('The HOSAKA ride changed while this call waited for another one (canceled or signed meanwhile). Call ride_status to see where you stand.')
+    await this.body.refreshChain()
+    this.refuseIfHosakaStale(rec)
+    if (rec.badProof) throw new Refusal(`HOSAKA's job ${rec.jobId} for the ride to block ${rec.toHeight} returned a proof this server refuses (${rec.error}). It was never signed, and asking again returns the same proof. Tell your operator with message_operator (they paid for it), then cancel: true to let the ride go.`)
+    if (rec.state === 'failed' || rec.state === 'expired') {
+      try {
+        this.holdHead()
+      } catch (err) {
+        throw new Refusal(words(err))
+      }
+    }
+    const notes = await this.pollHosaka(rec, true)
+    if (rec.state !== 'done') return this.hosakaResult(rec, notes)
+    return this.signHosaka(rec, notes)
+  }
+
+  /**
+   * The proof is in: verify it here at Level 1 exactly as the local runner
+   * verifies its own, then confirm the head, sign through the builder's and
+   * the reader's checks, record, publish. A proof that does not verify is
+   * never signed.
+   */
+  private async signHosaka(rec: HosakaRide, notes: string[]): Promise<ToolResult> {
+    const { keeper, budget } = this.body
+    const line = this.store.line
+    const proof = rec.proof!
+    if (!line.has(rec.fromHeight) || !line.has(rec.toHeight)) throw new Refusal(`HOSAKA's proof is in, but this process does not hold blocks ${rec.fromHeight} to ${rec.toHeight} of the line (verified to block ${line.asOf()}), so it cannot be checked. Call station with sync: true, then ride again; the proof is kept.`)
+    const t0 = performance.now()
+    let verification: RideVerifyResult
+    try {
+      verification = await verifyRideLevel1({
+        previousEventIdHex: rec.previousId, fromHeight: rec.fromHeight, toHeight: rec.toHeight, rootHex: proof.rootHex, mp: proof.mp, mn: proof.mnHex,
+        blockHashFor: (height) => {
+          const hash = line.blockHash(height)
+          if (!hash) throw new Error(`block ${height} is not verified by this process`)
+          return hash
+        },
+      })
+    } catch (err) {
+      verification = { ok: false, checked: 0, reason: words(err), grandfathered: false }
+    }
+    const seconds = (performance.now() - t0) / 1000
+    // The check is this machine's work, so it is counted; HOSAKA's compute is not.
+    budget.spendWork(seconds)
+    if (!verification.ok || verification.grandfathered) {
+      rec.badProof = true
+      rec.error = `it failed Level 1 self-verification: ${verification.reason ?? 'a ride signed now needs an mn'}`
+      this.setHosakaState(rec, 'failed')
+      this.saveHosaka()
+      throw new Refusal(`HOSAKA's proof for the ride to block ${rec.toHeight} ${rec.error}. Nothing was signed and nothing reached a relay; the head is released. Tell your operator with message_operator: they paid for job ${rec.jobId} at ${rec.apiUrl}. cancel: true lets the ride go.`)
+    }
+    const again = await keeper.confirmHead()
+    if (again) throw new Refusal(`${again} HOSAKA's proof is verified and kept: call ride again with to: ${rec.toHeight} once the relays answer, and it is signed.`)
+    this.refuseIfHosakaStale(rec)
+    const plan: RidePlan = { ...rec, asOf: rec.asOf ?? undefined, notes: [] }
+    const event = this.signRide(plan, proof)
+    const published = await this.publish(event)
+    // Only now, with the event recorded by publish, is the job forgotten: a crash before this resumes at done, and the head check then sees the ride.
+    this.dropHosaka()
+    budget.moves++
+    this.body.settle()
+    const toCoordHex = line.stopCoordHex(rec.toHeight)!
+    const stop = line.stopAt(rec.toHeight)!
+    const where = describePlace(placeFromHex(toCoordHex))
+    const text = [
+      `Ride ${event.id.slice(0, 8)}... signed: block ${rec.fromHeight} to block ${rec.toHeight} (${rec.blocks} block(s)${rec.asOf !== null ? `, as_of ${rec.asOf}` : ''}), proof computed by HOSAKA (job ${rec.jobId}) and verified here at Level 1 (${verification.checked} openings, ${seconds.toFixed(1)} s). You now stand at ${stopWords(stop, toCoordHex)}.`,
+      ...this.relayWords(published.entry, published.result),
+      ...notes,
+      'Ride again to another block, or hop or sidestep to leave the line (a target away from this stop is priced by plan_hop).',
+    ].join('\n')
+    return {
+      text,
+      data: {
+        eventId: event.id, action: 'hyperjump', prover: 'hosaka', job: rec.jobId, fromHeight: rec.fromHeight, toHeight: rec.toHeight, asOf: rec.asOf, blocks: rec.blocks, where, stop: stopData(stop, toCoordHex),
+        verification, verifySeconds: Number(seconds.toFixed(3)), root: proof.rootHex, mn: proof.mnHex,
+        accepted: published.entry.accepted, refused: published.entry.refused ?? {}, canonicalPending: !published.entry.accepted.includes(this.body.canonical),
+        notes, budget: budget.state(),
+      },
+    }
+  }
+
+  /** cancel or forget on a HOSAKA ride: let it go, release the head, and tell the operator not to pay an invoice still open. */
+  private async cancelHosaka(rec: HosakaRide, forget: boolean): Promise<ToolResult> {
+    if (this.hosakaRide !== rec) throw new Refusal('The HOSAKA ride changed while this call waited for another one (canceled or signed meanwhile). Call ride_status to see where you stand.')
+    const notes: string[] = []
+    if (rec.state === 'awaiting_payment' && rec.dm && rec.invoice?.status === 'pending') {
+      try {
+        await this.body.messageOperator(`Canceled: please do NOT pay the HOSAKA invoice I sent for my ride to block ${rec.toHeight} (job ${rec.jobId}). If you already paid it, the sats are credited to my HOSAKA balance when the job is next asked about, and pay for my next HOSAKA job.`)
+        notes.push('Your operator was told by DM not to pay the invoice.')
+      } catch (err) {
+        notes.push(`Your operator could NOT be told not to pay the invoice (${words(err)}); tell them another way.`)
+      }
+    }
+    const paid = this.hosakaPaid(rec)
+    const said = this.hosakaWords(rec)
+    this.dropHosaka()
+    if (forget) this.runner.forget(rec.previousId)
+    return {
+      text: [
+        `Let go of the HOSAKA ride to block ${rec.toHeight} (${said}). The head is released for other moves.`,
+        rec.badProof
+          ? `Its job (${rec.jobId}) was paid and its proof refused here; tell your operator with message_operator if you have not.`
+          : paid ? `Its job (${rec.jobId}) was paid. Its proof stays bound to head ${rec.previousId.slice(0, 8)}...: a ride with prover "hosaka" to the same block from that same head, within HOSAKA's key retention, gets the same job back without paying again.` : '',
+        ...notes,
+      ].filter(Boolean).join('\n'),
+      data: { inFlight: false, canceled: this.hosakaData(rec), prover: 'hosaka' },
+    }
+  }
+
+  /** Whether the operator's money (or a refund of it) went into this ride's job. */
+  private hosakaPaid(rec: HosakaRide): boolean {
+    return rec.state === 'computing' || rec.state === 'done' || rec.paidFromBalance || rec.badProof
+  }
+
+  private hosakaWords(rec: HosakaRide): string {
+    const inv = rec.invoice
+    const sats = inv ? Math.ceil(inv.amountMsats / 1000) : null
+    switch (rec.state) {
+      case 'submitting': return 'the submit\'s answer has not come back; the next ride call asks again with the same key'
+      case 'awaiting_payment': return `awaiting payment: ${sats ?? '?'} sats, invoice ${rec.dm?.depositId === inv?.depositId ? 'sent to your operator by DM' : 'NOT yet delivered to your operator'}${inv ? `, expires ${new Date(inv.expiresAt * 1000).toISOString()}` : ''}`
+      case 'computing': return `paid; HOSAKA is computing${rec.progressPercent !== null ? ` (${rec.progressPercent}%${rec.etaSeconds !== null ? `, about ${Math.round(rec.etaSeconds)} s to go` : ''})` : ''}${rec.paidFromBalance ? ', paid from this agent\'s HOSAKA balance' : ''}`
+      case 'done': return 'done: HOSAKA\'s proof is in; the next ride call verifies it here and signs'
+      case 'failed': return rec.badProof ? `refused: ${rec.error}` : `failed at HOSAKA (${rec.error}); HOSAKA refunds a failed job to this agent's HOSAKA balance, and a ride call starts it again from that refund`
+      case 'expired': return 'expired: the invoice lapsed unpaid and nothing was charged; a ride call asks HOSAKA for a fresh invoice and sends it to your operator'
+    }
+  }
+
+  private hosakaData(rec: HosakaRide): Record<string, unknown> {
+    return {
+      prover: 'hosaka', state: rec.state, api: rec.apiUrl, job: rec.jobId, previousId: rec.previousId, fromHeight: rec.fromHeight, toHeight: rec.toHeight, asOf: rec.asOf, blocks: rec.blocks,
+      costMsats: rec.costMsats, invoice: rec.invoice ? { sats: Math.ceil(rec.invoice.amountMsats / 1000), expiresAt: rec.invoice.expiresAt, status: rec.invoice.status, bolt11: rec.invoice.bolt11 } : null,
+      invoiceSentToOperator: !!rec.invoice && rec.dm?.depositId === rec.invoice.depositId, dmError: rec.dmError, paidFromBalance: rec.paidFromBalance,
+      progressPercent: rec.progressPercent, etaSeconds: rec.etaSeconds, error: rec.error, headReserved: HOLDS_HEAD.has(rec.state),
+    }
+  }
+
+  /** The answer to a ride or ride_status call on a HOSAKA ride that is not signed yet. */
+  private hosakaResult(rec: HosakaRide, notes: string[]): ToolResult {
+    const next: Record<HosakaRideState, string> = {
+      submitting: `Call ride with to: ${rec.toHeight} to ask HOSAKA again.`,
+      awaiting_payment: `Nothing to do until your operator pays; ride_status checks. Do not call ride for this in a loop: HOSAKA charges nothing until paid, and the head stays reserved.`,
+      computing: `Check with ride_status now and then; when it says done, call ride with to: ${rec.toHeight} to verify and sign.`,
+      done: `Call ride with to: ${rec.toHeight} to verify the proof here and sign the hyperjump.`,
+      failed: rec.badProof ? 'Tell your operator with message_operator, then cancel: true.' : `Call ride with to: ${rec.toHeight} to start it again, or cancel: true.`,
+      expired: `Call ride with to: ${rec.toHeight} for a fresh invoice to your operator, or cancel: true.`,
+    }
+    const inv = rec.invoice
+    const showInvoice = rec.state === 'awaiting_payment' && inv && inv.status === 'pending' && rec.dm?.depositId !== inv.depositId
+    const text = [
+      `HOSAKA ride to block ${rec.toHeight} from block ${rec.fromHeight} (${rec.blocks} block(s)${rec.asOf !== null ? `, as_of ${rec.asOf}` : ''}), job ${rec.jobId ?? '(not known yet)'}: ${this.hosakaWords(rec)}.`,
+      ...notes,
+      HOLDS_HEAD.has(rec.state) ? 'The head is reserved for this ride: no hop or other ride signs from it meanwhile.' : 'The head is not reserved while the ride waits on a decision.',
+      showInvoice ? `Invoice (${Math.ceil(inv!.amountMsats / 1000)} sats): ${inv!.bolt11}` : '',
+      next[rec.state],
+      'Nothing was signed. HOSAKA\'s compute is paid by your operator and is not counted against your caps; you hold no wallet and pay nothing.',
+    ].filter(Boolean).join('\n')
+    return { text, data: { done: false, inFlight: true, ride: this.hosakaData(rec), notes } }
+  }
+
   // ---- signing and publishing, shared ---------------------------------------
+
+  /**
+   * The hyperjump for a ride and its proof, signed through both checks
+   * (signChainEvent), from the head the ride left from. The caller has
+   * confirmed that head against the relays and verified the proof at Level 1;
+   * nothing is recorded or sent here.
+   */
+  private signRide(plan: RidePlan, proof: RideProof): NostrEvent {
+    const head = this.body.keeper.head()!
+    const toCoordHex = this.store.line.stopCoordHex(plan.toHeight)!
+    return this.signChainEvent(hyperjumpTemplate({
+      createdAt: createdAtAfter(head), genesisId: plan.genesisId, previousId: plan.previousId, prevCoordHex: plan.prevCoordHex, toCoordHex,
+      fromHeight: plan.fromHeight, toHeight: plan.toHeight, ...(plan.asOf !== undefined ? { asOf: plan.asOf } : {}),
+      rootHex: proof.rootHex, mp: proof.mp, mnHex: proof.mnHex,
+    }), 'ride')
+  }
 
   /**
    * Sign a chain template after two checks (plan D1, D2): the builder's own
