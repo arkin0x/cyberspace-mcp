@@ -8,11 +8,11 @@
 // names the same job and a provider that honors keys answers a retry with
 // the job it already made instead of charging twice.
 //
-// What is not ported: quotes, limits, hops, sidesteps, region keys, deposits
-// bought on their own, the balance, and the waiting loops. The agent polls
-// through its own tool calls (transit.ts), never in the background, and the
-// lost-answer retry is the next tool call, with the key persisted in the
-// state directory, instead of a timer.
+// What is not ported: hop and sidestep quotes, limits, hops, sidesteps,
+// region keys, deposits bought on their own, the balance, and the waiting
+// loops. The agent polls through its own tool calls (transit.ts), never in
+// the background, and the lost-answer retry is the next tool call, with the
+// key persisted in the state directory, instead of a timer.
 //
 // THE RIDE JOB IS A PROPOSED CONTRACT. hosaka-api has no ride route yet
 // (onosendai-launch #35, phases P2 to P4). This file speaks the shape the
@@ -28,6 +28,9 @@
 //     deposit (deposit_id, bolt11, amount_msats, expires_at).
 //   - A completed ride job's result is {root, mp, mn, previous_event_id,
 //     from_height, to_height}: the hyperjump's proof, mp and mn tags.
+//   - POST /api/v1/ride/quote, public and unsigned, body {from_height,
+//     to_height}, prices a ride without buying it (HosakaRideQuote below).
+//     The station tool shows it beside the local estimate.
 //
 // Money never touches this file. HOSAKA issues the invoice, the operator's
 // wallet pays it, and the node's own answer is the payment: the agent only
@@ -47,7 +50,7 @@ const REQUEST_TIMEOUT_MS = 20_000
 export interface HosakaProvider {
   version?: number
   name?: string
-  services?: Array<{ type: string; max_height?: number; max_blocks?: number; min_msats?: number }>
+  services?: Array<{ type: string; max_height?: number; max_blocks?: number; max_block_height?: number; min_msats?: number }>
   payments?: { invoice_ttl_seconds?: number }
   /** Present on a provider that honors idempotency keys on priced submits (hosaka-api #21). */
   idempotency?: { header?: string; body_field?: string; retention_seconds?: number; scope?: string }
@@ -78,6 +81,36 @@ export interface CloudRideResult {
   previous_event_id: string
   from_height: number
   to_height: number
+}
+
+/** What HOSAKA says no to in a ride quote: the machine-readable error and a sentence for the agent. */
+export interface HosakaQuoteRefusal {
+  error?: string
+  hint?: string
+  [field: string]: unknown
+}
+
+/**
+ * POST /api/v1/ride/quote: what a ride would cost and how long it would take
+ * on HOSAKA, without buying it. `cost_msats` is null and `refusal` is set
+ * when HOSAKA would not take the ride (`within_cap` false).
+ */
+export interface HosakaRideQuote {
+  action: 'ride'
+  from_height: number
+  to_height: number
+  blocks: number
+  attempts: number
+  cost_msats: number | null
+  within_cap: boolean
+  max_blocks: number
+  max_block_height: number
+  est_seconds: number
+  /** A human reading of est_seconds, such as "~12 min". */
+  est_time: string
+  est_source: string
+  steps: string[]
+  refusal: HosakaQuoteRefusal | null
 }
 
 /** A job as the API returns it: the row, plus the payment fields a submit or a start adds. */
@@ -180,6 +213,32 @@ export function rideService(p: HosakaProvider): { maxBlocks: number | null } | n
   return { maxBlocks: typeof s.max_blocks === 'number' && s.max_blocks > 0 ? s.max_blocks : null }
 }
 
+/**
+ * An answer from /api/v1/ride/quote as a quote for the ride asked about, or
+ * the reason it is not one: not JSON, not an object, missing the fields a
+ * price is read from, or a quote for another ride. A quote HOSAKA would not
+ * take (within_cap false, or a refusal) is still a quote; its cost may be null.
+ */
+export function rideQuoteOf(raw: unknown, fromHeight: number, toHeight: number): HosakaRideQuote | string {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return 'the answer was not a JSON quote'
+  const q = raw as Partial<HosakaRideQuote>
+  if (typeof q.within_cap !== 'boolean') return 'the answer does not say whether the ride is within its cap'
+  if (q.cost_msats !== null && !(typeof q.cost_msats === 'number' && Number.isFinite(q.cost_msats) && q.cost_msats >= 0)) return 'the answer carries no readable price'
+  if (q.refusal !== undefined && q.refusal !== null && typeof q.refusal !== 'object') return 'the answer carries an unreadable refusal'
+  if ((typeof q.from_height === 'number' && q.from_height !== fromHeight) || (typeof q.to_height === 'number' && q.to_height !== toHeight)) {
+    return `the answer prices a ride from block ${q.from_height} to block ${q.to_height}, not the one asked about`
+  }
+  if (q.within_cap && !q.refusal && q.cost_msats === null) return 'the answer takes the ride but names no price'
+  return { ...q, refusal: q.refusal ?? null } as HosakaRideQuote
+}
+
+/** Seconds as a short human estimate in the voice of HOSAKA's est_time: "~45 s", "~12 min", "~3.5 h". */
+export function durationWords(seconds: number): string {
+  if (seconds < 90) return `~${Math.max(1, Math.round(seconds))} s`
+  if (seconds < 90 * 60) return `~${Math.round(seconds / 60)} min`
+  return `~${(seconds / 3600).toFixed(1)} h`
+}
+
 /** Whether the provider says it honors idempotency keys. */
 export function honorsKeys(p: HosakaProvider): boolean {
   return typeof p.idempotency === 'object' && p.idempotency !== null
@@ -202,9 +261,20 @@ export interface HosakaClientOptions {
   fetch?: typeof globalThis.fetch
 }
 
+/**
+ * What a caller may add to one request: its own signal, so a request it no
+ * longer waits for is aborted, and a shorter timeout than the default.
+ */
+export interface HosakaRequestOptions {
+  signal?: AbortSignal
+  timeoutMs?: number
+}
+
 export interface HosakaClient {
   readonly apiUrl: string
-  provider: () => Promise<HosakaProvider>
+  provider: (opts?: HosakaRequestOptions) => Promise<HosakaProvider>
+  /** Prices a ride without buying it; public, so no signature. */
+  rideQuote: (fromHeight: number, toHeight: number, opts?: HosakaRequestOptions) => Promise<HosakaRideQuote>
   /** A priced submit; the key goes in the body, as ONOSENDAI sends it. */
   submitRide: (previousEventId: string, fromHeight: number, toHeight: number, key: string) => Promise<HosakaJob>
   /** Reads with the poll token; no signature. */
@@ -233,14 +303,16 @@ export function createHosaka(opts: HosakaClientOptions): HosakaClient {
   const authorization = (url: string, method: string): Promise<string> =>
     nip98.getToken(url, method, (template) => opts.sign({ ...template, tags: [...template.tags, ['nonce', randomNonce()]] }), true)
 
-  const request = async <T>(path: string, init: { method: 'GET' | 'POST'; body?: unknown; auth?: boolean; headers?: Record<string, string> }): Promise<T> => {
+  const request = async <T>(path: string, init: { method: 'GET' | 'POST'; body?: unknown; auth?: boolean; headers?: Record<string, string> } & HosakaRequestOptions): Promise<T> => {
     const url = apiUrl + path
     const headers: Record<string, string> = { accept: 'application/json', ...(init.headers ?? {}) }
     if (init.body !== undefined) headers['content-type'] = 'application/json'
     if (init.auth) headers.authorization = await authorization(url, init.method)
+    const timeout = AbortSignal.timeout(init.timeoutMs ?? REQUEST_TIMEOUT_MS)
+    const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout
     let res: Response
     try {
-      res = await doFetch(url, { method: init.method, headers, body: init.body === undefined ? undefined : JSON.stringify(init.body), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
+      res = await doFetch(url, { method: init.method, headers, body: init.body === undefined ? undefined : JSON.stringify(init.body), signal })
     } catch (err) {
       throw new HosakaError(0, 'network', err instanceof Error ? err.message : String(err))
     }
@@ -260,7 +332,9 @@ export function createHosaka(opts: HosakaClientOptions): HosakaClient {
 
   return {
     apiUrl,
-    provider: () => request<HosakaProvider>('/api/v1/provider', { method: 'GET' }),
+    provider: (o) => request<HosakaProvider>('/api/v1/provider', { method: 'GET', ...o }),
+    rideQuote: (fromHeight, toHeight, o) =>
+      request<HosakaRideQuote>('/api/v1/ride/quote', { method: 'POST', body: { from_height: fromHeight, to_height: toHeight }, ...o }),
     submitRide: (previousEventId, fromHeight, toHeight, key) =>
       request<HosakaJob>('/api/v1/ride', { method: 'POST', auth: true, body: { ...rideBody(previousEventId, fromHeight, toHeight), idempotency_key: key } }),
     getJob: (jobId, pollToken) => request<HosakaJob>(`/api/v1/jobs/${encodeURIComponent(jobId)}`, { method: 'GET', headers: { 'X-Job-Token': pollToken } }),

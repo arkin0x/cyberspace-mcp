@@ -42,6 +42,14 @@
 // next ride call signs it here through the same templates, reader check and
 // publish. ride_status and orders_waiting report both kinds of ride alike,
 // with `awaiting_payment` the one state only a HOSAKA ride has.
+//
+// `station { destination }` also shows HOSAKA's own quote for the ride, beside
+// the local estimate, when the configured HOSAKA lists the ride service. The
+// quote is a courtesy and never holds station up: the provider check starts
+// before the line sync and the chain read, the quote follows it, and station
+// waits for both at most HOSAKA_QUOTE_WAIT_MS once its own answer is ready.
+// Past that, or on any failure, it says "HOSAKA quote unavailable" and aborts
+// whatever is still outstanding.
 
 import { readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { availableParallelism } from 'node:os'
@@ -51,7 +59,7 @@ import type { Budget } from './budget.js'
 import { chainTemplateProblem, enterHyperspaceTemplate, hyperjumpTemplate } from './chain/builder.js'
 import { buildChain, chainStatus, firstBreak, lookBack, openBracket, type ActionEvent } from './chain/events.js'
 import type { ChainKeeper } from './chain/keeper.js'
-import { HOSAKA_DEFAULT_URL, createHosaka, type HosakaClient } from './hosaka.js'
+import { HOSAKA_DEFAULT_URL, createHosaka, durationWords, rideQuoteOf, rideService, type HosakaClient } from './hosaka.js'
 import { HosakaRides } from './hosakaRide.js'
 import { computeEnterProof } from './hyperspace/enter.js'
 import { LineStore, type LineStatus, type StationResult, type Stop, type SyncResult } from './hyperspace/line.js'
@@ -103,6 +111,8 @@ export interface TransitOptions {
   hosakaFetch?: typeof globalThis.fetch
   /** Tests: how often the background asks HOSAKA, in ms. */
   hosakaPollMs?: number
+  /** Tests: how long station waits for HOSAKA's ride quote, in ms. Default HOSAKA_QUOTE_WAIT_MS. */
+  hosakaQuoteWaitMs?: number
 }
 
 /**
@@ -221,6 +231,24 @@ const STOP_WAIT_MS = 10_000
 
 /** How many stops `station` lists around the agent. */
 const NEAREST_STOPS = 5
+/**
+ * How long `station` waits for HOSAKA's ride quote once its own answer is
+ * ready, and the timeout of each request it makes for it. A quote that has
+ * not come by then is reported unavailable and its request is aborted.
+ */
+const HOSAKA_QUOTE_WAIT_MS = 3_500
+
+/**
+ * HOSAKA's price for the ride `station` quotes. `quoted`: the sats and the
+ * time HOSAKA estimates; `refused`: HOSAKA would not take the ride, and why;
+ * `unavailable`: no quote could be read (HOSAKA down, an error, an answer
+ * that is not a quote, or no answer in time). A HOSAKA that sells no rides
+ * gives no quote at all, and station says nothing about it.
+ */
+export type HosakaStationQuote =
+  | { status: 'quoted'; apiUrl: string; sats: number; costMsats: number; estimate: string | null; estSeconds: number | null; blocks: number | null }
+  | { status: 'refused'; apiUrl: string; error: string | null; reason: string }
+  | { status: 'unavailable'; apiUrl: string; reason: string }
 
 function threadWords(threads: number): string {
   return threads === 0 ? 'the calling thread' : `${threads} thread(s)`
@@ -253,6 +281,17 @@ function stopData(stop: Stop, coordHex: string): Record<string, unknown> {
   return { height: stop.height, kind: stop.kind, blockHash: stop.blockHash, coordinate: describePlace(placeFromHex(coordHex)) }
 }
 
+/** Whether the configured HOSAKA sells rides, or why that is not known. */
+type HosakaSells = { sells: boolean } | { failure: string }
+
+/** HOSAKA's quote in words, for the line after the local quote. */
+function hosakaQuoteWords(q: HosakaStationQuote): string {
+  const reason = (s: string): string => s.trim().replace(/[.\s]+$/, '')
+  if (q.status === 'unavailable') return `HOSAKA quote unavailable: ${reason(q.reason)}.`
+  if (q.status === 'refused') return `HOSAKA quote for the same ride: REFUSED. ${reason(q.reason)}.`
+  return `HOSAKA quote for the same ride: ${q.sats} sats${q.estimate ? `, estimated ${q.estimate} on HOSAKA` : ''}. Ride with prover: "hosaka" to buy it instead; your operator pays, and HOSAKA's compute does not count against your caps.`
+}
+
 /** What the agent is told about a ride priced but not started. */
 interface RideQuote {
   destination: number
@@ -278,6 +317,7 @@ export class Transit {
   readonly threads: number
   private flight: Flight | null = null
   readonly hosaka: HosakaClient
+  private readonly hosakaQuoteWaitMs: number
   /** A ride bought from HOSAKA, in hand (hosakaRide.ts). */
   readonly bought: HosakaRides
   /** The ride flight.json held when this server started, if any: a restart came between its calls. */
@@ -291,6 +331,7 @@ export class Transit {
     this.runner = RideRunner.open(join(dir.path, 'rides'), { threads: this.threads, now: options.now })
     this.interrupted = this.readRecord()
     this.hosaka = createHosaka({ apiUrl: options.hosakaUrl ?? HOSAKA_DEFAULT_URL, sign: body.sign, fetch: options.hosakaFetch })
+    this.hosakaQuoteWaitMs = options.hosakaQuoteWaitMs ?? HOSAKA_QUOTE_WAIT_MS
     this.bought = new HosakaRides({
       dir, keeper: body.keeper, budget: body.budget, store: this.store, hosaka: this.hosaka, wallet: body.wallet, log: body.log,
       refreshChain: body.refreshChain, planRide: (to, asOf) => this.planRide(to, asOf), undeliverable: body.undeliverable, messageOperator: body.messageOperator,
@@ -312,15 +353,29 @@ export class Transit {
 
   /**
    * The line's state, the agent's station, the nearest stops, and with a
-   * destination the quote for a ride there. With `sync` the line is advanced
-   * first, within the budget (the per-call cap by default). Nothing is signed,
-   * and the verification is not charged to the session: it is the same
-   * sha256d a reader does to trust a header, not work on the agent's chain.
+   * destination the quote for a ride there, and HOSAKA's quote for the same
+   * ride when the configured HOSAKA sells rides. With `sync` the line is
+   * advanced first, within the budget (the per-call cap by default). Nothing
+   * is signed, and the verification is not charged to the session: it is the
+   * same sha256d a reader does to trust a header, not work on the agent's chain.
    */
   async station(input: { sync?: boolean; budget_seconds?: number; destination?: number } = {}): Promise<ToolResult> {
     const budgetSeconds = input.budget_seconds
     if (budgetSeconds !== undefined && (!Number.isFinite(budgetSeconds) || budgetSeconds <= 0)) throw new Refusal('budget_seconds must be a positive number of seconds.')
     if (input.destination !== undefined && !isHeight(input.destination)) throw new Refusal('destination must be a block height: a non-negative integer.')
+    // HOSAKA is asked whether it sells rides now, so its answer comes in
+    // while the line syncs and the chain is read. Whatever is still
+    // outstanding when station returns, or throws, is aborted.
+    const hosakaAsk = new AbortController()
+    const sells = input.destination !== undefined ? this.hosakaSellsRides(hosakaAsk.signal) : null
+    try {
+      return await this.stationWith(input, budgetSeconds, sells, hosakaAsk.signal)
+    } finally {
+      hosakaAsk.abort()
+    }
+  }
+
+  private async stationWith(input: { sync?: boolean; destination?: number }, budgetSeconds: number | undefined, sells: Promise<HosakaSells> | null, signal: AbortSignal): Promise<ToolResult> {
     let sync: SyncResult | null = null
     if (input.sync) {
       const allowed = Math.min(budgetSeconds ?? this.body.budget.capCallSeconds, this.body.budget.capCallSeconds)
@@ -339,6 +394,11 @@ export class Transit {
     const station = line.asOf() >= 0 ? line.station(here.hex) : null
     const nearest = line.asOf() >= 0 ? line.nearest(here.hex, NEAREST_STOPS) : []
     const quote = input.destination !== undefined ? this.quote(input.destination, state, here.hex) : null
+    // HOSAKA prices the same ride the local quote does, and only a ride the
+    // local quote could start: a refused local quote has no ride to price.
+    const hosakaQuote = sells && quote && !quote.refused && quote.fromHeight !== null
+      ? await this.hosakaQuote(sells, quote.fromHeight, quote.destination, signal)
+      : null
     const stopHex = (s: StationResult): string => line.stopCoordHex(s.stop.height)!
     const text = [
       sync ? `Sync: ${sync.verified} blob(s) verified (${sync.fetched} fetched) in ${sync.elapsedSeconds.toFixed(1)} s${sync.failure ? `; stopped: ${sync.failure}` : ''}${sync.notes.length ? `. ${sync.notes.join(' ')}` : ''}.` : '',
@@ -353,6 +413,7 @@ export class Transit {
           ? `You are boarded (head ${state.previousId.slice(0, 8)}...): your first ride leaves from your station under the as_of it declares, the newest verified block unless you give one.`
           : `You stand at the stop for block ${state.fromHeight} (head ${state.previousId.slice(0, 8)}...): the next ride leaves from there and declares no as_of.`,
       quote ? this.quoteWords(quote) : '',
+      hosakaQuote ? hosakaQuoteWords(hosakaQuote) : '',
       this.flight ? `A ride to block ${this.flight.toHeight} is in flight (${this.flightWords(this.flight)}).` : '',
       this.bought.inHand ? `A ride to block ${this.bought.toHeight} bought from HOSAKA is in hand; ride_status says where it stands.` : '',
       'Nothing was signed.',
@@ -366,6 +427,7 @@ export class Transit {
         nearest: nearest.map((s) => ({ height: s.stop.height, kind: s.stop.kind, distance: s.distance })),
         onLine: state ? { boarded: true, atStop: state.fromHeight, head: state.previousId } : null,
         quote,
+        hosakaQuote,
         rideInFlight: this.flight ? this.flightData(this.flight) : null,
         here: describePlace(here),
         threads: this.threads,
@@ -425,6 +487,62 @@ export class Transit {
     if (q.refused) return `Quote to block ${q.destination}: REFUSED. ${q.refused}`
     const exit = q.exitDistance === 0 ? 'you stand on that stop now' : `that stop is h${q.exitDistance} from where you stand now`
     return `Quote to block ${q.destination}: from ${q.chained ? 'the stop you stand at' : 'your station'}, block ${q.fromHeight}${q.asOf !== undefined ? ` (as_of ${q.asOf})` : ''}, ${q.blocks} block(s), expected to take about ${q.expectedSeconds} s on this machine with ${threadWords(q.threads)}: ${q.fitsSession ? `within the session cap (${b.remainingSessionSeconds.toFixed(1)} s left)` : `ABOVE the session cap (${b.remainingSessionSeconds.toFixed(1)} s left of ${b.capSessionSeconds} s)`}, ${q.fitsCall ? 'within one call' : `about ${q.calls} calls at ${b.capCallSeconds} s each`}. After it you stand at ${stopWords(this.store.line.stopAt(q.destination)!, this.store.line.stopCoordHex(q.destination)!)}; ${exit}. Leaving the stop for another coordinate is a hop or a sidestep, priced by plan_hop.`
+  }
+
+  /**
+   * Whether the configured HOSAKA lists the ride service, or why that could
+   * not be learned. Never rejects: a failure is an answer, so a request
+   * station stops waiting for cannot become an unhandled rejection.
+   */
+  private async hosakaSellsRides(signal: AbortSignal): Promise<HosakaSells> {
+    try {
+      const provider = await this.hosaka.provider({ signal, timeoutMs: this.hosakaQuoteWaitMs })
+      if (provider === null || typeof provider !== 'object' || Array.isArray(provider)) return { failure: 'its /api/v1/provider answer was not JSON' }
+      return { sells: rideService(provider) !== null }
+    } catch (err) {
+      return { failure: words(err) }
+    }
+  }
+
+  /**
+   * HOSAKA's quote for the ride from `fromHeight` to `toHeight`, or null when
+   * HOSAKA sells no rides. Waits at most hosakaQuoteWaitMs; past that the
+   * quote is unavailable, and the caller's abort ends the request. Never
+   * rejects.
+   */
+  private async hosakaQuote(sells: Promise<HosakaSells>, fromHeight: number, toHeight: number, signal: AbortSignal): Promise<HosakaStationQuote | null> {
+    const apiUrl = this.hosaka.apiUrl
+    const unavailable = (reason: string): HosakaStationQuote => ({ status: 'unavailable', apiUrl, reason })
+    const ask = async (): Promise<HosakaStationQuote | null> => {
+      const sold = await sells
+      if ('failure' in sold) return unavailable(sold.failure)
+      if (!sold.sells) return null
+      let raw: unknown
+      try {
+        raw = await this.hosaka.rideQuote(fromHeight, toHeight, { signal, timeoutMs: this.hosakaQuoteWaitMs })
+      } catch (err) {
+        return unavailable(words(err))
+      }
+      const q = rideQuoteOf(raw, fromHeight, toHeight)
+      if (typeof q === 'string') return unavailable(q)
+      if (!q.within_cap || q.refusal || q.cost_msats === null) {
+        const r = q.refusal
+        const reason = (typeof r?.hint === 'string' && r.hint) || (typeof r?.error === 'string' && r.error) || 'HOSAKA would not take this ride, and gave no reason.'
+        return { status: 'refused', apiUrl, error: typeof r?.error === 'string' ? r.error : null, reason }
+      }
+      const estSeconds = typeof q.est_seconds === 'number' && Number.isFinite(q.est_seconds) && q.est_seconds >= 0 ? q.est_seconds : null
+      const estimate = typeof q.est_time === 'string' && q.est_time.trim() ? q.est_time.trim() : estSeconds !== null ? durationWords(estSeconds) : null
+      return { status: 'quoted', apiUrl, sats: Math.ceil(q.cost_msats / 1000), costMsats: q.cost_msats, estimate, estSeconds, blocks: typeof q.blocks === 'number' ? q.blocks : null }
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const late = new Promise<HosakaStationQuote>((resolve) => {
+      timer = setTimeout(() => resolve(unavailable(`no answer within ${(this.hosakaQuoteWaitMs / 1000).toFixed(1)} s`)), this.hosakaQuoteWaitMs)
+    })
+    try {
+      return await Promise.race([ask().catch((err: unknown) => unavailable(words(err))), late])
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   private beyondWords(height: number): string {
