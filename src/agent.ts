@@ -363,7 +363,20 @@ export class Agent {
   // ---- identity -------------------------------------------------------------
 
   async identity(input: { name?: string; about?: string; picture?: string; operator?: string } = {}): Promise<ToolResult> {
-    const operatorRaw = input.operator ?? this.config.operator
+    // The operator is locked (arkinox, 2026-10-11): the one the human
+    // configured, else the one the published profile already names. The
+    // model may name an operator only when there is none yet, so text read
+    // in cyberspace can never talk the agent into a new commander. A real
+    // hand-over is the human's: restart the server with another --operator.
+    const locked = (this.config.operator ? parsePubkey(this.config.operator) : null) ?? this.operatorOfProfile()
+    if (input.operator !== undefined) {
+      const asked = parsePubkey(input.operator)
+      if (!asked) throw new Refusal(`The operator must be an npub or a 64-hex pubkey; got ${JSON.stringify(input.operator)}.`)
+      if (locked && asked !== locked) {
+        throw new Refusal(`Your operator is locked to ${nip19.npubEncode(locked)}. Only your human can change it, by restarting this server with another --operator. Call identity without operator.`)
+      }
+    }
+    const operatorRaw = input.operator ?? this.config.operator ?? (locked ? locked : undefined)
     const operator = operatorRaw ? parsePubkey(operatorRaw) : null
     if (operatorRaw && !operator) throw new Refusal(`The operator must be an npub or a 64-hex pubkey; got ${JSON.stringify(operatorRaw)}.`)
     if (input.name !== undefined) this.name = input.name
