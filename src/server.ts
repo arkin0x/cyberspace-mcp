@@ -256,6 +256,12 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     annotations: { readOnlyHint: false, idempotentHint: false },
   }, async () => run(log, () => agent.inbox()))
 
+  server.registerTool('orders_waiting', {
+    title: 'Orders waiting',
+    description: 'Whether your operator has sent orders you have not read, counted by the same rules as inbox, without reading them or marking anything read. For the waker that starts your turn when a DM arrives; in a turn, call inbox instead.',
+    annotations: { readOnlyHint: true },
+  }, async () => run(log, () => agent.ordersWaiting()))
+
   server.registerTool('message_operator', {
     title: 'Message your operator',
     description: `Send your operator a private message (a NIP-17 DM to the relays of their kind 10050), with a copy to your own DM inbox. The only way to talk with your operator: never post to them publicly. Up to ${MAX_OPERATOR_MESSAGE} characters. Refused when your operator has no DM inbox.`,

@@ -36,6 +36,8 @@ import { Refusal, type ToolResult } from './tool.js'
 const FILE = 'dms.json'
 /** Contact lists. */
 const CONTACTS_KIND = 3
+/** How long ordersWaiting reuses the operator's lists (kind 10050 and kind 3) before reading them again. */
+const FACTS_REUSE_S = 300
 /** The longest message the agent sends its operator. */
 export const MAX_OPERATOR_MESSAGE = 4000
 /** How far back of the last read the inbox is asked again: a wrap is backdated up to two days, plus slack for clocks. */
@@ -319,6 +321,54 @@ export class OperatorChannel {
         unread: answers.flatMap((a) => (a.outcome === 'answered' ? [] : [{ url: a.url, reason: a.reason }])),
       },
     }
+  }
+
+  /** The last sync, reused by ordersWaiting for this long so a waker polling often does not reread the operator's lists each time. */
+  private factsCache: { facts: OperatorFacts; at: number } | null = null
+
+  /**
+   * Whether orders wait, without reading them (arkinox, 2026-10-11: the
+   * agent waits for DMs from its operator). Counts the operator's messages
+   * that inbox would return now, by the same rules (sealed by the operator,
+   * addressed to the agent, the operator follows it), and marks nothing
+   * read, so the inbox call that follows still returns them. For a waker
+   * outside the model: it polls this, and starts a turn when orders wait.
+   */
+  async ordersWaiting(): Promise<ToolResult> {
+    const operator = this.requireOperator()
+    const now = this.deps.now()
+    let facts = this.factsCache && now - this.factsCache.at < FACTS_REUSE_S ? this.factsCache.facts : null
+    if (!facts) {
+      facts = await this.sync()
+      if (!facts) throw new Refusal('The operator channel is closed.')
+      this.factsCache = { facts, at: now }
+    }
+    if (facts.inbox.length === 0) return { text: this.noInboxWords(facts), data: { orders: 0, noInbox: true } }
+    const filter: Filter = { kinds: [WRAP_KIND], '#p': [this.deps.pubkey] }
+    const since = this.sinceForNextRead()
+    if (since !== null) filter.since = since
+    else filter.limit = FIRST_READ_LIMIT
+    const answers: RelayAnswer[] = await this.deps.relays.queryEach(filter, this.deps.maxWaitMs, this.readRelays(facts))
+    if (!answers.some((a) => a.outcome === 'answered')) {
+      throw new Refusal(`Could not read your DM inbox: ${answers.map((a) => `${a.url}: ${a.outcome === 'answered' ? 'answered' : a.reason}`).join('; ')}.`)
+    }
+    const ids = new Set<string>()
+    let strategy = false
+    for (const wrap of mergeAnswers(answers)) {
+      if (wrap.kind !== WRAP_KIND || this.state.seen[wrap.id] !== undefined) continue
+      const opened = this.deps.unwrap(wrap)
+      if (!opened.ok) continue
+      const { rumor } = opened
+      if (rumor.pubkey !== operator || !rumor.tags.some((t) => t[0] === 'p' && t[1] === this.deps.pubkey)) continue
+      ids.add(rumor.id)
+      if (isStrategy(rumor)) strategy = true
+    }
+    const orders = facts.follows === true ? ids.size : 0
+    const held = facts.follows === true ? 0 : ids.size
+    const text = orders > 0
+      ? `${orders} new message(s) from your operator wait${strategy ? ', including a STRATEGY' : ''}. Call inbox to read them.`
+      : held > 0 ? `${held} message(s) from your operator wait for their follow; none are orders yet.` : 'No new orders.'
+    return { text, data: { orders, strategy, waitingForFollow: held } }
   }
 
   /** Forget the wraps that fall before the next read's window. */
