@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs'
 import { z } from 'zod'
 import { Agent, MAX_KEY_HEIGHT, Refusal, type ToolResult } from './agent.js'
 import { MAX_OPERATOR_MESSAGE } from './operator.js'
+import { RENDER_DEFAULT_SIZE, RENDER_MAX_SIZE, RENDER_MIN_SIZE } from './render.js'
 
 /** The seven rules with no undo (agents note 6), as the resource carries them. */
 const FATAL_RULES = [
@@ -89,7 +90,8 @@ const contents = z.union([
 ])
 
 function ok(result: ToolResult): CallToolResult {
-  return { content: [{ type: 'text', text: result.text }], structuredContent: result.data }
+  const images = (result.images ?? []).map((i) => ({ type: 'image' as const, data: i.data, mimeType: i.mimeType }))
+  return { content: [...images, { type: 'text', text: result.text }], structuredContent: result.data }
 }
 
 function refused(message: string): CallToolResult {
@@ -239,6 +241,21 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     inputSchema: { payload: z.unknown() },
     annotations: { readOnlyHint: true },
   }, async (args) => run(log, () => agent.validateObject({ payload: args.payload })))
+
+  server.registerTool('render', {
+    title: 'Render an object',
+    description: 'See an object: draws it to a PNG image on this machine and returns the image with a one-line caption (vertex and face counts, bounds in units, the size of a unit). Nothing is signed or published. Give exactly one of: object (an SNO payload; render it before you place it), id (an object find or look listed, by its id), or address (a public kind 33331, "33331:<pubkey>:<d>" or naddr). Faces are lit flat with their front as the winding gives it (counter-clockwise seen from the front, DECK-0003 1.4); a face seen from its back is drawn darker, and the caption counts them, so a face wound the wrong way shows. A floor grid of whole units and the axes from the origin (+X red, +Y green, +Z blue) give the scale. Placed parts are not drawn.',
+    inputSchema: {
+      object: z.unknown().optional().describe('An SNO payload (DECK-0003 section 1), as you would give place.'),
+      id: z.string().optional().describe('An object\'s id as find lists it (at least 8 hex characters).'),
+      address: z.string().optional().describe('A public kind 33331 object: "33331:<pubkey hex>:<d>" or its naddr.'),
+      view: z.enum(['iso', 'front', 'back', 'top', 'side']).optional().describe('iso (default), front (from +Z), back, top (from +Y), side (from +X).'),
+      yaw: z.number().optional().describe('Degrees about +Y, 0 looking from +Z, 90 from +X. Overrides the view\'s.'),
+      pitch: z.number().min(-90).max(90).optional().describe('Degrees above the horizon, 90 looking straight down. Overrides the view\'s.'),
+      size: z.number().int().min(RENDER_MIN_SIZE).max(RENDER_MAX_SIZE).optional().describe(`Pixels on a side, default ${RENDER_DEFAULT_SIZE}.`),
+    },
+    annotations: { readOnlyHint: true },
+  }, async (args) => run(log, () => agent.render(args)))
 
   server.registerTool('budget', {
     title: 'Budget',

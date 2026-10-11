@@ -9,4 +9,6 @@ export class Refusal extends Error {}
 export interface ToolResult {
   text: string
   data: Record<string, unknown>
+  /** Pictures to return beside the text, as MCP image content: base64 bytes and their type. Only render has one (arkinox, 2026-10-11). */
+  images?: Array<{ data: string; mimeType: string }>
 }

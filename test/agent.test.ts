@@ -214,6 +214,38 @@ describe('an agent on a fresh key', () => {
     expect(entriesOf(await a.find({})).map((e) => e.type)).toContain('shard')
   }, 30_000)
 
+  it('renders a payload before placing it, and an object it found by the id find lists (arkinox, 2026-10-11)', async () => {
+    const payload = { v: 2, name: 'tetra', unit: 20, mode: 'solid', vertices: [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], colors: [1, 2, 3, 4], faces: [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]] }
+    const before = await a.render({ object: payload, size: 128 })
+    expect(before.images?.[0].mimeType).toBe('image/png')
+    expect(Buffer.from(before.images![0].data, 'base64').subarray(1, 4).toString('ascii')).toBe('PNG')
+    expect(before.text).toMatch(/^"tetra": 4 vertices, 4 faces/)
+    expect(before.data.source).toBe('payload')
+    // A payload given as a JSON string is read as the object it spells.
+    expect((await a.render({ object: JSON.stringify(payload), size: 64 })).data.size).toBe(64)
+
+    const found = await a.find({})
+    const shard = entriesOf(found).find((e) => e.type === 'shard')!
+    expect(found.text).toContain(`(id ${shard.eventId.slice(0, 12)}, 4 vertices, 4 faces)`)
+    const seen = await a.render({ id: shard.eventId.slice(0, 12), view: 'top' })
+    expect(seen.data.source).toBe(`id ${shard.eventId}`)
+    expect(seen.data.size).toBe(512)
+    expect(seen.text).toContain('top view')
+    expect(seen.text).toMatch(/untrusted/)
+    // look lists the same id beside the object.
+    expect((await a.look()).text).toContain(`object (id ${shard.eventId.slice(0, 12)}, 4 vertices`)
+
+    // Refusals, in words.
+    await expect(a.render({ object: { ...payload, faces: [[0, 1, 9]] } })).rejects.toThrow(/Not drawn: the payload is not valid SNO\. face 0 must be three distinct vertex indices/)
+    await expect(a.render({ object: 'not json' })).rejects.toThrow(/not JSON/)
+    await expect(a.render({})).rejects.toThrow(/exactly one of/)
+    await expect(a.render({ object: payload, id: shard.eventId })).rejects.toThrow(/exactly one of/)
+    await expect(a.render({ id: 'ffffffffffff' })).rejects.toThrow(/No object with id ffffffffffff/)
+    await expect(a.render({ id: 'xyz' })).rejects.toThrow(Refusal)
+    await expect(a.render({ object: payload, size: 5000 })).rejects.toThrow(/size must be/)
+    await expect(a.render({ address: '33331:nothex:d' })).rejects.toThrow(/kind 33331/)
+  }, 30_000)
+
   it('a second agent standing in the same cube hears what the first says, and the quiet rule holds', async () => {
     const skB = generateSecretKey()
     const pubB = getPublicKey(skB)

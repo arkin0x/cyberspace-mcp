@@ -14,6 +14,7 @@ import type { BudgetState } from './budget.js'
 import { describePlace, distanceBetween, distanceWords, placeOf, sameCube, type Place } from './space/coords.js'
 import type { HeldKey, OpenedBag } from './space/regionKeys.js'
 import { sectorsApart } from './presence.js'
+import { objectHandle } from './render.js'
 
 /** The agent's own chain, as every report states it. */
 export interface ChainFacts {
@@ -74,7 +75,7 @@ export function lookReport(input: LookInput, now: number): LookReport {
       for (const e of bag.entries) {
         const at = placeOf({ x: BigInt(e.at.x), y: BigInt(e.at.y), z: BigInt(e.at.z) }, e.plane as Plane)
         const d = distanceBetween(here, at)
-        const what = e.type === 'message' ? (e.coin ? 'coins (a Cashu token in a message)' : 'message') : e.type === 'shard' ? `object${e.shard ? ` (${e.shard.vertices} vertices, ${e.shard.faces} faces, unit 2^${e.shard.unit}, extent ${e.shard.extent}, ${e.shard.mode})` : ''}` : e.type
+        const what = e.type === 'message' ? (e.coin ? 'coins (a Cashu token in a message)' : 'message') : e.type === 'shard' ? `object${e.shard ? ` (id ${objectHandle(e.eventId).slice(0, 12)}, ${e.shard.vertices} vertices, ${e.shard.faces} faces, unit 2^${e.shard.unit}, extent ${e.shard.extent}, ${e.shard.mode})` : ''}` : e.type
         lines.push(`    ${what}${e.byReference ? ' [by reference]' : ''} by ${e.author.slice(0, 8)}...: "${e.label}" at ${distanceWords(d)}`)
       }
     }
