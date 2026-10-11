@@ -123,7 +123,7 @@ export function mergeLines(have: ChatLine[], add: ChatLine[]): ChatLine[] {
   return [...have, ...fresh].sort((a, b) => a.at - b.at).slice(-CHAT_MAX)
 }
 
-/** Whether a line names the agent: its name as a whole word, its npub (bare or nostr:), a nostr:nprofile of it, or its hex pubkey. */
+/** Whether a line's text mentions the agent: its npub (bare or nostr:), a nostr:nprofile of it, or its hex pubkey. Its plain name does not count. */
 export function addressesMe(text: string, me: { pubkey: string; npub: string; name: string | null }): boolean {
   const lower = text.toLowerCase()
   if (lower.includes(me.npub) || lower.includes(me.pubkey)) return true
@@ -133,10 +133,9 @@ export function addressesMe(text: string, me: { pubkey: string; npub: string; na
       if (d.type === 'nprofile' && d.data.pubkey === me.pubkey) return true
     } catch { /* not an nprofile */ }
   }
-  if (me.name && me.name.length >= 2) {
-    const escaped = me.name.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`, 'i').test(lower)
-  }
+  // The agent's plain name does not address it (arkinox, 2026-10-11: answer
+  // "just when I address him via tag"): only a mention does, the p tag
+  // ONOSENDAI's @mention writes, or its key in the text as NIP-27 writes it.
   return false
 }
 
