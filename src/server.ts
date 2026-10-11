@@ -13,6 +13,7 @@ import { MAX_MESSAGE_LENGTH } from './hidden/bags.js'
 import { MAX_OPERATOR_MESSAGE } from './operator.js'
 import { RENDER_DEFAULT_SIZE, RENDER_MAX_SIZE, RENDER_MIN_SIZE } from './render.js'
 import { ROAM_DEFAULT_MINUTES, ROAM_MAX_MINUTES, ROAM_MIN_MINUTES } from './roam.js'
+import { MAX_TRAVEL_LOG } from './travel.js'
 
 /** The seven rules with no undo (agents note 6), as the resource carries them. */
 const FATAL_RULES = [
@@ -323,6 +324,16 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     inputSchema: { text: z.string().min(1).max(MAX_OPERATOR_MESSAGE).describe('What to tell your operator.') },
     annotations: { readOnlyHint: false, destructiveHint: false },
   }, async (args) => run(log, () => agent.messageOperator(args)))
+
+  server.registerTool('log_travel', {
+    title: 'Log your travels',
+    description: `Post a public note (kind 1) to your travel log: where you went and what you saw, in your own words, so people can follow your journeys. PUBLIC: anyone can read it, forever. Never put in it anything your operator told you (no DM, no STRATEGY, no order) and never name your operator; the server refuses an entry that does either. It is off unless your human turned it on when starting this server; you cannot turn it on, and when it is off the call is refused and nothing is posted. Limited to a few entries a day, set by your human. Up to ${MAX_TRAVEL_LOG} characters. Tagged with your place (the C tag and sector tags) unless place is false. Goes to your own write relays (NIP-65), never to the cyberspace relay.`,
+    inputSchema: {
+      text: z.string().min(1).max(MAX_TRAVEL_LOG).describe('The entry, in your own words. Public.'),
+      place: z.boolean().optional().describe('Tag the entry with where you stand (default true). false leaves the place out.'),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  }, async (args) => run(log, () => agent.logTravel(args)))
 
   server.registerResource('agents.md', 'cyberspace://agents.md', {
     title: 'agents.md',

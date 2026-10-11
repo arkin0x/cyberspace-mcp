@@ -60,6 +60,7 @@ import { Refusal, type ToolResult } from './tool.js'
 import { Transit } from './transit.js'
 import type { Secret } from './nwc.js'
 import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS, Wallet } from './wallet.js'
+import { DEFAULT_TRAVEL_PER_DAY, TravelLog, type TravelLogSettings } from './travel.js'
 
 export { Refusal, type ToolResult } from './tool.js'
 
@@ -106,6 +107,8 @@ export interface AgentConfig {
   /** Tests: how long a pay_invoice answer is waited for, and the wallet's clock. */
   walletPayTimeoutMs?: number
   walletClock?: () => number
+  /** The public travel log (kind 1): off unless the human turns it on (arkinox, 2026-10-11). */
+  travelLog?: TravelLogSettings
 }
 
 /** The highest cube a key is derived for on request (hide, find, look): a key at h16 is about a second. */
@@ -157,6 +160,8 @@ export class Agent {
   readonly roaming: Roam
   /** The human's wallet, if they connected one, and their limits: pays HOSAKA rides the server bought, nothing else. */
   readonly wallet: Wallet
+  /** The public travel log, off unless the human turned it on (travel.ts). */
+  readonly travel: TravelLog
   calibration: Calibration
   private readonly dir: StateDir
   private readonly sk: Uint8Array
@@ -235,6 +240,19 @@ export class Agent {
       now: nowSeconds, log: this.log,
     })
     this.roaming = new Roam(dir, config.roamClock ?? nowSeconds)
+    this.travel = new TravelLog({
+      settings: config.travelLog ?? { enabled: false, maxPerDay: DEFAULT_TRAVEL_PER_DAY, tagOperator: false },
+      pubkey: this.pubkey, relays: this.relays, dir, defaults: config.lookupRelays ?? GENERAL_RELAYS,
+      // Both the operator the profile names and the one the human configured are kept out of the note; a p tag names only an operator they agree on.
+      operators: () => {
+        const named = this.operatorOfProfile()
+        const configured = this.config.operator ? parsePubkey(this.config.operator) : null
+        return { all: [...new Set([named, configured].filter((k): k is string => !!k))], tag: this.operatorProblem() ? null : named ?? configured }
+      },
+      place: () => ({ place: this.keeper.place(), onChain: this.keeper.head() !== null }),
+      privateTexts: () => this.operatorChannel.privateTexts(),
+      sign: (t) => this.sign(t), now: nowSeconds, log: this.log, maxWaitMs: config.relayMaxWaitMs,
+    })
   }
 
   /**
@@ -310,6 +328,7 @@ export class Agent {
     for (const d of dropped) this.log(`dropped ${d.event.id.slice(0, 8)}: ${d.dropped}`)
     this.settle()
     this.syncOperator()
+    this.travel.start()
     // A watch left on keeps watching across a restart, and reads what the operator did meanwhile.
     this.follow.refresh()
     // A HOSAKA ride a restart left in hand is followed again in the background, with no ride call.
@@ -1121,6 +1140,11 @@ export class Agent {
   /** A private NIP-17 DM to the operator, with the agent's own copy. */
   messageOperator(input: { text: string }): Promise<ToolResult> {
     return this.operatorChannel.message(input.text)
+  }
+
+  /** A public kind 1 travel log entry, when the human turned the log on (travel.ts). */
+  logTravel(input: { text: string; place?: boolean }): Promise<ToolResult> {
+    return this.travel.post(input)
   }
 
   // ---- say, listen, wait_for ------------------------------------------------
