@@ -349,6 +349,28 @@ export class OperatorChannel {
   /** The last sync, reused by ordersWaiting for this long so a waker polling often does not reread the operator's lists each time. */
   private factsCache: { facts: OperatorFacts; at: number } | null = null
 
+  /** The operator's lists, reused for FACTS_REUSE_S so a caller polling often does not reread them each time; null when the channel is closed. */
+  private async cachedFacts(): Promise<OperatorFacts | null> {
+    const now = this.deps.now()
+    const cached = this.factsCache && now - this.factsCache.at < FACTS_REUSE_S && this.factsCache.facts.operator === this.deps.operator() ? this.factsCache.facts : null
+    if (cached) return cached
+    const facts = await this.sync()
+    if (facts) this.factsCache = { facts, at: now }
+    return facts
+  }
+
+  /**
+   * Whether the operator follows the agent (their newest kind 3 has a p tag
+   * for it), the rule an order needs, from the same cached lists
+   * ordersWaiting reads: for the follow watch (follow.ts), whose moves count
+   * by the same trust rules as orders (arkinox, 2026-10-11). Null when no
+   * operator may give orders or their contact list could not be found.
+   */
+  async operatorFollows(): Promise<boolean | null> {
+    if (this.deps.operatorProblem?.() || !this.deps.operator()) return null
+    return (await this.cachedFacts())?.follows ?? null
+  }
+
   /**
    * Whether orders wait, without reading them (arkinox, 2026-10-11: the
    * agent waits for DMs from its operator). Counts the operator's messages
@@ -359,13 +381,8 @@ export class OperatorChannel {
    */
   async ordersWaiting(): Promise<ToolResult> {
     const operator = this.requireOperator()
-    const now = this.deps.now()
-    let facts = this.factsCache && now - this.factsCache.at < FACTS_REUSE_S ? this.factsCache.facts : null
-    if (!facts) {
-      facts = await this.sync()
-      if (!facts) throw new Refusal('The operator channel is closed.')
-      this.factsCache = { facts, at: now }
-    }
+    const facts = await this.cachedFacts()
+    if (!facts) throw new Refusal('The operator channel is closed.')
     if (facts.inbox.length === 0) return { text: this.noInboxWords(facts), data: { orders: 0, continue: false, noInbox: true } }
     const filter: Filter = { kinds: [WRAP_KIND], '#p': [this.deps.pubkey] }
     const since = this.sinceForNextRead()
