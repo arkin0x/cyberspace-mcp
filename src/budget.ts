@@ -11,12 +11,18 @@ export interface BudgetState {
   remainingSessionSeconds: number
   chatLinesSaid: number
   moves: number
+  /** Times the operator's CONTINUE renewed the session budget since the server started. */
+  renewals: number
+  /** Work spent in sessions that a renewal closed. */
+  spentBeforeRenewalsSeconds: number
 }
 
 export class Budget {
   spentSeconds = 0
   chatLinesSaid = 0
   moves = 0
+  renewals = 0
+  spentBeforeRenewalsSeconds = 0
 
   constructor(readonly capCallSeconds: number, readonly capSessionSeconds: number) {}
 
@@ -43,6 +49,19 @@ export class Budget {
     this.spentSeconds += seconds
   }
 
+  /**
+   * The operator's CONTINUE (KEEP GOING) was read: a fresh session budget of
+   * the configured cap begins (arkinox, 2026-10-11). The cap is never
+   * raised, only renewed, and only operator.ts calls this, for a DM sealed by
+   * the operator and carrying the CONTINUE tag; nothing the model passes to
+   * a tool can.
+   */
+  renew(): void {
+    this.spentBeforeRenewalsSeconds += this.spentSeconds
+    this.spentSeconds = 0
+    this.renewals++
+  }
+
   state(): BudgetState {
     return {
       capCallSeconds: this.capCallSeconds,
@@ -51,6 +70,8 @@ export class Budget {
       remainingSessionSeconds: Math.max(0, this.capSessionSeconds - this.spentSeconds),
       chatLinesSaid: this.chatLinesSaid,
       moves: this.moves,
+      renewals: this.renewals,
+      spentBeforeRenewalsSeconds: this.spentBeforeRenewalsSeconds,
     }
   }
 }

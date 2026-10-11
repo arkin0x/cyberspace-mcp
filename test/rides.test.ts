@@ -2,7 +2,11 @@
 // agent on a fresh key spawns and hops, is refused a boarding before the line
 // is synced, syncs the line from the fixture blobs, boards, rides three
 // blocks over two budgeted calls, rides again from the stop it reached,
-// cancels a ride in flight, and is refused what would break its chain. The
+// cancels a ride in flight, and is refused what would break its chain. Rides
+// compute in the background (arkinox, 2026-10-11): a ride call returns at
+// once, the test waits for the proof to be ready, and the next call signs it;
+// a pause, a pause at the session cap and a renewal, and a head that moved
+// under a ready proof are each exercised here, on the calling thread. The
 // line is the real chain's first 6144 blocks (lineFixture.ts), served by a
 // fetch that never leaves the process; the rides pass three blocks of low
 // terrain K, so a leaf costs milliseconds and the suite stays fast.
@@ -24,7 +28,7 @@ import { Agent, Refusal } from '../src/agent.js'
 import { chainTemplateProblem, hopTemplate } from '../src/chain/builder.js'
 import { buildChain, chainStatus, parseAction, type ActionEvent } from '../src/chain/events.js'
 import { LineStore, type Line } from '../src/hyperspace/line.js'
-import { lineTerrainK, verifyRideLevel1 } from '../src/hyperspace/ride.js'
+import { lineTerrainK, rideBlocks, verifyRideLevel1 } from '../src/hyperspace/ride.js'
 import { bytesToHex, signEvent, tagValue, type NostrEvent } from '../src/nostr/event.js'
 import type { Calibration } from '../src/space/calibration.js'
 import { placeOf, spawnPlace, type Position } from '../src/space/coords.js'
@@ -94,6 +98,15 @@ const published = (id: unknown): NostrEvent => {
   const ev = canonical.all().find((e) => e.id === id)
   if (!ev) throw new Error(`event ${String(id)} is not on the canonical relay`)
   return ev
+}
+
+/** Wait until `cond` holds, looking every 20 ms, for at most `ms`. */
+async function until(cond: () => boolean, ms = 60_000): Promise<void> {
+  const end = Date.now() + ms
+  while (!cond()) {
+    if (Date.now() > end) throw new Error('timed out waiting')
+    await new Promise((r) => setTimeout(r, 20))
+  }
 }
 
 const beside = (head: ActionEvent, dx: bigint): Position => ({ x: head.position.x + dx, y: head.position.y, z: head.position.z })
@@ -192,36 +205,41 @@ describe('the hyperspace tools, on a fresh key over the fixture line', () => {
     await expect(a.ride({})).rejects.toThrow(/Say which block to ride to/)
     const spent = a.budget.spentSeconds
     a.budget.spentSeconds = a.budget.capSessionSeconds
-    await expect(a.ride({ to: S + RIDE_LENGTH })).rejects.toThrow(/the session has 0\.0 s of its 120 s left\. One call is capped at 30 s/)
+    await expect(a.ride({ to: S + RIDE_LENGTH })).rejects.toThrow(/the session has 0\.0 s of its 120 s left\. The ride computes in the background/)
     a.budget.spentSeconds = spent
     await expect(a.ride({ cancel: true })).rejects.toThrow(Refusal)
     expect(a.keeper.moving).toBe(false)
     expect(a.rideStatus().data.inFlight).toBe(false)
   })
 
-  it('ride: progress over two budgeted calls with the head reserved between them, then a hyperjump the reader and Level 1 accept, its cache forgotten only once recorded', async () => {
+  it('ride starts in the background and returns at once, holds the head while it computes, and the call after the proof is ready signs a hyperjump the reader and Level 1 accept, its cache forgotten only once recorded (arkinox, 2026-10-11)', async () => {
     const to = S + RIDE_LENGTH
     const boarding = a.keeper.head()!
     const leavesFile = join(a.transit.runner.cache.path, 'leaves', `${boarding.id}.log`)
-    // Every clock read is a second, so an eight-second budget cuts the ride after a leaf or two.
-    clock.stepPerRead = 1000
-    const first = await a.ride({ to, budget_seconds: 8 })
-    clock.stepPerRead = 0
+    const spentBefore = a.budget.spentSeconds
+    // A millisecond per clock read, so the work the background charges is visible.
+    clock.stepPerRead = 1
+    const first = await a.ride({ to })
     expect(first.data.done).toBe(false)
-    const flight = first.data.ride as { calls: number; progress: { leavesDone: number; leavesTotal: number; leavesResumed: number } }
-    expect(flight.calls).toBe(1)
-    expect(flight.progress.leavesTotal).toBe(RIDE_LENGTH)
-    expect(flight.progress.leavesDone).toBeGreaterThan(0)
+    expect(first.data.state).toBe('computing')
+    expect(first.text).toContain('Started the ride in the background')
     expect(first.text).toContain(`Ride to block ${to} from block ${S}`)
     expect(first.text).toContain('The head is reserved for this ride')
-    expect(existsSync(leavesFile)).toBe(true)
-    // Reserved across calls: no hop and no other ride can sign from this head, and the status names the ride.
+    expect(existsSync(join(a.transit.runner.cache.path, 'flight.json'))).toBe(true)
+    // Reserved while it computes: no hop and no other ride can sign from this head, and the status names the ride.
     expect(a.keeper.moving).toBe(true)
     await expect(a.hop({ target: { dx: 1 } })).rejects.toThrow(/already in flight/)
     await expect(a.ride({ to: to + 1 })).rejects.toThrow(new RegExp(`A ride to block ${to} is in flight`))
-    const status = a.rideStatus()
-    expect(status.data).toMatchObject({ inFlight: true, stale: false })
-    expect(status.text).toContain(`Ride to block ${to}`)
+    expect(a.rideStatus().data).toMatchObject({ inFlight: true, stale: false })
+    await until(() => a.transit.rideState().state === 'ready')
+    clock.stepPerRead = 0
+    expect(existsSync(leavesFile)).toBe(true)
+    expect(a.transit.rideState()).toMatchObject({ state: 'ready', to, done: RIDE_LENGTH, total: RIDE_LENGTH, etaSeconds: 0 })
+    expect(a.rideStatus().text).toContain('Its proof is ready')
+    // The work was charged to the session as it ran; nothing was signed in the background.
+    expect(a.budget.spentSeconds).toBeGreaterThan(spentBefore)
+    expect(a.keeper.head()!.id).toBe(boarding.id)
+    expect(a.keeper.moving).toBe(true)
 
     // forget runs only once the chain already holds the ride: what the head was, and whether the cache was still there, at the moment it was called.
     const forgotten: Array<{ prev: string; head: ActionEvent | null; cached: boolean }> = []
@@ -242,6 +260,7 @@ describe('the hyperspace tools, on a fresh key over the fixture line', () => {
     expect(forgotten[0].head?.type).toBe('hyperjump')
     expect(forgotten[0].head?.id).toBe(done.data.eventId)
     expect(existsSync(leavesFile)).toBe(false)
+    expect(existsSync(join(a.transit.runner.cache.path, 'flight.json'))).toBe(false)
     expect(done.data.calls).toBe(2)
     expect((done.data.verification as { ok: boolean; checked: number }).ok).toBe(true)
     expect(done.text).toContain('signed')
@@ -265,16 +284,17 @@ describe('the hyperspace tools, on a fresh key over the fixture line', () => {
     expect(a.here().hex).toBe(parsed.coordHex)
     expect(a.keeper.moving).toBe(false)
     expect(a.rideStatus().data.inFlight).toBe(false)
+    expect(a.transit.rideState().state).toBeNull()
     expect(a.budget.state().moves).toBe(3)
     expect((await a.station()).data.onLine).toMatchObject({ boarded: true, atStop: to })
   }, 120_000)
 
-  it('a second ride leaves from the first ride\'s B and declares no as_of; the block you stand at is refused', async () => {
+  it('a second ride leaves from the first ride\'s B and declares no as_of; wait_seconds gives the old blocking call; the block you stand at is refused', async () => {
     const at = S + RIDE_LENGTH
     const back = S + 1
     await expect(a.ride({ to: at })).rejects.toThrow(/already at block/)
     const prev = a.keeper.head()!
-    const r = await a.ride({ to: back, as_of: TIP })
+    const r = await a.ride({ to: back, as_of: TIP, wait_seconds: 30 })
     expect(r.data.action).toBe('hyperjump')
     expect((r.data.notes as string[]).join(' ')).toMatch(/as_of \d+ was ignored/)
     const ev = published(r.data.eventId)
@@ -288,16 +308,58 @@ describe('the hyperspace tools, on a fresh key over the fixture line', () => {
     expect((await a.station()).data.onLine).toMatchObject({ atStop: back })
   }, 120_000)
 
-  it('cancel releases the head and keeps the cache; forget drops the cache too; nothing is signed', async () => {
+  it('at the session cap the ride pauses with the seconds it needs; a renewal lets the next ride call resume it from the cache, recomputing nothing (arkinox, 2026-10-11)', async () => {
     const to = S + RIDE_LENGTH
     const prev = a.keeper.head()!
-    const leavesFile = join(a.transit.runner.cache.path, 'leaves', `${prev.id}.log`)
+    // Eight seconds of session left, and every clock read a second: the ride pauses at the cap after a leaf or two.
+    a.budget.spentSeconds = a.budget.capSessionSeconds - 8
     clock.stepPerRead = 1000
-    const first = await a.ride({ to, budget_seconds: 8 })
+    const first = await a.ride({ to })
+    expect(first.data.state).toBe('computing')
+    await until(() => a.transit.rideState().state === 'paused_cap')
     clock.stepPerRead = 0
-    expect(first.data.done).toBe(false)
+    const paused = a.transit.rideState()
+    expect(paused.done).toBeGreaterThan(0)
+    expect(paused.done).toBeLessThan(RIDE_LENGTH)
+    expect(a.budget.state().remainingSessionSeconds).toBe(0)
+    const status = a.rideStatus()
+    expect(status.data.state).toBe('paused_cap')
+    expect(status.text).toMatch(/paused at the session cap.*It needs about \d+ s more/)
+    expect(status.text).toContain('KEEP GOING')
     expect(a.keeper.moving).toBe(true)
+    // Without a renewal the ride call says so and computes nothing.
+    await expect(a.ride({ to })).rejects.toThrow(/paused at the session cap/)
+    expect(a.transit.rideState()).toMatchObject({ state: 'paused_cap', done: paused.done })
+
+    a.budget.renew()
+    const resumed = await a.ride({ to })
+    expect(resumed.text).toContain('Resumed from the session-cap pause')
+    await until(() => a.transit.rideState().state === 'ready')
+    const progress = (a.rideStatus().data.ride as { progress: { leavesResumed: number } }).progress
+    expect(progress.leavesResumed).toBe(paused.done)
+    const done = await a.ride({ to })
+    expect(done.data.action).toBe('hyperjump')
+    expect(parseAction(published(done.data.eventId))?.previousId).toBe(prev.id)
+  }, 120_000)
+
+  it('pause stops the work and keeps the head and every leaf; cancel releases the head and keeps the cache; forget drops the cache too; nothing is signed', async () => {
+    const to = S + 2
+    const prev = a.keeper.head()!
+    const leavesFile = join(a.transit.runner.cache.path, 'leaves', `${prev.id}.log`)
+    const first = await a.ride({ to })
+    expect(first.data.state).toBe('computing')
+    // The pause arrives while the ride computes, as an operator's HOLD would.
+    const paused = await a.ride({ pause: true })
+    expect(paused.data.state).toBe('paused')
+    expect(paused.text).toContain('Paused the ride')
+    expect(a.keeper.moving).toBe(true)
+    const done = a.transit.rideState().done
+    expect(done).toBeGreaterThan(0)
     expect(existsSync(leavesFile)).toBe(true)
+    // Nothing more is computed while paused.
+    await new Promise((r) => setTimeout(r, 300))
+    expect(a.transit.rideState()).toMatchObject({ state: 'paused', done })
+    expect((await a.ride({ pause: true })).text).toContain('nothing to pause')
     const canceled = await a.ride({ cancel: true })
     expect(canceled.data.inFlight).toBe(false)
     expect(canceled.text).toContain('kept on disk')
@@ -308,6 +370,7 @@ describe('the hyperspace tools, on a fresh key over the fixture line', () => {
     expect(forgot.data.forgot).toBe(prev.id)
     expect(existsSync(leavesFile)).toBe(false)
     expect(a.keeper.head()!.id).toBe(prev.id)
+    await expect(a.ride({ pause: true })).rejects.toThrow(/nothing to pause/)
   }, 60_000)
 
   it('board refuses when the head moves while the entry proof is computed, discards the proof unsigned, and adopts the newer move', async () => {
@@ -343,5 +406,48 @@ describe('the hyperspace tools, on a fresh key over the fixture line', () => {
     const r = await a.board()
     expect(parseAction(published(r.data.eventId))?.previousId).toBe(other!.id)
     expect(a.keeper.status()).toBe('valid')
+  }, 60_000)
+
+  it('a proof ready for a head that moved meanwhile is never signed: the ride is dropped, its cache forgotten, the head released', async () => {
+    const boarding = a.keeper.head()!
+    const spawn = a.keeper.chain()[0]
+    // The boarding before this test stands somewhere new: ride one cheap block from its station.
+    const line = a.transit.store.line
+    const st = ((await a.station()).data.station as { height: number }).height
+    const to = [st + 1, st - 1].find((h) => rideBlocks(st, h).every((b) => lineTerrainK(line.blockHash(b)!) <= CHEAP_K)) ?? st + 1
+    await a.ride({ to })
+    await until(() => a.transit.rideState().state === 'ready')
+    // Another device signs in as this identity and hops from the head the proof was computed for.
+    const other = signEvent(hopTemplate({ createdAt: boarding.createdAt + 1, genesisId: spawn.id, previousId: boarding.id, prevCoordHex: boarding.coordHex, to: beside(boarding, 3n), plane: boarding.plane, proofHash: 'ab'.repeat(32) }), sk)
+    canonical.inject(other)
+    await expect(a.ride({ to })).rejects.toThrow(/The head moved while the ride to block \d+ was in flight/)
+    expect(a.keeper.head()!.id).toBe(other.id)
+    expect(a.keeper.moving).toBe(false)
+    expect(a.rideStatus().data.inFlight).toBe(false)
+    expect(existsSync(join(a.transit.runner.cache.path, 'leaves', `${boarding.id}.log`))).toBe(false)
+    expect(canonical.all().some((e) => e.pubkey === a.pubkey && tagValue(e, 'A') === 'hyperjump' && e.tags.some((t) => t[0] === 'e' && t[3] === 'previous' && t[1] === boarding.id))).toBe(false)
+  }, 60_000)
+
+  it('a ride canceled with its cache kept cannot be resumed once the head moved (the agent hopped): the next ride says so plainly and starts fresh', async () => {
+    const line = a.transit.store.line
+    const cheapFrom = async (): Promise<number> => {
+      const st = ((await a.station()).data.station as { height: number }).height
+      return [st + 1, st - 1].find((h) => rideBlocks(st, h).every((b) => lineTerrainK(line.blockHash(b)!) <= CHEAP_K)) ?? st + 1
+    }
+    await a.board()
+    const first = a.keeper.head()!
+    const to = await cheapFrom()
+    await a.ride({ to })
+    await a.ride({ pause: true })
+    await a.ride({ cancel: true })
+    // The agent leaves the line and boards again elsewhere: a new head.
+    await a.hop({ target: { dx: 1, dy: 0, dz: 0 } })
+    await a.board()
+    const next = await a.ride({ to: await cheapFrom() })
+    expect(next.text).toContain(`left from head ${first.id.slice(0, 8)}...`)
+    expect(next.text).toContain('cannot be resumed from here')
+    expect(existsSync(join(a.transit.runner.cache.path, 'leaves', `${first.id}.log`))).toBe(false)
+    await a.ride({ forget: true })
+    expect(a.keeper.moving).toBe(false)
   }, 60_000)
 })

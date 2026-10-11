@@ -23,7 +23,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileS
 import { join } from 'node:path'
 import { hexToCoord } from 'cyberspace-core'
 import { EMBEDDED_CHECKPOINTS } from './checkpoints.js'
-import { appendColumns, createStopIndex, mergeAll, stopByHeight, type StopIndex } from './compactIndex.js'
+import { appendColumns, createStopIndex, hashBytesByHeight, mergeAll, stopByHeight, type StopIndex } from './compactIndex.js'
 import { genesisState, verifyAndDerive, type BlobColumns, type ChainState } from './headers.js'
 import { HEADERS_MANIFEST_URL, blobUrl, parseManifest, type HeadersManifest, type ManifestBlob } from './manifest.js'
 import { findStation, nearestStops, type StationResult } from './station.js'
@@ -101,6 +101,25 @@ export class Line {
   /** The block hash for a height, 64 lowercase hex (what a ride leaf is seeded from), or null when not held. */
   blockHash(height: number): string | null {
     return this.stopAt(height)?.blockHash ?? null
+  }
+
+  /**
+   * The block hashes a ride from `fromHeight` to `toHeight` passes, 32 bytes
+   * each, in the order rideBlocks lists the heights ((lo, hi], ascending),
+   * copied into one buffer a ride thread can take (arkinox, 2026-10-11).
+   * Null when any of those heights is not held.
+   */
+  rideHashes(fromHeight: number, toHeight: number): Uint8Array | null {
+    const lo = Math.min(fromHeight, toHeight)
+    const hi = Math.max(fromHeight, toHeight)
+    if (!this.has(lo + 1) || !this.has(hi)) return null
+    const out = new Uint8Array((hi - lo) * 32)
+    for (let h = lo + 1; h <= hi; h++) {
+      const bytes = hashBytesByHeight(this.index, h)
+      if (bytes === null) return null
+      out.set(bytes, (h - lo - 1) * 32)
+    }
+    return out
   }
 
   /**

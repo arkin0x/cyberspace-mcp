@@ -163,11 +163,13 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   server.registerTool('ride', {
     title: 'Ride the line',
-    description: 'Ride hyperspace to a block (DECK-0001 5), from your station on the first ride after boarding or from the stop you stand at after a ride. The first call quotes the whole ride against the session cap and reserves the head; every call computes for budget_seconds (default: the per-call cap) and returns progress until the proof is done, self-verified and signed as a hyperjump, after which you stand at the stop. Call again with the same to until it says signed. Refuses a block that is your current one, one beyond the verified line, a ride above the session cap, and a head that is not a boarding or a ride. cancel: true releases the head and keeps the work on disk; forget: true drops the work too.',
+    description: 'Ride hyperspace to a block (DECK-0001 5), from your station on the first ride after boarding or from the stop you stand at after a ride. The ride computes in the background and this call returns at once: the first call quotes the whole ride against the session cap, reserves the head and starts the work; while it computes every other tool answers, so keep reading inbox and answering your operator. Call ride again with the same to to see where it stands; once the proof is ready (ride_status and orders_waiting say so), that call verifies the head, signs the hyperjump and publishes it, after which you stand at the stop. The work is charged to the session cap as it runs and pauses at the cap, resumable from the cache. pause: true pauses it on command (an operator\'s HOLD) and keeps the head; ride with the same to resumes it. cancel: true releases the head and keeps the work on disk; forget: true drops the work too. wait_seconds waits up to that long (at most the per-call cap) for the proof and signs it if ready. Refuses a block that is your current one, one beyond the verified line, a ride above the session cap, and a head that is not a boarding or a ride.',
     inputSchema: {
       to: z.number().int().min(0).optional().describe('The block height to ride to.'),
-      budget_seconds: z.number().positive().optional().describe('Seconds this call may compute; the per-call cap applies too.'),
+      wait_seconds: z.number().positive().optional().describe('Wait up to this long for the proof before answering, and sign it if it is ready; the per-call cap applies. Default: do not wait.'),
+      budget_seconds: z.number().positive().optional().describe('Older name for wait_seconds.'),
       as_of: z.number().int().min(0).optional().describe('First ride after a boarding only: the station set bound to declare, at least to. Default: the newest verified block.'),
+      pause: z.boolean().optional().describe('Pause the ride computing in the background; the head stays reserved and the work stays on disk. Ride with the same to resumes it.'),
       cancel: z.boolean().optional().describe('Release the ride in flight; its work stays on disk.'),
       forget: z.boolean().optional().describe('Release the ride in flight and drop its work from disk.'),
     },
@@ -176,7 +178,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   server.registerTool('ride_status', {
     title: 'Ride status',
-    description: 'The ride in flight, if any: where from and to, its phase and leaves, the price attempts, the work spent, whether the head is still the one it left from.',
+    description: 'The ride in flight, if any, answered at once while it computes: its state (computing, ready, paused, paused_cap, failed, or interrupted by a restart), where from and to, leaves done of total, the price attempts, the work spent and the seconds it still needs, whether the head is still the one it left from.',
     annotations: { readOnlyHint: true },
   }, async () => run(log, () => agent.rideStatus()))
 
@@ -258,7 +260,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   server.registerTool('orders_waiting', {
     title: 'Orders waiting',
-    description: 'Whether your operator has sent orders you have not read, counted by the same rules as inbox, without reading them or marking anything read. For the waker that starts your turn when a DM arrives; in a turn, call inbox instead.',
+    description: 'Whether your operator has sent orders you have not read, counted by the same rules as inbox, without reading them or marking anything read, and the state of a ride computing in the background (ride: state, to, done, total). For the waker that starts your turn when a DM arrives or a ride is ready or stopped; in a turn, call inbox instead.',
     annotations: { readOnlyHint: true },
   }, async () => run(log, () => agent.ordersWaiting()))
 
@@ -295,7 +297,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
           `2. Call station with sync: true until it says nothing remains to verify${args.stop ? `, or at least until the line reaches block ${args.stop}` : ''}. The line is verified by proof of work and kept in the state directory; a cold start takes many calls.`,
           `3. Call station with destination${args.stop ? `: ${args.stop}` : ''} for the quote: how many blocks, how many seconds, how many calls. Agree the block with your human if none was named; any verified block is a stop.`,
           '4. Call board. You are on the line and have not moved.',
-          `5. Call ride with to${args.stop ? `: ${args.stop}` : ''}, and call it again with the same to each time it returns progress, until it says the ride is signed. ride_status watches it; cancel: true releases the head if you must stop.`,
+          `5. Call ride with to${args.stop ? `: ${args.stop}` : ''}. The ride computes in the background and the call returns at once: keep reading inbox and answering your operator meanwhile. When ride_status says the proof is ready, call ride with the same to again and it is signed. A HOLD from your operator means ride with pause: true; cancel: true releases the head if you must stop.`,
           '6. At the stop, call look, say a line, and wait_for an arrival or a chat line addressed to you. Everyone who rides to that block arrives at the same coordinate.',
           '',
           'Never spawn again to get closer, never ask for your human\'s key, quote every ride before spending work, and never try to hop to a far coordinate: plan_hop prices the crossing and refuses it.',

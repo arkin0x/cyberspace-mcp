@@ -180,6 +180,18 @@ export function stopAt(index: StopIndex, row: number): Stop {
   return stop
 }
 
+/**
+ * The block hash for a height as the 32 bytes the index holds (a view, not a
+ * copy), or null when the height is not held or carries no hash. For a ride
+ * of many blocks, where materializing a Stop per height would cost the main
+ * thread seconds (arkinox, 2026-10-11).
+ */
+export function hashBytesByHeight(index: StopIndex, height: number): Uint8Array | null {
+  const row = rowByHeight(index, height)
+  if (row === -1 || (index.kinds[row] & HAS_HASH) === 0) return null
+  return index.hashes.subarray(row * 32, row * 32 + 32)
+}
+
 export function stopByHeight(index: StopIndex, height: number): Stop | undefined {
   const row = rowByHeight(index, height)
   return row === -1 ? undefined : stopAt(index, row)

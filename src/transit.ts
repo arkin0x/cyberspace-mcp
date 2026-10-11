@@ -18,10 +18,26 @@
 // as its as_of and the station under it as its from_height; a later ride
 // starts at the previous ride's B and declares no as_of (DECK-0001 4.3,
 // 5.2); and there is no zero-length ride (arkinox, 2026-10-07).
+//
+// A ride computes in the background (arkinox, 2026-10-11: "agents being
+// responsive is top priority or else the feature feels broken"). `ride`
+// starts the work, or reports on it, and returns at once; the work goes on
+// between tool calls on a thread of its own (rideHost.ts), so inbox,
+// message_operator, orders_waiting and every other tool answer while it
+// runs. One ride at a time. The seconds it computes are charged to the
+// session cap as they pass, and at the cap the ride pauses, resumable from
+// the cache. `ride { pause: true }` pauses it on command (an operator's
+// HOLD), keeping the head reserved; `ride { to }` resumes it. When the proof
+// is ready, the next `ride` call signs it exactly as a ride always ended:
+// confirm the head, the reader's check, sign, record, publish, forget. The
+// signature is never made in the background. What a ride in flight is, is
+// also written to <state>/rides/flight.json, so a restarted server can say
+// that a ride was under way and whether it can still be resumed.
 
+import { readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { availableParallelism } from 'node:os'
 import { join } from 'node:path'
-import { hexToCoord, terrainK } from 'cyberspace-core'
+import { bytesToHex, hexToCoord, terrainK } from 'cyberspace-core'
 import type { Budget } from './budget.js'
 import { chainTemplateProblem, enterHyperspaceTemplate, hyperjumpTemplate } from './chain/builder.js'
 import { buildChain, chainStatus, firstBreak, lookBack, openBracket, type ActionEvent } from './chain/events.js'
@@ -29,7 +45,8 @@ import type { ChainKeeper } from './chain/keeper.js'
 import { computeEnterProof } from './hyperspace/enter.js'
 import { LineStore, type LineStatus, type StationResult, type Stop, type SyncResult } from './hyperspace/line.js'
 import { lineStateOf, rideBlocks, zeroLengthRideRefusal, type LineState } from './hyperspace/ride.js'
-import { RideRunner, estimateRideSeconds, type RideProgress, type RideRunResult } from './hyperspace/rideRunner.js'
+import { runRideInThread } from './hyperspace/rideHost.js'
+import { RideRunner, estimateRideSeconds, type RideProgress, type RideRunOptions, type RideRunResult } from './hyperspace/rideRunner.js'
 import { maxAxisLca } from './hyperspace/station.js'
 import { nowSeconds, type EventTemplate, type NostrEvent } from './nostr/event.js'
 import type { Outbox, OutboxEntry } from './nostr/outbox.js'
@@ -65,12 +82,39 @@ export interface TransitOptions {
 }
 
 /**
+ * Where a ride stands, as ride_status and orders_waiting report it (arkinox,
+ * 2026-10-11): `computing` in the background; `ready`, the proof is done and
+ * waits for a ride call to sign it; `paused`, on command; `paused_cap`, at
+ * the session cap; `failed`, the work stopped on an error (a ride call
+ * retries it); `interrupted`, the server restarted while a ride was in
+ * flight (a ride call to the same block resumes it from the cache).
+ */
+export type RideState = 'computing' | 'ready' | 'paused' | 'paused_cap' | 'failed' | 'interrupted'
+
+/** The ride's state for a waker: cheap, in memory, never a relay. */
+export interface RideStateData {
+  state: RideState | null
+  to: number | null
+  /** Leaves in hand, of the ride's total. */
+  done: number
+  total: number
+  attempts: number
+  attemptsExpected: number
+  /** Estimated seconds of work left, when known. */
+  etaSeconds: number | null
+  /** Why the ride failed, or why it cannot resume. */
+  reason: string | null
+}
+
+type Ready = Extract<RideRunResult, { done: true }>
+
+/**
  * A ride between calls. The head it departs from is reserved from the first
  * call until the ride is signed, canceled, or found moved, so no hop and no
  * second ride can sign from that head meanwhile (one key, one mover). The
  * leaves and the price search live on disk under the previous event id
- * (rideCache.ts); this record holds only what the signature will need and
- * what the agent asks about.
+ * (rideCache.ts); this record holds only what the signature will need, the
+ * background work, and what the agent asks about.
  */
 interface Flight {
   previousId: string
@@ -85,13 +129,54 @@ interface Flight {
   quotedSeconds: number
   release: () => void
   startedAt: number
+  /** Ride calls made for this ride. */
   calls: number
+  /** Seconds of work charged to the session for this ride, over every run. */
   workSeconds: number
-  lastCallSeconds: number
   progress: RideProgress | null
-  computing: boolean
   notes: string[]
+  state: Exclude<RideState, 'interrupted'>
+  /** The background run while one is going, settled when it stops for any reason. */
+  run: Promise<void> | null
+  abort: AbortController | null
+  /** A pause was asked for; the run stops at the next leaf and the state becomes paused. */
+  pauseAsked: boolean
+  /** Seconds of the current run already charged, by the runner's clock, and when (performance.now()). */
+  charged: number
+  chargedAt: number
+  proof: Ready | null
+  failure: string | null
+  /** A ride call is signing this ride right now. */
+  signing: boolean
+  /** The last background look at the relays for a moved head (Date.now()), and the look in progress. */
+  headCheckedAt: number
+  headCheck: Promise<void> | null
+  /** When flight.json was last written (Date.now()). */
+  savedAt: number
 }
+
+/** flight.json: the ride in flight as a restarted server finds it. */
+interface FlightRecord {
+  version: 1
+  /** live: in flight when written; canceled: released with its cache kept. */
+  status: 'live' | 'canceled'
+  previousId: string
+  fromHeight: number
+  toHeight: number
+  asOf: number | null
+  blocks: number
+  leavesDone: number
+  workSeconds: number
+  savedAt: number
+}
+
+const FLIGHT_FILE = 'flight.json'
+/** How often flight.json is rewritten while a ride computes. */
+const RECORD_EVERY_MS = 30_000
+/** How often, at most, a ride call looks at the relays for a moved head while the ride computes. */
+const HEAD_CHECK_EVERY_MS = 60_000
+/** How long a pause or a cancel waits for the background run to stop before it ends the run outright. */
+const STOP_WAIT_MS = 10_000
 
 /** How many stops `station` lists around the agent. */
 const NEAREST_STOPS = 5
@@ -151,11 +236,16 @@ export class Transit {
   readonly runner: RideRunner
   readonly threads: number
   private flight: Flight | null = null
+  /** The ride flight.json held when this server started, if any: a restart came between its calls. */
+  private interrupted: FlightRecord | null
+  /** A ride the background dropped (its head moved), told once by the next ride call or status. */
+  private ended: { to: number; reason: string } | null = null
 
   constructor(dir: StateDir, private readonly body: TransitBody, options: TransitOptions = {}) {
     this.store = LineStore.open(join(dir.path, 'line'), { manifestUrl: options.manifestUrl, fetch: options.fetch })
     this.threads = options.threads ?? Math.max(1, availableParallelism() - 1)
     this.runner = RideRunner.open(join(dir.path, 'rides'), { threads: this.threads, now: options.now })
+    this.interrupted = this.readRecord()
   }
 
   /** Whether a ride holds the head between calls. */
@@ -405,31 +495,58 @@ export class Transit {
   // ---- ride ------------------------------------------------------------------
 
   /**
-   * Ride the line to a block (DECK-0001 5). The first call quotes the whole
-   * ride against the session cap, reserves the head and starts the work; each
-   * call runs the ride for its budget (the per-call cap by default) and
-   * returns progress until the proof is done, verified at Level 1 by the
-   * runner, and signed. `cancel` releases the head and keeps the cache;
-   * `forget` drops the cache too.
+   * Ride the line to a block (DECK-0001 5), in the background (arkinox,
+   * 2026-10-11). The first call quotes the whole ride against the session
+   * cap, reserves the head, confirms it, starts the work and returns at once.
+   * A later call with the same `to` reports where the work stands, resumes it
+   * when it was paused (on command, at the cap, or by an error), and, once
+   * the proof is ready, signs it. `wait_seconds` (or the older
+   * `budget_seconds`) waits that long, at most the per-call cap, for the
+   * proof before answering, and signs it if it is ready by then. `pause`
+   * stops the work and keeps the head; `cancel` releases the head and keeps
+   * the cache; `forget` drops the cache too.
    */
-  async ride(input: { to?: number; budget_seconds?: number; as_of?: number; cancel?: boolean; forget?: boolean } = {}, signal?: AbortSignal): Promise<ToolResult> {
-    const budgetSeconds = input.budget_seconds
-    if (budgetSeconds !== undefined && (!Number.isFinite(budgetSeconds) || budgetSeconds <= 0)) throw new Refusal('budget_seconds must be a positive number of seconds.')
+  async ride(input: { to?: number; budget_seconds?: number; wait_seconds?: number; as_of?: number; pause?: boolean; cancel?: boolean; forget?: boolean } = {}, signal?: AbortSignal): Promise<ToolResult> {
+    for (const [name, v] of [['budget_seconds', input.budget_seconds], ['wait_seconds', input.wait_seconds]] as const) {
+      if (v !== undefined && (!Number.isFinite(v) || v <= 0)) throw new Refusal(`${name} must be a positive number of seconds.`)
+    }
     if (input.as_of !== undefined && !isHeight(input.as_of)) throw new Refusal('as_of must be a block height: a non-negative integer.')
     if (input.cancel || input.forget) return this.releaseRide(!!input.forget)
+    if (input.pause) return this.pauseRide()
     const to = input.to
-    if (!isHeight(to)) throw new Refusal('Say which block to ride to: to, a block height. Or pass cancel: true to release a ride in flight, or forget: true to drop its cache too.')
-    if (this.flight?.computing) throw new Refusal(`The ride to block ${this.flight.toHeight} is computing in another call right now; wait for that call to return, then call ride again.`)
+    if (!isHeight(to)) throw new Refusal('Say which block to ride to: to, a block height. Or pass pause: true to pause the ride in flight, cancel: true to release it, or forget: true to drop its cache too.')
     if (this.flight && this.flight.toHeight !== to) {
-      throw new Refusal(`A ride to block ${this.flight.toHeight} is in flight (${this.flightWords(this.flight)}). Call ride with to: ${this.flight.toHeight} to continue it, ride_status to watch it, or cancel: true to release the head before riding elsewhere.`)
+      throw new Refusal(`A ride to block ${this.flight.toHeight} is in flight (${this.flightWords(this.flight)}). Call ride with to: ${this.flight.toHeight} to continue it, ride_status to watch it, pause: true to pause it, or cancel: true to release the head before riding elsewhere.`)
     }
+    if (this.flight?.signing) throw new Refusal(`The ride to block ${to} is being signed in another call right now; call ride_status in a moment.`)
+    const told: string[] = []
+    if (this.ended) {
+      told.push(`Earlier: ${this.ended.reason}`)
+      this.ended = null
+    }
+    const fresh = !this.flight || this.flight.progress === null
     if (this.flight) {
       if (input.as_of !== undefined && input.as_of !== this.flight.asOf) throw new Refusal(`The ride in flight ${this.flight.asOf === undefined ? 'declares no as_of (it leaves from a stop)' : `declares as_of ${this.flight.asOf}`}, fixed when it started, because the station and every leaf depend on it. Cancel it to ride under another as_of.`)
-      await this.checkFlight(this.flight)
     } else {
       await this.startRide(to, input.as_of)
     }
-    return this.continueRide(this.flight!, budgetSeconds, signal)
+    const flight = this.flight!
+    flight.calls++
+    if (flight.state === 'computing' && flight.run) {
+      this.watchHead(flight)
+    } else if (flight.state !== 'ready') {
+      // Started now, or resumed: the head must still be the one every leaf was seeded by.
+      await this.checkFlight(flight)
+      const was = flight.state
+      this.launch(flight)
+      if (!fresh && flight.state === 'computing') told.push(`Resumed from ${was === 'paused' ? 'the pause' : was === 'paused_cap' ? 'the session-cap pause' : 'the failure'} in the background; no finished leaf is computed again.`)
+      else if (fresh && flight.state === 'computing') told.push(`Started the ride in the background on ${threadWords(this.threads)}. Other tools answer while it computes: keep reading inbox and answering your operator.`)
+    }
+    const wait = input.wait_seconds ?? input.budget_seconds
+    if (wait !== undefined && flight.state === 'computing') await this.waitWhileComputing(flight, Math.min(wait, this.body.budget.capCallSeconds), signal)
+    if (flight.state === 'ready' && this.flight === flight) return this.signRide(flight, told)
+    if (flight.state === 'paused_cap') throw new Refusal([...told, this.capWords(flight)].join(' '))
+    return this.progressResult(flight, told)
   }
 
   /** The first call: the chain, the line, the station, the quote, then the reservation. */
@@ -468,8 +585,17 @@ export class Transit {
     const seconds = estimateRideSeconds(this.body.calibration(), blocks, this.threads)
     const b = budget.state()
     if (!(seconds <= b.remainingSessionSeconds)) {
-      const calls = Math.max(1, Math.ceil(seconds / b.capCallSeconds))
-      throw new Refusal(`A ride of ${blocks} block(s) from block ${fromHeight} to block ${to} is expected to take about ${seconds.toFixed(1)} s on this machine (${threadWords(this.threads)}), and the session has ${b.remainingSessionSeconds.toFixed(1)} s of its ${b.capSessionSeconds} s left. One call is capped at ${b.capCallSeconds} s, so the ride would span about ${calls} call(s); the per-call cap bounds one call and the session cap bounds the whole ride. Pick a nearer block, or ask your human to raise the session cap or start a new session.`)
+      throw new Refusal(`A ride of ${blocks} block(s) from block ${fromHeight} to block ${to} is expected to take about ${seconds.toFixed(1)} s on this machine (${threadWords(this.threads)}), and the session has ${b.remainingSessionSeconds.toFixed(1)} s of its ${b.capSessionSeconds} s left. The ride computes in the background and is charged to the session cap as it goes. Pick a nearer block, or tell your operator by DM how many seconds it needs: a KEEP GOING from them renews the session budget.`)
+    }
+    // A ride that was under way when this server last stopped, or that was canceled with its cache kept: say plainly whether this one picks it up.
+    const earlier = this.interrupted
+    if (earlier) {
+      if (earlier.previousId === state.previousId) {
+        notes.push(`The ride ${earlier.status === 'live' ? 'under way when the server last stopped' : 'canceled earlier'} left from this same head, so its ${earlier.leavesDone} cached leaf(s) are picked up${earlier.toHeight === to ? '' : ` where they overlap (it went to block ${earlier.toHeight})`}; none is computed again.`)
+      } else {
+        notes.push(`The ride to block ${earlier.toHeight} ${earlier.status === 'live' ? 'under way when the server last stopped' : 'canceled earlier'} left from head ${earlier.previousId.slice(0, 8)}..., but your head is now ${state.previousId.slice(0, 8)}...: every leaf of that ride was seeded by the old head (DECK-0001 5.3), so it cannot be resumed from here, and this ride starts fresh.`)
+        this.runner.forget(earlier.previousId)
+      }
     }
     let release: () => void
     try {
@@ -477,88 +603,285 @@ export class Transit {
     } catch (err) {
       throw new Refusal(words(err))
     }
+    this.interrupted = null
     this.flight = {
       previousId: state.previousId, prevCoordHex: state.coordHex, genesisId: chain[0].id, fromHeight, toHeight: to, asOf, chained, blocks, quotedSeconds: seconds,
-      release, startedAt: Date.now(), calls: 0, workSeconds: 0, lastCallSeconds: 0, progress: null, computing: false, notes,
+      release, startedAt: Date.now(), calls: 0, workSeconds: 0, progress: null, notes,
+      state: 'paused', run: null, abort: null, pauseAsked: false, charged: 0, chargedAt: performance.now(), proof: null, failure: null, signing: false,
+      headCheckedAt: 0, headCheck: null, savedAt: 0,
     }
+    this.saveRecord(this.flight, true)
   }
 
   /**
-   * A later call: the head must still be the one the ride left from, because
-   * every leaf is seeded by it (DECK-0001 5.3). Relays that cannot be asked
-   * do not stop the work, which is local; they stop the signature.
+   * Before work starts or resumes: the head must still be the one the ride
+   * left from, because every leaf is seeded by it (DECK-0001 5.3). Relays
+   * that cannot be asked do not stop the work, which is local; they stop the
+   * signature.
    */
   private async checkFlight(flight: Flight): Promise<void> {
     const unconfirmed = await this.body.keeper.confirmHead()
-    this.refuseIfMoved(flight)
-    if (unconfirmed) flight.notes.push('The relays could not confirm the head before this call; the work went on, because it is local, and the signature waits for a confirmation.')
+    flight.headCheckedAt = Date.now()
+    await this.refuseIfMoved(flight)
+    if (unconfirmed) flight.notes.push('The relays could not confirm the head when the work started; the work went on, because it is local, and the signature waits for a confirmation.')
   }
 
   /** Drop the ride and refuse when the head is no longer the one it left from. */
-  private refuseIfMoved(flight: Flight): void {
+  private async refuseIfMoved(flight: Flight): Promise<void> {
     const head = this.body.keeper.head()
     if (head?.id === flight.previousId) return
+    // The run ends before the cache is dropped, so no late flush writes it back.
+    await this.stopRun(flight, 'abort')
     this.dropFlight(flight, true)
-    throw new Refusal(`The head moved while the ride to block ${flight.toHeight} was in flight: the relays hold a newer move (${head ? `${head.id.slice(0, 8)}...` : 'none'}), adopted now. Every leaf of the ride was seeded by the old head (DECK-0001 5.3), so the ride can never be signed; its cache was dropped and the head released. Board or ride again from where you stand.`)
+    throw new Refusal(this.movedWords(flight, head?.id ?? null))
+  }
+
+  private movedWords(flight: Flight, headId: string | null): string {
+    return `The head moved while the ride to block ${flight.toHeight} was in flight: the relays hold a newer move (${headId ? `${headId.slice(0, 8)}...` : 'none'}), adopted now. Every leaf of the ride was seeded by the old head (DECK-0001 5.3), so the ride can never be signed or resumed from there; its cache was dropped and the head released. Board or ride again from where you stand.`
+  }
+
+  /**
+   * While the ride computes, a ride call also looks at the relays for a
+   * newer head, in the background and at most once a minute, so a ride that
+   * can never be signed stops costing work without the call waiting on a
+   * relay. A moved head drops the ride; the next ride call or status says so.
+   */
+  private watchHead(flight: Flight): void {
+    if (flight.headCheck || Date.now() - flight.headCheckedAt < HEAD_CHECK_EVERY_MS) return
+    flight.headCheck = (async () => {
+      await this.body.keeper.confirmHead()
+      flight.headCheckedAt = Date.now()
+      const head = this.body.keeper.head()
+      if (this.flight !== flight || flight.signing || head?.id === flight.previousId) return
+      await this.stopRun(flight, 'abort')
+      if (this.flight !== flight || flight.signing) return
+      this.ended = { to: flight.toHeight, reason: this.movedWords(flight, head?.id ?? null) }
+      this.dropFlight(flight, true)
+    })().catch((err) => this.body.log(`ride head check: ${words(err)}`)).finally(() => { flight.headCheck = null })
   }
 
   private dropFlight(flight: Flight, forgetCache: boolean): void {
     flight.release()
     if (forgetCache) this.runner.forget(flight.previousId)
     if (this.flight === flight) this.flight = null
+    if (forgetCache) this.deleteRecord()
+    else this.saveRecord(flight, true, 'canceled')
   }
 
-  /** One call's worth of the ride, then the signature when the proof is done. */
-  private async continueRide(flight: Flight, budgetSeconds: number | undefined, signal: AbortSignal | undefined): Promise<ToolResult> {
-    const { budget, keeper } = this.body
-    const before = budget.state()
-    if (before.remainingSessionSeconds <= 0) throw new Refusal(`The session has spent its ${before.capSessionSeconds} s of work, so nothing more is computed this session. The ride stays in flight: cancel: true releases the head, and a new session resumes the ride from its cache. Ask your human to raise the session cap or start a new session.`)
-    const allowed = Math.min(budgetSeconds ?? before.capCallSeconds, before.capCallSeconds, before.remainingSessionSeconds)
+  // ---- the background run -------------------------------------------------------
+
+  /**
+   * Start the background run, unless the session cap is spent (then the
+   * ride stays paused at the cap). The run goes on between calls: on a
+   * thread of its own (rideHost.ts), or with threads 0 on this thread,
+   * yielding to the event loop between leaves. It is charged to the session
+   * as its progress comes in, and cut when the session cap is reached or a
+   * pause is asked; what it computed stays on disk.
+   */
+  private launch(flight: Flight): void {
+    if (flight.run) return
+    const { budget } = this.body
     const line = this.store.line
     // The store starts its walk over when the manifest changed under a held blob (line.ts reconcile), so a block verified when the ride started may not be held now.
-    if (!line.has(flight.fromHeight) || !line.has(flight.toHeight)) throw new Refusal(`The line no longer holds blocks ${Math.min(flight.fromHeight, flight.toHeight)} to ${Math.max(flight.fromHeight, flight.toHeight)} (verified to block ${line.asOf()} now). Call station with sync: true to verify it again; the ride stays in flight and resumes from its cache.`)
-    const job = {
-      previousEventIdHex: flight.previousId, fromHeight: flight.fromHeight, toHeight: flight.toHeight,
-      blockHashFor: (height: number): string => {
-        const hash = line.blockHash(height)
-        if (!hash) throw new Error(`block ${height} is not verified by this process`)
-        return hash
+    const hashes = line.rideHashes(flight.fromHeight, flight.toHeight)
+    if (hashes === null) throw new Refusal(`The line no longer holds blocks ${Math.min(flight.fromHeight, flight.toHeight)} to ${Math.max(flight.fromHeight, flight.toHeight)} (verified to block ${line.asOf()} now). Call station with sync: true to verify it again; the ride stays in flight, paused, and resumes from its cache.`)
+    const remaining = budget.state().remainingSessionSeconds
+    if (remaining <= 0) {
+      flight.state = 'paused_cap'
+      return
+    }
+    flight.state = 'computing'
+    flight.pauseAsked = false
+    flight.failure = null
+    flight.charged = 0
+    flight.chargedAt = performance.now()
+    const controller = new AbortController()
+    flight.abort = controller
+    const options: RideRunOptions = {
+      budgetSeconds: remaining,
+      signal: controller.signal,
+      stop: () => flight.pauseAsked || this.overCap(flight),
+      onProgress: (p) => {
+        flight.progress = p
+        this.charge(flight, p.elapsedMs / 1000)
+        this.saveRecord(flight, false)
       },
     }
-    flight.computing = true
-    let result: RideRunResult
-    try {
-      result = await this.runner.run(job, { budgetSeconds: allowed, signal, onProgress: (p) => { flight.progress = p } })
-    } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') return this.progressResult(flight, 'The call was canceled by the client; everything computed so far is on disk, and the ride stays in flight.')
-      throw err
-    } finally {
-      flight.computing = false
-    }
-    flight.calls++
-    flight.lastCallSeconds = result.workSeconds
-    flight.workSeconds += result.workSeconds
-    budget.spendWork(result.workSeconds)
-    flight.progress = result.progress
-    if (!result.done) return this.progressResult(flight, null)
+    const work: Promise<RideRunResult> = this.threads === 0
+      ? this.runner.run({
+        previousEventIdHex: flight.previousId, fromHeight: flight.fromHeight, toHeight: flight.toHeight,
+        blockHashFor: (height) => {
+          const lo = Math.min(flight.fromHeight, flight.toHeight)
+          return bytesToHex(hashes.subarray((height - lo - 1) * 32, (height - lo) * 32))
+        },
+      }, options)
+      : runRideInThread({ cachePath: this.runner.cache.path, threads: this.threads, previousEventIdHex: flight.previousId, fromHeight: flight.fromHeight, toHeight: flight.toHeight, hashes }, options)
+    flight.run = work.then(
+      (result) => {
+        flight.run = null
+        flight.abort = null
+        this.charge(flight, result.workSeconds)
+        flight.progress = result.progress
+        if (result.done) {
+          flight.state = 'ready'
+          flight.proof = result
+        } else if (flight.pauseAsked) {
+          flight.state = 'paused'
+        } else {
+          flight.state = 'paused_cap'
+          // A run's deadline is fixed when it starts; a renewal that came
+          // while it ran leaves budget it could not see. With seconds left
+          // and work done (no spin), it carries on by itself.
+          if (this.flight === flight && result.workSeconds > 0 && this.body.budget.state().remainingSessionSeconds > 0) {
+            try {
+              this.launch(flight)
+            } catch (err) {
+              flight.state = 'failed'
+              flight.failure = words(err)
+            }
+          }
+        }
+        this.saveRecord(flight, true)
+      },
+      (err: unknown) => {
+        flight.run = null
+        flight.abort = null
+        if (err instanceof Error && err.name === 'AbortError') {
+          flight.state = 'paused'
+        } else {
+          flight.state = 'failed'
+          flight.failure = words(err)
+          this.body.log(`ride failed: ${err instanceof Error ? err.stack ?? err.message : String(err)}`)
+        }
+        this.saveRecord(flight, true)
+      },
+    )
+  }
 
-    // Confirm again, immediately before the signature: the machine was busy for a while.
-    const again = await keeper.confirmHead()
-    if (again) throw new Refusal(`${again} The ride's proof is finished and kept on disk: call ride again with to: ${flight.toHeight} once the relays answer, and it is signed without being recomputed.`)
-    this.refuseIfMoved(flight)
-    const head = keeper.head()!
-    const toCoordHex = line.stopCoordHex(flight.toHeight)!
+  /** Charge the session for the current run up to `elapsed` seconds of it (by the runner's clock). */
+  private charge(flight: Flight, elapsed: number): void {
+    const delta = elapsed - flight.charged
+    if (delta <= 0) return
+    this.body.budget.spendWork(delta)
+    flight.workSeconds += delta
+    flight.charged = elapsed
+    flight.chargedAt = performance.now()
+  }
+
+  /**
+   * Whether the session cap is reached, counting the seconds the current run
+   * has spent since its last progress report (a heavy leaf can be many
+   * seconds; with threads 0 the runner's own clock is the only one, and
+   * progress comes every leaf).
+   */
+  private overCap(flight: Flight): boolean {
+    const { budget } = this.body
+    const pending = this.threads === 0 ? 0 : (performance.now() - flight.chargedAt) / 1000
+    return budget.spentSeconds + pending >= budget.capSessionSeconds
+  }
+
+  /**
+   * Stop the background run: 'pause' cuts it at the next leaf (the leaves
+   * in hand finish, within the runner's grace), 'abort' ends it at once
+   * (finished leaves are flushed either way). Resolves once it stopped, or
+   * after STOP_WAIT_MS, when it is aborted outright.
+   */
+  private async stopRun(flight: Flight, how: 'pause' | 'abort'): Promise<void> {
+    const run = flight.run
+    if (!run) return
+    if (how === 'pause') flight.pauseAsked = true
+    else flight.abort?.abort()
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const late = new Promise<'late'>((resolve) => { timer = setTimeout(() => resolve('late'), STOP_WAIT_MS) })
+    const outcome = await Promise.race([run.then(() => 'stopped' as const), late])
+    if (timer !== null) clearTimeout(timer)
+    if (outcome === 'late') {
+      flight.abort?.abort()
+      await run
+    }
+  }
+
+  /** Wait while the ride computes, for at most `seconds` or until the call is canceled. */
+  private async waitWhileComputing(flight: Flight, seconds: number, signal: AbortSignal | undefined): Promise<void> {
+    const until = Date.now() + seconds * 1000
+    while (flight.state === 'computing' && this.flight === flight && Date.now() < until && !signal?.aborted) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(1, until - Date.now()))))
+    }
+  }
+
+  /** Pause on command (an operator's HOLD): the work stops at the next leaf, the head stays reserved, and `ride` with the same `to` resumes it. */
+  private async pauseRide(): Promise<ToolResult> {
+    const flight = this.flight
+    if (!flight) throw new Refusal('No ride is in flight; nothing to pause.')
+    if (flight.signing) throw new Refusal(`The ride to block ${flight.toHeight} is being signed in another call right now, so it cannot be paused.`)
+    if (flight.state !== 'computing') return this.progressResult(flight, [`The ride to block ${flight.toHeight} is not computing (${flight.state === 'ready' ? 'its proof is ready to sign' : flight.state}); nothing to pause.`])
+    await this.stopRun(flight, 'pause')
+    return this.progressResult(flight, [`Paused the ride to block ${flight.toHeight}. Every finished leaf is on disk and the head stays reserved for this ride. Call ride with to: ${flight.toHeight} to resume it, or cancel: true to release the head.`])
+  }
+
+  private async releaseRide(forget: boolean): Promise<ToolResult> {
+    const flight = this.flight
+    if (!flight) {
+      if (!forget) throw new Refusal('No ride is in flight; nothing to cancel.')
+      const head = this.body.keeper.head()
+      if (!head) throw new Refusal('No ride is in flight and no chain is known; nothing to forget.')
+      this.runner.forget(head.id)
+      if (this.interrupted) this.runner.forget(this.interrupted.previousId)
+      this.interrupted = null
+      this.deleteRecord()
+      return { text: `No ride is in flight. The cached leaves and price searches of rides from your head ${head.id.slice(0, 8)}... were dropped.`, data: { inFlight: false, forgot: head.id } }
+    }
+    if (flight.signing) throw new Refusal(`The ride to block ${flight.toHeight} is being signed in another call right now, so it cannot be canceled.`)
+    await this.stopRun(flight, 'abort')
+    if (this.flight !== flight) throw new Refusal('The ride ended while it was being canceled; call ride_status.')
+    const said = this.flightWords(flight)
+    const data = this.flightData(flight)
+    this.dropFlight(flight, forget)
+    if (!forget) this.interrupted = this.readRecord()
+    return {
+      text: `Canceled the ride to block ${flight.toHeight} (${said}). The head is released for other moves. ${forget ? 'Its cached leaves and price search were dropped.' : 'Its cached leaves and price search are kept on disk: a later ride from this same head resumes them; forget: true drops them.'}`,
+      data: { inFlight: false, canceled: data, forgot: forget ? flight.previousId : null },
+    }
+  }
+
+  /** Stop the background work for shutdown: finished leaves are flushed, and flight.json says a ride was under way. */
+  async stop(): Promise<void> {
+    const flight = this.flight
+    if (!flight) return
+    await this.stopRun(flight, 'abort')
+    this.saveRecord(flight, true)
+  }
+
+  // ---- signing --------------------------------------------------------------------
+
+  /** The proof is ready: confirm the head, sign, publish, record, then forget the cache. Never called from the background. */
+  private async signRide(flight: Flight, told: string[]): Promise<ToolResult> {
+    const { budget, keeper } = this.body
+    const proof = flight.proof!
+    const line = this.store.line
+    flight.signing = true
     let event: NostrEvent
     try {
-      event = this.signChainEvent(hyperjumpTemplate({
-        createdAt: createdAtAfter(head), genesisId: flight.genesisId, previousId: flight.previousId, prevCoordHex: flight.prevCoordHex, toCoordHex,
-        fromHeight: flight.fromHeight, toHeight: flight.toHeight, ...(flight.asOf !== undefined ? { asOf: flight.asOf } : {}),
-        rootHex: result.proof.rootHex, mp: result.proof.mp, mnHex: result.proof.mnHex,
-      }), 'ride')
-    } catch (err) {
-      // A bug, not a refusal: the head is released so the agent is not stuck, and the cache is kept.
-      this.dropFlight(flight, false)
-      throw err
+      // Confirm again, immediately before the signature: the machine was busy for a while.
+      const again = await keeper.confirmHead()
+      if (again) throw new Refusal(`${again} The ride's proof is finished and kept: call ride again with to: ${flight.toHeight} once the relays answer, and it is signed without being recomputed.`)
+      await this.refuseIfMoved(flight)
+      const head = keeper.head()!
+      const toCoordHex = line.stopCoordHex(flight.toHeight)
+      if (!toCoordHex) throw new Refusal(`The line no longer holds block ${flight.toHeight} (verified to block ${line.asOf()} now). Call station with sync: true to verify it again; the proof is kept and signed on the next ride call.`)
+      try {
+        event = this.signChainEvent(hyperjumpTemplate({
+          createdAt: createdAtAfter(head), genesisId: flight.genesisId, previousId: flight.previousId, prevCoordHex: flight.prevCoordHex, toCoordHex,
+          fromHeight: flight.fromHeight, toHeight: flight.toHeight, ...(flight.asOf !== undefined ? { asOf: flight.asOf } : {}),
+          rootHex: proof.proof.rootHex, mp: proof.proof.mp, mnHex: proof.proof.mnHex,
+        }), 'ride')
+      } catch (err) {
+        // A bug, not a refusal: the head is released so the agent is not stuck, and the cache is kept.
+        this.dropFlight(flight, false)
+        throw err
+      }
+    } finally {
+      flight.signing = false
     }
     const published = await this.publish(event)
     // Only now, with the event recorded by publish (before it was sent), is
@@ -567,59 +890,67 @@ export class Transit {
     this.runner.forget(flight.previousId)
     flight.release()
     this.flight = null
+    this.deleteRecord()
     budget.moves++
     this.body.settle()
+    const toCoordHex = line.stopCoordHex(flight.toHeight)!
     const stop = line.stopAt(flight.toHeight)!
     const where = describePlace(placeFromHex(toCoordHex))
     const text = [
-      `Ride ${event.id.slice(0, 8)}... signed: block ${flight.fromHeight} to block ${flight.toHeight} (${flight.blocks} block(s)${flight.asOf !== undefined ? `, as_of ${flight.asOf}` : ''}), ${flight.workSeconds.toFixed(1)} s of work over ${flight.calls} call(s), proof verified at Level 1 (${result.verification.checked} openings). You now stand at ${stopWords(stop, toCoordHex)}.`,
+      ...told,
+      `Ride ${event.id.slice(0, 8)}... signed: block ${flight.fromHeight} to block ${flight.toHeight} (${flight.blocks} block(s)${flight.asOf !== undefined ? `, as_of ${flight.asOf}` : ''}), ${flight.workSeconds.toFixed(1)} s of work in the background over ${flight.calls} ride call(s), proof verified at Level 1 (${proof.verification.checked} openings). You now stand at ${stopWords(stop, toCoordHex)}.`,
       ...this.relayWords(published.entry, published.result),
       ...flight.notes,
-      ...result.progress.notes,
+      ...proof.progress.notes,
       `Ride again to another block, or hop or sidestep to leave the line (a target away from this stop is priced by plan_hop).`,
     ].join('\n')
     return {
       text,
       data: {
         eventId: event.id, action: 'hyperjump', fromHeight: flight.fromHeight, toHeight: flight.toHeight, asOf: flight.asOf ?? null, blocks: flight.blocks, where, stop: stopData(stop, toCoordHex),
-        workSeconds: Number(flight.workSeconds.toFixed(3)), calls: flight.calls, verification: result.verification, root: result.proof.rootHex, mn: result.proof.mnHex,
+        workSeconds: Number(flight.workSeconds.toFixed(3)), calls: flight.calls, verification: proof.verification, root: proof.proof.rootHex, mn: proof.proof.mnHex,
         accepted: published.entry.accepted, refused: published.entry.refused ?? {}, canonicalPending: !published.entry.accepted.includes(this.body.canonical),
-        notes: [...flight.notes, ...result.progress.notes], budget: budget.state(),
+        notes: [...flight.notes, ...proof.progress.notes], budget: budget.state(),
       },
     }
   }
 
-  private releaseRide(forget: boolean): ToolResult {
-    const flight = this.flight
-    if (!flight) {
-      if (!forget) throw new Refusal('No ride is in flight; nothing to cancel.')
-      const head = this.body.keeper.head()
-      if (!head) throw new Refusal('No ride is in flight and no chain is known; nothing to forget.')
-      this.runner.forget(head.id)
-      return { text: `No ride is in flight. The cached leaves and price searches of rides from your head ${head.id.slice(0, 8)}... were dropped.`, data: { inFlight: false, forgot: head.id } }
-    }
-    if (flight.computing) throw new Refusal(`The ride to block ${flight.toHeight} is computing in another call right now; wait for that call to return, then cancel.`)
-    const said = this.flightWords(flight)
-    const data = this.flightData(flight)
-    this.dropFlight(flight, forget)
-    return {
-      text: `Canceled the ride to block ${flight.toHeight} (${said}). The head is released for other moves. ${forget ? 'Its cached leaves and price search were dropped.' : 'Its cached leaves and price search are kept on disk: a later ride to the same block from this head resumes them; forget: true drops them.'}`,
-      data: { inFlight: false, canceled: data, forgot: forget ? flight.previousId : null },
+  // ---- what the agent is told -------------------------------------------------------
+
+  /** The seconds the ride still needs, by the runner's estimate when it has one, else by the quote. */
+  private needSeconds(flight: Flight): number {
+    const p = flight.progress
+    if (p?.etaMs !== null && p?.etaMs !== undefined) return p.etaMs / 1000
+    return Math.max(0, flight.quotedSeconds - flight.workSeconds)
+  }
+
+  private capWords(flight: Flight): string {
+    const b = this.body.budget.state()
+    return `The ride to block ${flight.toHeight} is paused at the session cap: the session has spent its ${b.capSessionSeconds} s of work (${this.flightWords(flight)}). It needs about ${Math.ceil(this.needSeconds(flight))} s more. Everything computed is on disk and the head stays reserved. Tell your operator by DM how many more seconds the ride needs: a KEEP GOING from them renews the session budget, and the next ride call with to: ${flight.toHeight} resumes it from the cache. cancel: true releases the head.`
+  }
+
+  private stateWords(flight: Flight): string {
+    switch (flight.state) {
+      case 'computing': return `It is computing in the background; other tools answer meanwhile. Call ride with to: ${flight.toHeight} again later (ride_status or orders_waiting show when it is ready), or pause: true to pause it.`
+      case 'ready': return `Its proof is ready: call ride with to: ${flight.toHeight} to sign it.`
+      case 'paused': return `It is paused; the head stays reserved for it. Call ride with to: ${flight.toHeight} to resume it from the cache, or cancel: true to release the head.`
+      case 'paused_cap': return this.capWords(flight)
+      case 'failed': return `Its work stopped on an error (${flight.failure}); everything finished is on disk. Call ride with to: ${flight.toHeight} to try again from the cache, or cancel: true to release the head.`
     }
   }
 
-  private progressResult(flight: Flight, note: string | null): ToolResult {
+  private progressResult(flight: Flight, told: string[]): ToolResult {
     const b = this.body.budget.state()
     const p = flight.progress
     const text = [
-      note ?? '',
-      `Ride to block ${flight.toHeight} from block ${flight.fromHeight} (${flight.blocks} block(s)${flight.asOf !== undefined ? `, as_of ${flight.asOf}` : ''}) in progress after ${flight.calls} call(s): ${this.flightWords(flight)}.`,
-      `This call spent ${flight.lastCallSeconds.toFixed(1)} s of work, ${flight.workSeconds.toFixed(1)} s so far of about ${flight.quotedSeconds.toFixed(1)} s quoted; the session has ${b.remainingSessionSeconds.toFixed(1)} s left, at most ${b.capCallSeconds} s per call.`,
-      `The head is reserved for this ride. Call ride again with to: ${flight.toHeight} to continue, ride_status to watch, cancel: true to release the head (the cache stays), or forget: true to drop the cache too.`,
+      ...told,
+      `Ride to block ${flight.toHeight} from block ${flight.fromHeight} (${flight.blocks} block(s)${flight.asOf !== undefined ? `, as_of ${flight.asOf}` : ''}): ${flight.state}, ${this.flightWords(flight)}.`,
+      this.stateWords(flight),
+      `${flight.workSeconds.toFixed(1)} s of work so far of about ${flight.quotedSeconds.toFixed(1)} s quoted; the session has ${b.remainingSessionSeconds.toFixed(1)} s left. The head is reserved for this ride.`,
       ...flight.notes,
       ...(p?.notes ?? []),
     ].filter(Boolean).join('\n')
-    return { text, data: { done: false, inFlight: true, ride: this.flightData(flight), budget: b } }
+    return { text, data: { done: false, inFlight: true, state: flight.state, ride: this.flightData(flight), budget: b } }
   }
 
   /** The ride in flight, read only. */
@@ -627,30 +958,103 @@ export class Transit {
     const flight = this.flight
     const state = lineStateOf(this.body.keeper.chain())
     const onLine = state === null ? 'You are not on the line; board first.' : state.fromHeight === null ? 'You are boarded; ride to a block to travel.' : `You stand at the stop for block ${state.fromHeight}; ride again, or hop to leave the line.`
-    if (!flight) return { text: `No ride is in flight. ${onLine}`, data: { inFlight: false, onLine: state ? { boarded: true, atStop: state.fromHeight, head: state.previousId } : null } }
+    const ride = this.rideState()
+    if (!flight) {
+      const said: string[] = []
+      if (this.ended) said.push(`The ride to block ${this.ended.to} ended: ${this.ended.reason}`)
+      const earlier = this.interrupted
+      if (earlier && earlier.status === 'live') {
+        said.push(ride.state === 'interrupted'
+          ? `A ride to block ${earlier.toHeight} was in flight when the server last stopped, from your current head, with ${earlier.leavesDone} of ${earlier.blocks} leaves on disk. Call ride with to: ${earlier.toHeight} to resume it from the cache (sync the line with station first if it asks).`
+          : `A ride to block ${earlier.toHeight} was in flight when the server last stopped, but it left from head ${earlier.previousId.slice(0, 8)}... and your head is now another: it cannot be resumed from that boarding.`)
+      }
+      return { text: [`No ride is in flight.`, ...said, onLine].join(' '), data: { inFlight: false, state: ride.state, rideState: ride, onLine: state ? { boarded: true, atStop: state.fromHeight, head: state.previousId } : null } }
+    }
     const stale = this.body.keeper.head()?.id !== flight.previousId
     const text = [
-      `Ride to block ${flight.toHeight} from block ${flight.fromHeight} (${flight.blocks} block(s)${flight.asOf !== undefined ? `, as_of ${flight.asOf}` : ''}): ${this.flightWords(flight)}.`,
-      flight.computing ? 'A call is computing it right now.' : stale ? 'The head moved since the ride started, so this ride can never be signed; the next ride call drops it, or cancel: true releases it now.' : `The head is reserved for it; call ride with to: ${flight.toHeight} to continue.`,
+      `Ride to block ${flight.toHeight} from block ${flight.fromHeight} (${flight.blocks} block(s)${flight.asOf !== undefined ? `, as_of ${flight.asOf}` : ''}): ${flight.state}, ${this.flightWords(flight)}.`,
+      stale ? 'The head moved since the ride started, so this ride can never be signed; the next ride call drops it, or cancel: true releases it now.' : this.stateWords(flight),
     ].join(' ')
-    return { text, data: { inFlight: true, stale, ride: this.flightData(flight) } }
+    return { text, data: { inFlight: true, stale, state: flight.state, rideState: ride, ride: this.flightData(flight) } }
+  }
+
+  /**
+   * The ride's state for orders_waiting (arkinox, 2026-10-11): in memory and
+   * on what this server already knows, never a relay, so a waker polling
+   * every few seconds costs nothing.
+   */
+  rideState(): RideStateData {
+    const none: RideStateData = { state: null, to: null, done: 0, total: 0, attempts: 0, attemptsExpected: 0, etaSeconds: null, reason: null }
+    const flight = this.flight
+    if (flight) {
+      const p = flight.progress
+      return {
+        state: flight.state, to: flight.toHeight, done: p?.leavesDone ?? 0, total: flight.blocks, attempts: p?.attempts ?? 0, attemptsExpected: p?.attemptsExpected ?? 0,
+        etaSeconds: flight.state === 'ready' ? 0 : Math.ceil(this.needSeconds(flight)), reason: flight.state === 'failed' ? flight.failure : null,
+      }
+    }
+    if (this.ended) return { ...none, state: 'failed', to: this.ended.to, reason: this.ended.reason }
+    const earlier = this.interrupted
+    if (earlier && earlier.status === 'live' && this.body.keeper.head()?.id === earlier.previousId) {
+      return { ...none, state: 'interrupted', to: earlier.toHeight, done: earlier.leavesDone, total: earlier.blocks }
+    }
+    return none
   }
 
   private flightWords(flight: Flight): string {
     const p = flight.progress
     const since = Math.round((Date.now() - flight.startedAt) / 1000)
     if (!p) return `started ${since} s ago, nothing computed yet`
-    const phase = p.phase === 'leaves' ? 'computing leaves' : p.phase === 'price' ? 'searching the price nonce' : p.phase === 'verify' ? 'self-verifying' : 'done'
-    const eta = p.etaMs !== null && p.phase !== 'done' ? `, about ${Math.ceil(p.etaMs / 1000)} s to go` : ''
-    return `${phase}, ${p.leavesDone} of ${p.leavesTotal} leaves (${p.leavesResumed} resumed from the cache), ${p.attempts} of about ${p.attemptsExpected} price attempt(s)${eta}, ${flight.workSeconds.toFixed(1)} s of work over ${flight.calls} call(s), started ${since} s ago`
+    const phase = p.phase === 'leaves' ? 'leaves' : p.phase === 'price' ? 'price nonce search' : p.phase === 'verify' ? 'self-verification' : 'done'
+    const eta = flight.state !== 'ready' ? `, about ${Math.ceil(this.needSeconds(flight))} s of work to go` : ''
+    return `${phase}, ${p.leavesDone} of ${p.leavesTotal} leaves (${p.leavesResumed} resumed from the cache), ${p.attempts} of about ${p.attemptsExpected} price attempt(s)${eta}, ${flight.workSeconds.toFixed(1)} s of work, started ${since} s ago`
   }
 
   private flightData(flight: Flight): Record<string, unknown> {
     return {
       previousId: flight.previousId, fromHeight: flight.fromHeight, toHeight: flight.toHeight, asOf: flight.asOf ?? null, chained: flight.chained, blocks: flight.blocks,
-      quotedSeconds: Number(flight.quotedSeconds.toFixed(2)), calls: flight.calls, workSeconds: Number(flight.workSeconds.toFixed(3)), startedAt: flight.startedAt, computing: flight.computing,
+      quotedSeconds: Number(flight.quotedSeconds.toFixed(2)), calls: flight.calls, workSeconds: Number(flight.workSeconds.toFixed(3)), startedAt: flight.startedAt,
+      state: flight.state, computing: flight.state === 'computing', needSeconds: flight.state === 'ready' ? 0 : Number(this.needSeconds(flight).toFixed(1)), failure: flight.failure,
       progress: flight.progress, notes: flight.notes,
     }
+  }
+
+  // ---- flight.json ------------------------------------------------------------------
+
+  private recordPath(): string {
+    return join(this.runner.cache.path, FLIGHT_FILE)
+  }
+
+  private readRecord(): FlightRecord | null {
+    try {
+      const r = JSON.parse(readFileSync(this.recordPath(), 'utf8')) as FlightRecord
+      if (r?.version !== 1 || typeof r.previousId !== 'string' || !isHeight(r.toHeight) || !isHeight(r.fromHeight)) return null
+      return r
+    } catch {
+      return null
+    }
+  }
+
+  /** Write flight.json: always when `force`, else at most every RECORD_EVERY_MS (progress comes ten times a second). */
+  private saveRecord(flight: Flight, force: boolean, status: FlightRecord['status'] = 'live'): void {
+    const now = Date.now()
+    if (!force && now - flight.savedAt < RECORD_EVERY_MS) return
+    flight.savedAt = now
+    const record: FlightRecord = {
+      version: 1, status, previousId: flight.previousId, fromHeight: flight.fromHeight, toHeight: flight.toHeight, asOf: flight.asOf ?? null, blocks: flight.blocks,
+      leavesDone: flight.progress?.leavesDone ?? 0, workSeconds: Number(flight.workSeconds.toFixed(3)), savedAt: now,
+    }
+    try {
+      const tmp = `${this.recordPath()}.${process.pid}.tmp`
+      writeFileSync(tmp, JSON.stringify(record, null, 2), { mode: 0o600 })
+      renameSync(tmp, this.recordPath())
+    } catch (err) {
+      this.body.log(`flight.json: ${words(err)}`)
+    }
+  }
+
+  private deleteRecord(): void {
+    try { unlinkSync(this.recordPath()) } catch { /* none */ }
   }
 
   // ---- signing and publishing, shared ---------------------------------------
