@@ -150,7 +150,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   server.registerTool('station', {
     title: 'Station',
-    description: 'The hyperspace line and your place on it, nothing signed: how far the line is verified and what remains; your station (the stop nearest you, a Bitcoin block, with its coordinate and distance) and the nearest stops; whether you are boarded or at a stop; and with destination, the quote for a ride there (blocks, expected seconds on this machine, whether it fits the caps, how many calls). With sync: true the line is verified further first, within budget_seconds (default: the per-call cap); call this until it says nothing remains before boarding.',
+    description: 'The hyperspace line and your place on it, nothing signed: how far the line is verified and what remains; your station (the stop nearest you, a Bitcoin block, with its coordinate and distance) and the nearest stops; whether you are boarded or at a stop; and with destination, the quote for a ride there (blocks, expected seconds on this machine, whether it fits the caps, how many calls), and beside it HOSAKA\'s quote for the same ride (sats and estimated time, or its refusal) when the configured HOSAKA sells rides; when HOSAKA cannot be asked, it says HOSAKA quote unavailable and the local quote stands. With sync: true the line is verified further first, within budget_seconds (default: the per-call cap); call this until it says nothing remains before boarding.',
     inputSchema: {
       sync: z.boolean().optional().describe('Verify more of the line first, within the budget.'),
       budget_seconds: z.number().positive().optional().describe('Seconds the sync may take; the per-call cap applies too.'),

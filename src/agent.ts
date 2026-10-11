@@ -98,6 +98,8 @@ export interface AgentConfig {
   /** Tests: a fetch that serves a fake HOSAKA, and the background's pace in ms. */
   hosakaFetch?: typeof globalThis.fetch
   hosakaPollMs?: number
+  /** Tests: how long station waits for HOSAKA's ride quote, in ms. */
+  hosakaQuoteWaitMs?: number
   /** The human's Nostr Wallet Connect string (--nwc, wallet.json, config.json nwc), or none. Never printed (nwc.ts Secret). */
   nwc?: Secret | null
   nwcSource?: string | null
@@ -214,7 +216,7 @@ export class Agent {
       calibration: () => this.calibration, sign: (t) => this.sign(t), settle: () => this.settle(), refreshChain: () => this.refreshChain(), log: this.log,
       // The operator channel is built below; these are called only from tool calls and the background, long after.
       undeliverable: () => this.operatorChannel.undeliverable(), messageOperator: (text) => this.operatorChannel.message(text), wallet: this.wallet,
-    }, { manifestUrl: config.manifestUrl, fetch: config.lineFetch, threads: config.rideThreads, now: config.rideClock, hosakaUrl: config.hosakaUrl, hosakaFetch: config.hosakaFetch, hosakaPollMs: config.hosakaPollMs })
+    }, { manifestUrl: config.manifestUrl, fetch: config.lineFetch, threads: config.rideThreads, now: config.rideClock, hosakaUrl: config.hosakaUrl, hosakaFetch: config.hosakaFetch, hosakaPollMs: config.hosakaPollMs, hosakaQuoteWaitMs: config.hosakaQuoteWaitMs })
     this.chat = new Chat(dir, this.relays, this.keys, { pubkey: this.pubkey, name: () => this.name, sign: (t) => this.sign(t), log: this.log })
     this.presence = new Presence(this.relays, this.pubkey, this.log)
     this.presence.on('arrival', () => this.chat.arrival())
