@@ -184,21 +184,22 @@ export interface RoamSearch {
 /**
  * The first candidate a roam step may suggest: reached by one hop that
  * lands on it, within the caps (`refusal` is the planner's and the
- * budget's), not on a gibson in `taken`. A candidate in a visited cube is
+ * budget's), not where `blocked` says the agent's avatar would overlap a
+ * person's (space/personalSpace.ts). A candidate in a visited cube is
  * kept only as a fallback, so a fresh cube wins whenever one fits.
  */
 export function searchRoam(opts: {
   candidates: Iterable<Place>
   price: (target: Place) => PricedStep | null
   refusal: (step: PricedStep | null, target: Place) => string | null
-  taken: Set<string>
+  blocked: (target: Place) => boolean
   visited: Set<string>
 }): RoamSearch {
   const skipped = { people: 0, notOneHop: 0, refused: 0, visited: 0 }
   let fallback: RoamPick | null = null
   let lastRefusal: string | null = null
   for (const target of opts.candidates) {
-    if (opts.taken.has(target.hex)) { skipped.people++; continue }
+    if (opts.blocked(target)) { skipped.people++; continue }
     const step = opts.price(target)
     if (!step || step.kind !== 'hop' || step.to.hex !== target.hex) { skipped.notOneHop++; continue }
     const refused = opts.refusal(step, target)

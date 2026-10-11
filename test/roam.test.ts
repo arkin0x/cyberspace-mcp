@@ -127,14 +127,14 @@ describe('roam candidates and the search', () => {
       candidates: [person, tooFar, visited, fresh],
       price,
       refusal: (step) => (step && step.seconds > 10 ? 'This would take about 99.0 s on this machine, above the 10 s cap for one call.' : null),
-      taken: new Set([person.hex]),
+      blocked: (p) => p.hex === person.hex,
       visited: new Set([cubeOf(visited)]),
     })
     expect(found.pick?.target.hex).toBe(fresh.hex)
     expect(found.pick?.fresh).toBe(true)
     expect(found.skipped).toEqual({ people: 1, notOneHop: 0, refused: 1, visited: 1 })
     // With nothing fresh, a visited cube is the fallback.
-    const fallback = searchRoam({ candidates: [person, visited], price, refusal: () => null, taken: new Set([person.hex]), visited: new Set([cubeOf(visited)]) })
+    const fallback = searchRoam({ candidates: [person, visited], price, refusal: () => null, blocked: (p) => p.hex === person.hex, visited: new Set([cubeOf(visited)]) })
     expect(fallback.pick?.target.hex).toBe(visited.hex)
     expect(fallback.pick?.fresh).toBe(false)
   })

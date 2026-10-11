@@ -8,7 +8,7 @@
 // memory; ignores a stranger's move, a forged event and a fork; survives a
 // restart and reads what happened while it was down; and never makes a tool
 // wait while it reads. The agent is refused the operator's exact gibson and
-// told the free one beside it, which it may take; a bot's gibson is not
+// told the clear one just outside their avatar, which it may take; a bot's gibson is not
 // protected, a human stranger's is; and a ride's arrival at a stop reports
 // the exception.
 
@@ -141,10 +141,11 @@ describe('the follow watch', () => {
     expect(pos.action).toBe('hop')
     // The aim is beside the operator, never their own gibson, and the way there is priced.
     const beside = r.data.beside as { hex: string }
-    expect(beside.hex).toBe(east(home, 29n).hex)
+    // Two default avatars and a gibson between: two gibsons off (space/personalSpace.ts).
+    expect(beside.hex).toBe(east(home, 28n).hex)
     expect((r.data.plan as { refused: string | null }).refused).toBeNull()
     expect(r.data.needsRide).toBe(false)
-    expect(r.text).toContain('never land on your operator\'s own gibson')
+    expect(r.text).toContain('never stand where your avatar would overlap theirs')
     // Reported, so seen: orders_waiting has no move to wake on.
     const ow = await a.ordersWaiting()
     expect(ow.data.operatorMoved).toBeNull()
@@ -265,15 +266,17 @@ describe('nobody\'s gibson', () => {
     const plan = await a.planHop({ target: there.hex })
     const said = plan.data.refused as string
     expect(said).toContain('Your operator stands on')
-    expect(said).toContain(east(home, 19n).hex)
+    expect(said).toContain(east(home, 18n).hex)
     expect(plan.text).toContain('REFUSED')
     const refused = await refusal(a.hop({ target: there.hex }))
-    expect(refused).toContain(`Land beside them instead, at ${east(home, 19n).hex}`)
+    expect(refused).toContain(`Land just outside instead, at ${east(home, 18n).hex}`)
     expect(a.here().hex).toBe(east(home, 5n).hex)
 
-    const r = await a.hop({ target: east(home, 19n).hex })
+    // One gibson off is too close now: two default avatars and a gibson between need two.
+    expect(await refusal(a.hop({ target: east(home, 19n).hex }))).toContain('at least 2 gibsons')
+    const r = await a.hop({ target: east(home, 18n).hex })
     expect(r.data.onTarget).toBe(true)
-    expect(a.here().hex).toBe(east(home, 19n).hex)
+    expect(a.here().hex).toBe(east(home, 18n).hex)
     // Standing beside them already: the follow tool says no move is needed.
     const f = await a.followOperator()
     expect(f.data.besideAlready).toBe(true)
@@ -300,7 +303,7 @@ describe('nobody\'s gibson', () => {
     expect(toBot.data.refused).toBeNull()
     const toHuman = await a.planHop({ target: humanAt.hex })
     expect(toHuman.data.refused).toContain('The human visitor')
-    expect(toHuman.data.refused).toContain('one gibson off')
+    expect(toHuman.data.refused).toContain('Land just outside instead')
   }, 30_000)
 
   it('a ride\'s exit at a stop is the reported exception, with the step off named', async () => {
@@ -309,8 +312,9 @@ describe('nobody\'s gibson', () => {
     try {
       const r = await a.ride({ to: 900000 })
       expect(r.text).toContain('A ride exits exactly at its stop')
-      expect(r.text).toContain('the rule against landing on a person\'s gibson yields here')
-      expect(r.text).toContain('Your operator stands on this exact gibson: step one gibson off now')
+      expect(r.text).toContain('the rule that your avatar never overlaps a person\'s yields here')
+      expect(r.text).toContain('Your operator stands on this exact gibson, so your avatars overlap')
+      expect(r.text).toContain('Step off by 2 gibsons now')
       const fixed = r.data.fixedPoint as { sharedWith: string[]; stepOff: string }
       expect(fixed.sharedWith).toEqual([op])
       expect(fixed.stepOff).not.toBe(stop)
