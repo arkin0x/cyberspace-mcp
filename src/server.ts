@@ -167,7 +167,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   server.registerTool('ride', {
     title: 'Ride the line',
-    description: 'Ride hyperspace to a block (DECK-0001 5), from your station on the first ride after boarding or from the stop you stand at after a ride. The ride computes in the background and this call returns at once: the first call quotes the whole ride against the session cap, reserves the head and starts the work; while it computes every other tool answers, so keep reading inbox and answering your operator. Call ride again with the same to to see where it stands; once the proof is ready (ride_status and orders_waiting say so), that call verifies the head, signs the hyperjump and publishes it, after which you stand at the stop. The work is charged to the session cap as it runs and pauses at the cap, resumable from the cache. pause: true pauses it on command (an operator\'s HOLD) and keeps the head; ride with the same to resumes it. cancel: true releases the head and keeps the work on disk; forget: true drops the work too. wait_seconds waits up to that long (at most the per-call cap) for the proof and signs it if ready. Refuses a block that is your current one, one beyond the verified line, a ride above the session cap, and a head that is not a boarding or a ride.',
+    description: 'Ride hyperspace to a block (DECK-0001 5), from your station on the first ride after boarding or from the stop you stand at after a ride. The ride computes in the background and this call returns at once: the first call quotes the whole ride against the session cap, reserves the head and starts the work; while it computes every other tool answers, so keep reading inbox and answering your operator. Call ride again with the same to to see where it stands; once the proof is ready (ride_status and orders_waiting say so), that call verifies the head, signs the hyperjump and publishes it, after which you stand at the stop. The work is charged to the session cap as it runs and pauses at the cap, resumable from the cache. pause: true pauses it on command (an operator\'s HOLD) and keeps the head; ride with the same to resumes it. cancel: true releases the head and keeps the work on disk; forget: true drops the work too. wait_seconds waits up to that long (at most the per-call cap) for the proof and signs it if ready. Refuses a block that is your current one, one beyond the verified line, a ride above the session cap, and a head that is not a boarding or a ride. With prover: "hosaka" the proof is bought from HOSAKA instead, also in the background: the job is submitted and the call returns at once; the server pays HOSAKA\'s invoice from your operator\'s wallet within the limits they set and DMs them a receipt, or, above the limits or with no wallet, DMs them the invoice to pay (state awaiting_payment). HOSAKA\'s compute does not count against your caps. When ride_status or orders_waiting say ready, the proof has been verified here at Level 1: call ride with the same to to sign it. You never pay anything yourself and no tool takes an invoice.',
     inputSchema: {
       to: z.number().int().min(0).optional().describe('The block height to ride to.'),
       wait_seconds: z.number().positive().optional().describe('Wait up to this long for the proof before answering, and sign it if it is ready; the per-call cap applies. Default: do not wait.'),
@@ -176,13 +176,14 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
       pause: z.boolean().optional().describe('Pause the ride computing in the background; the head stays reserved and the work stays on disk. Ride with the same to resumes it.'),
       cancel: z.boolean().optional().describe('Release the ride in flight; its work stays on disk.'),
       forget: z.boolean().optional().describe('Release the ride in flight and drop its work from disk.'),
+      prover: z.enum(['local', 'hosaka']).optional().describe('Who computes the proof: "local" (default, this machine, within the caps) or "hosaka" (HOSAKA computes it, paid from your operator\'s wallet within their limits, or by your operator from an invoice sent to them by DM).'),
     },
     annotations: { readOnlyHint: false, destructiveHint: false },
   }, async (args, extra) => run(log, () => agent.ride(args, extra.signal)))
 
   server.registerTool('ride_status', {
     title: 'Ride status',
-    description: 'The ride in flight, if any, answered at once while it computes: its state (computing, ready, paused, paused_cap, failed, or interrupted by a restart), where from and to, leaves done of total, the price attempts, the work spent and the seconds it still needs, whether the head is still the one it left from.',
+    description: 'The ride in flight, if any, answered at once while it computes: its state (computing, ready, paused, paused_cap, failed, or interrupted by a restart; awaiting_payment for a HOSAKA ride whose invoice is not paid yet), where from and to, leaves done of total, the price attempts, the work spent and the seconds it still needs, whether the head is still the one it left from. For a HOSAKA ride: the job, the invoice and what the server did about it (paid from your operator\'s wallet, or sent to your operator). Never asks HOSAKA or a relay; the server does that in the background.',
     annotations: { readOnlyHint: true },
   }, async () => run(log, () => agent.rideStatus()))
 
@@ -279,7 +280,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   server.registerTool('orders_waiting', {
     title: 'Orders waiting',
-    description: 'Whether your operator has sent orders you have not read, counted by the same rules as inbox, without reading them or marking anything read; the state of a ride computing in the background (ride: state, to, done, total); with the follow watch on, your operator\'s newest move you have not seen (operatorMoved: to, plane, at, eventId, action, distance; null when none); and roamDue, true when roaming is on, its interval has passed since the last roam step, and no ride or move holds your head. For the waker that starts your turn when a DM arrives, a ride is ready or stopped, your operator moves, or a roam step is due; in a turn, call inbox (and follow_operator or roam) instead.',
+    description: 'Whether your operator has sent orders you have not read, counted by the same rules as inbox, without reading them or marking anything read; the state of a ride computing in the background or bought from HOSAKA (ride: state, to, done, total, prover); with the follow watch on, your operator\'s newest move you have not seen (operatorMoved: to, plane, at, eventId, action, distance; null when none); and roamDue, true when roaming is on, its interval has passed since the last roam step, and no ride or move holds your head. For the waker that starts your turn when a DM arrives, a ride is ready or stopped, your operator moves, or a roam step is due; in a turn, call inbox (and follow_operator or roam) instead.',
     annotations: { readOnlyHint: true },
   }, async () => run(log, () => agent.ordersWaiting()))
 
@@ -309,6 +310,12 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     },
     annotations: { readOnlyHint: false, destructiveHint: false },
   }, async (args) => run(log, () => agent.visit(args)))
+
+  server.registerTool('wallet', {
+    title: 'Wallet',
+    description: 'Whether your operator connected a Nostr Wallet Connect wallet to this server, its balance when the wallet reports it, what was spent in the last 24 hours, and the limits your operator set (per payment and per day). Read only. You never pay anything yourself: the server pays only HOSAKA invoices for rides it bought for you, within those limits, and sends your operator a receipt; above them the invoice goes to your operator by DM. Only your operator can connect a wallet or change the limits.',
+    annotations: { readOnlyHint: true },
+  }, async () => run(log, () => agent.walletStatus()))
 
   server.registerTool('message_operator', {
     title: 'Message your operator',
@@ -343,7 +350,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
           `2. Call station with sync: true until it says nothing remains to verify${args.stop ? `, or at least until the line reaches block ${args.stop}` : ''}. The line is verified by proof of work and kept in the state directory; a cold start takes many calls.`,
           `3. Call station with destination${args.stop ? `: ${args.stop}` : ''} for the quote: how many blocks, how many seconds, how many calls. Agree the block with your human if none was named; any verified block is a stop.`,
           '4. Call board. You are on the line and have not moved.',
-          `5. Call ride with to${args.stop ? `: ${args.stop}` : ''}. The ride computes in the background and the call returns at once: keep reading inbox and answering your operator meanwhile. When ride_status says the proof is ready, call ride with the same to again and it is signed. A HOLD from your operator means ride with pause: true; cancel: true releases the head if you must stop.`,
+          `5. Call ride with to${args.stop ? `: ${args.stop}` : ''}. The ride computes in the background and the call returns at once: keep reading inbox and answering your operator meanwhile. When ride_status says the proof is ready, call ride with the same to again and it is signed. A HOLD from your operator means ride with pause: true; cancel: true releases the head if you must stop. A ride too long for your caps can be bought from HOSAKA with prover: "hosaka": the server pays within your operator's wallet limits or sends them the invoice, and when ride_status says ready, ride with the same to signs it.`,
           '6. At the stop, call look, say a line, and wait_for an arrival or a chat line addressed to you. Everyone who rides to that block arrives at the same coordinate: a ride exits exactly there, so sharing it is allowed, but when your human stands on that exact gibson step one gibson off (the ride result names the free one). Never hop onto a person\'s gibson; the tools refuse it.',
           '',
           'If your operator wants you to follow them, call follow_operator with on: true: when they move, your waker wakes you, and follow_operator says where they are and how to get beside them.',

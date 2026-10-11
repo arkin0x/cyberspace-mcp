@@ -58,6 +58,8 @@ import { KeyStore, MAX_COMPUTE_HEIGHT, SCAN_MAX_HEIGHT, type EntrySummary, type 
 import { StateDir } from './state/dir.js'
 import { Refusal, type ToolResult } from './tool.js'
 import { Transit } from './transit.js'
+import type { Secret } from './nwc.js'
+import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS, Wallet } from './wallet.js'
 
 export { Refusal, type ToolResult } from './tool.js'
 
@@ -90,6 +92,20 @@ export interface AgentConfig {
   roamCandidates?: (from: Place, hopCeiling: number) => Iterable<Place>
   /** Where the operator's kind 10050 and kind 3 are looked up besides the configured relays. Default GENERAL_RELAYS; tests pass fake ones. */
   lookupRelays?: string[]
+  /** The HOSAKA API rides are bought from (--hosaka-url, config.json hosakaUrl); the default is the production API ONOSENDAI uses. */
+  hosakaUrl?: string
+  /** Tests: a fetch that serves a fake HOSAKA, and the background's pace in ms. */
+  hosakaFetch?: typeof globalThis.fetch
+  hosakaPollMs?: number
+  /** The human's Nostr Wallet Connect string (--nwc, wallet.json, config.json nwc), or none. Never printed (nwc.ts Secret). */
+  nwc?: Secret | null
+  nwcSource?: string | null
+  /** The human's limits on what the server pays, in sats (wallet.ts). */
+  maxPaymentSats?: number
+  maxDailySats?: number
+  /** Tests: how long a pay_invoice answer is waited for, and the wallet's clock. */
+  walletPayTimeoutMs?: number
+  walletClock?: () => number
 }
 
 /** The highest cube a key is derived for on request (hide, find, look): a key at h16 is about a second. */
@@ -139,6 +155,8 @@ export class Agent {
   readonly follow: OperatorWatch
   /** The roam switch, its interval and the cubes visited lately (roam.ts). */
   readonly roaming: Roam
+  /** The human's wallet, if they connected one, and their limits: pays HOSAKA rides the server bought, nothing else. */
+  readonly wallet: Wallet
   calibration: Calibration
   private readonly dir: StateDir
   private readonly sk: Uint8Array
@@ -181,10 +199,17 @@ export class Agent {
     })
     this.keys = new KeyStore(dir)
     this.budget = new Budget(config.capCallSeconds, config.capSessionSeconds)
+    // The wallet talks to its own relays with the connection's own key; nothing of it reaches the agent's relays (wallet.ts, nwc.ts).
+    this.wallet = new Wallet(dir, {
+      nwc: config.nwc ?? null, source: config.nwcSource ?? 'the configuration', maxPaymentSats: config.maxPaymentSats ?? DEFAULT_MAX_PAYMENT_SATS, maxDailySats: config.maxDailySats ?? DEFAULT_MAX_DAILY_SATS,
+      websocketImplementation: config.websocketImplementation, maxWaitMs: config.relayMaxWaitMs, log: this.log, now: config.walletClock, payTimeoutMs: config.walletPayTimeoutMs,
+    })
     this.transit = new Transit(dir, {
       pubkey: this.pubkey, keeper: this.keeper, budget: this.budget, outbox: this.outbox, canonical: this.relays.canonical,
       calibration: () => this.calibration, sign: (t) => this.sign(t), settle: () => this.settle(), refreshChain: () => this.refreshChain(), log: this.log,
-    }, { manifestUrl: config.manifestUrl, fetch: config.lineFetch, threads: config.rideThreads, now: config.rideClock })
+      // The operator channel is built below; these are called only from tool calls and the background, long after.
+      undeliverable: () => this.operatorChannel.undeliverable(), messageOperator: (text) => this.operatorChannel.message(text), wallet: this.wallet,
+    }, { manifestUrl: config.manifestUrl, fetch: config.lineFetch, threads: config.rideThreads, now: config.rideClock, hosakaUrl: config.hosakaUrl, hosakaFetch: config.hosakaFetch, hosakaPollMs: config.hosakaPollMs })
     this.chat = new Chat(dir, this.relays, this.keys, { pubkey: this.pubkey, name: () => this.name, sign: (t) => this.sign(t), log: this.log })
     this.presence = new Presence(this.relays, this.pubkey, this.log)
     this.presence.on('arrival', () => this.chat.arrival())
@@ -287,6 +312,8 @@ export class Agent {
     this.syncOperator()
     // A watch left on keeps watching across a restart, and reads what the operator did meanwhile.
     this.follow.refresh()
+    // A HOSAKA ride a restart left in hand is followed again in the background, with no ride call.
+    this.transit.resume()
   }
 
   /**
@@ -799,7 +826,7 @@ export class Agent {
   }
 
   /** Ride the line to a block: the work runs in the background, and the ride call after the proof is ready signs the hyperjump (DECK-0001 5). */
-  async ride(input: { to?: number; budget_seconds?: number; wait_seconds?: number; as_of?: number; pause?: boolean; cancel?: boolean; forget?: boolean } = {}, signal?: AbortSignal): Promise<ToolResult> {
+  async ride(input: { to?: number; budget_seconds?: number; wait_seconds?: number; as_of?: number; pause?: boolean; cancel?: boolean; forget?: boolean; prover?: 'local' | 'hosaka' } = {}, signal?: AbortSignal): Promise<ToolResult> {
     const result = await this.transit.ride(input, signal)
     const where = result.data.where as { hex?: string } | undefined
     if (result.data.action !== 'hyperjump' || !where?.hex) return result
@@ -850,6 +877,7 @@ export class Agent {
       paused_cap: 'paused at the session cap',
       failed: `stopped on an error (${ride.reason})`,
       interrupted: 'interrupted by a restart: call ride to resume it',
+      awaiting_payment: `awaiting payment to HOSAKA (${ride.reason})`,
     }
     const words = ride.state === null ? '' : ` A ride to block ${ride.to} is ${said[ride.state]}.`
     return { text: `${result.text}${words}${movedWords}${roamWords}`, data: { ...result.data, ride, operatorMoved, roamDue } }
@@ -1083,6 +1111,11 @@ export class Agent {
 
   inbox(): Promise<ToolResult> {
     return this.operatorChannel.inbox()
+  }
+
+  /** The wallet: connected or not, the balance when the wallet tells, today's spend and the limits. Read only; never the connection string. */
+  walletStatus(): Promise<ToolResult> {
+    return this.wallet.status()
   }
 
   /** A private NIP-17 DM to the operator, with the agent's own copy. */
@@ -1617,6 +1650,7 @@ export class Agent {
     this.stopped = true
     // A ride computing in the background ends first, its finished leaves flushed to disk (arkinox, 2026-10-11).
     await this.transit.stop()
+    this.wallet.stop()
     this.outbox.stop()
     this.follow.stop()
     this.operatorChannel.stop()

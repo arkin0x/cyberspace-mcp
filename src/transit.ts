@@ -33,6 +33,15 @@
 // signature is never made in the background. What a ride in flight is, is
 // also written to <state>/rides/flight.json, so a restarted server can say
 // that a ride was under way and whether it can still be resumed.
+//
+// A ride's proof can also be bought from HOSAKA (ride with prover: "hosaka";
+// arkinox, 2026-10-11, for XOR's 661,038-block ride), in the background in
+// the same way: hosakaRide.ts submits the job, pays the invoice from the
+// human's wallet within the human's limits or sends it to the operator,
+// follows the job, checks the proof at Level 1, and reports `ready`; the
+// next ride call signs it here through the same templates, reader check and
+// publish. ride_status and orders_waiting report both kinds of ride alike,
+// with `awaiting_payment` the one state only a HOSAKA ride has.
 
 import { readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { availableParallelism } from 'node:os'
@@ -42,9 +51,11 @@ import type { Budget } from './budget.js'
 import { chainTemplateProblem, enterHyperspaceTemplate, hyperjumpTemplate } from './chain/builder.js'
 import { buildChain, chainStatus, firstBreak, lookBack, openBracket, type ActionEvent } from './chain/events.js'
 import type { ChainKeeper } from './chain/keeper.js'
+import { HOSAKA_DEFAULT_URL, createHosaka, type HosakaClient } from './hosaka.js'
+import { HosakaRides } from './hosakaRide.js'
 import { computeEnterProof } from './hyperspace/enter.js'
 import { LineStore, type LineStatus, type StationResult, type Stop, type SyncResult } from './hyperspace/line.js'
-import { lineStateOf, rideBlocks, zeroLengthRideRefusal, type LineState } from './hyperspace/ride.js'
+import { lineStateOf, rideBlocks, zeroLengthRideRefusal, type LineState, type RideProof } from './hyperspace/ride.js'
 import { runRideInThread } from './hyperspace/rideHost.js'
 import { RideRunner, estimateRideSeconds, type RideProgress, type RideRunOptions, type RideRunResult } from './hyperspace/rideRunner.js'
 import { maxAxisLca } from './hyperspace/station.js'
@@ -55,6 +66,7 @@ import { projectCantorMs, type Calibration } from './space/calibration.js'
 import { describePlace, placeFromHex } from './space/coords.js'
 import type { StateDir } from './state/dir.js'
 import { Refusal, type ToolResult } from './tool.js'
+import type { Wallet } from './wallet.js'
 
 /** What the agent lends this module: its chain, its budget, its outbox, its signature, and the two steps every tool takes around a move. */
 export interface TransitBody {
@@ -68,6 +80,12 @@ export interface TransitBody {
   settle: () => void
   refreshChain: () => Promise<void>
   log: (line: string) => void
+  /** Why a DM to the operator could not be sent now, or null (operator.ts undeliverable). */
+  undeliverable: () => Promise<string | null>
+  /** The message_operator tool's own path: a NIP-17 DM to the operator. */
+  messageOperator: (text: string) => Promise<ToolResult>
+  /** The human's wallet and limits; the only payer of HOSAKA invoices (wallet.ts). */
+  wallet: Wallet
 }
 
 export interface TransitOptions {
@@ -79,6 +97,12 @@ export interface TransitOptions {
   threads?: number
   /** Tests: the ride runner's clock. */
   now?: () => number
+  /** The HOSAKA API rides are bought from; the default is the production API ONOSENDAI uses. */
+  hosakaUrl?: string
+  /** Tests: a fetch that serves a fake HOSAKA. */
+  hosakaFetch?: typeof globalThis.fetch
+  /** Tests: how often the background asks HOSAKA, in ms. */
+  hosakaPollMs?: number
 }
 
 /**
@@ -87,9 +111,10 @@ export interface TransitOptions {
  * waits for a ride call to sign it; `paused`, on command; `paused_cap`, at
  * the session cap; `failed`, the work stopped on an error (a ride call
  * retries it); `interrupted`, the server restarted while a ride was in
- * flight (a ride call to the same block resumes it from the cache).
+ * flight (a ride call to the same block resumes it from the cache);
+ * `awaiting_payment`, a HOSAKA ride whose invoice is not paid yet.
  */
-export type RideState = 'computing' | 'ready' | 'paused' | 'paused_cap' | 'failed' | 'interrupted'
+export type RideState = 'computing' | 'ready' | 'paused' | 'paused_cap' | 'failed' | 'interrupted' | 'awaiting_payment'
 
 /** The ride's state for a waker: cheap, in memory, never a relay. */
 export interface RideStateData {
@@ -102,8 +127,24 @@ export interface RideStateData {
   attemptsExpected: number
   /** Estimated seconds of work left, when known. */
   etaSeconds: number | null
-  /** Why the ride failed, or why it cannot resume. */
+  /** Why the ride failed, or why it cannot resume; for a HOSAKA ride awaiting payment, what is happening to the invoice. */
   reason: string | null
+  /** Who computes the proof: this machine, or HOSAKA (always set by this server; optional for callers that build one). */
+  prover?: 'local' | 'hosaka' | null
+}
+
+/** What a ride is, whoever computes its proof: what the signature will need. */
+export interface RidePlan {
+  previousId: string
+  prevCoordHex: string
+  genesisId: string
+  fromHeight: number
+  toHeight: number
+  /** Declared on the first ride after a boarding; undefined on a ride from a stop. */
+  asOf: number | undefined
+  chained: boolean
+  blocks: number
+  notes: string[]
 }
 
 type Ready = Extract<RideRunResult, { done: true }>
@@ -135,7 +176,7 @@ interface Flight {
   workSeconds: number
   progress: RideProgress | null
   notes: string[]
-  state: Exclude<RideState, 'interrupted'>
+  state: Exclude<RideState, 'interrupted' | 'awaiting_payment'>
   /** The background run while one is going, settled when it stops for any reason. */
   run: Promise<void> | null
   abort: AbortController | null
@@ -236,6 +277,9 @@ export class Transit {
   readonly runner: RideRunner
   readonly threads: number
   private flight: Flight | null = null
+  readonly hosaka: HosakaClient
+  /** A ride bought from HOSAKA, in hand (hosakaRide.ts). */
+  readonly bought: HosakaRides
   /** The ride flight.json held when this server started, if any: a restart came between its calls. */
   private interrupted: FlightRecord | null
   /** A ride the background dropped (its head moved), told once by the next ride call or status. */
@@ -246,11 +290,22 @@ export class Transit {
     this.threads = options.threads ?? Math.max(1, availableParallelism() - 1)
     this.runner = RideRunner.open(join(dir.path, 'rides'), { threads: this.threads, now: options.now })
     this.interrupted = this.readRecord()
+    this.hosaka = createHosaka({ apiUrl: options.hosakaUrl ?? HOSAKA_DEFAULT_URL, sign: body.sign, fetch: options.hosakaFetch })
+    this.bought = new HosakaRides({
+      dir, keeper: body.keeper, budget: body.budget, store: this.store, hosaka: this.hosaka, wallet: body.wallet, log: body.log,
+      refreshChain: body.refreshChain, planRide: (to, asOf) => this.planRide(to, asOf), undeliverable: body.undeliverable, messageOperator: body.messageOperator,
+      signAndPublish: (plan, proof) => this.signAndPublish(plan, proof), stopWords: (to) => this.arrivalWords(to),
+    }, { pollMs: options.hosakaPollMs })
   }
 
-  /** Whether a ride holds the head between calls. */
+  /** Whether a ride holds the head between calls, or a HOSAKA ride is in hand. */
   get riding(): boolean {
-    return this.flight !== null
+    return this.flight !== null || this.bought.inHand
+  }
+
+  /** Start the background work a restart left in hand: a HOSAKA ride is followed again with no ride call. */
+  resume(): void {
+    this.bought.resume()
   }
 
   // ---- station ---------------------------------------------------------------
@@ -299,6 +354,7 @@ export class Transit {
           : `You stand at the stop for block ${state.fromHeight} (head ${state.previousId.slice(0, 8)}...): the next ride leaves from there and declares no as_of.`,
       quote ? this.quoteWords(quote) : '',
       this.flight ? `A ride to block ${this.flight.toHeight} is in flight (${this.flightWords(this.flight)}).` : '',
+      this.bought.inHand ? `A ride to block ${this.bought.toHeight} bought from HOSAKA is in hand; ride_status says where it stands.` : '',
       'Nothing was signed.',
     ].filter(Boolean).join('\n')
     return {
@@ -506,15 +562,35 @@ export class Transit {
    * stops the work and keeps the head; `cancel` releases the head and keeps
    * the cache; `forget` drops the cache too.
    */
-  async ride(input: { to?: number; budget_seconds?: number; wait_seconds?: number; as_of?: number; pause?: boolean; cancel?: boolean; forget?: boolean } = {}, signal?: AbortSignal): Promise<ToolResult> {
+  async ride(input: { to?: number; budget_seconds?: number; wait_seconds?: number; as_of?: number; pause?: boolean; cancel?: boolean; forget?: boolean; prover?: 'local' | 'hosaka' } = {}, signal?: AbortSignal): Promise<ToolResult> {
     for (const [name, v] of [['budget_seconds', input.budget_seconds], ['wait_seconds', input.wait_seconds]] as const) {
       if (v !== undefined && (!Number.isFinite(v) || v <= 0)) throw new Refusal(`${name} must be a positive number of seconds.`)
     }
     if (input.as_of !== undefined && !isHeight(input.as_of)) throw new Refusal('as_of must be a block height: a non-negative integer.')
-    if (input.cancel || input.forget) return this.releaseRide(!!input.forget)
-    if (input.pause) return this.pauseRide()
+    if (input.prover !== undefined && input.prover !== 'local' && input.prover !== 'hosaka') throw new Refusal('prover must be "local" (this machine computes the proof) or "hosaka" (HOSAKA computes it, paid from your operator\'s wallet within their limits, or by your operator).')
+    if (input.cancel || input.forget) {
+      if (this.bought.inHand) {
+        const result = await this.bought.cancel()
+        if (input.forget) this.runner.forget((result.data.canceled as { previousId: string }).previousId)
+        return result
+      }
+      return this.releaseRide(!!input.forget)
+    }
+    if (input.pause) {
+      if (this.bought.inHand) throw new Refusal(`The ride to block ${this.bought.toHeight} is computed by HOSAKA, which cannot be paused from here. ride_status watches it; cancel: true lets it go.`)
+      return this.pauseRide()
+    }
     const to = input.to
     if (!isHeight(to)) throw new Refusal('Say which block to ride to: to, a block height. Or pass pause: true to pause the ride in flight, cancel: true to release it, or forget: true to drop its cache too.')
+    // A HOSAKA ride in hand is continued by the same call, whatever prover is named, so one key never has two rides.
+    if (this.bought.inHand) {
+      if (input.prover === 'local' && this.bought.toHeight === to) throw new Refusal(`A HOSAKA ride to block ${to} is in hand; computing the same ride here as well would be a second ride from one head. Cancel it first to ride locally.`)
+      return this.bought.continue(to, input.wait_seconds ?? input.budget_seconds, signal)
+    }
+    if (input.prover === 'hosaka') {
+      if (this.flight) throw new Refusal(`A ride to block ${this.flight.toHeight} is computing on this machine (${this.flightWords(this.flight)}). Cancel it first (its work stays on disk) to buy the ride from HOSAKA instead.`)
+      return this.bought.start(to, input.as_of)
+    }
     if (this.flight && this.flight.toHeight !== to) {
       throw new Refusal(`A ride to block ${this.flight.toHeight} is in flight (${this.flightWords(this.flight)}). Call ride with to: ${this.flight.toHeight} to continue it, ride_status to watch it, pause: true to pause it, or cancel: true to release the head before riding elsewhere.`)
     }
@@ -549,9 +625,12 @@ export class Transit {
     return this.progressResult(flight, told)
   }
 
-  /** The first call: the chain, the line, the station, the quote, then the reservation. */
-  private async startRide(to: number, asOfInput: number | undefined): Promise<void> {
-    const { keeper, budget } = this.body
+  /**
+   * What a ride from the agent's head to `to` would be, whoever computes it:
+   * the chain, the line, the station or the stop, the as_of, the blocks.
+   * Refuses in words; reserves nothing.
+   */
+  private async planRide(to: number, asOfInput: number | undefined): Promise<RidePlan> {
     await this.body.refreshChain()
     const chain = this.chainToExtend('ride')
     const state = lineStateOf(chain)
@@ -582,18 +661,26 @@ export class Transit {
     const zero = zeroLengthRideRefusal(fromHeight, to, chained)
     if (zero) throw new Refusal(zero)
     const blocks = rideBlocks(fromHeight, to).length
+    return { previousId: state.previousId, prevCoordHex: state.coordHex, genesisId: chain[0].id, fromHeight, toHeight: to, asOf, chained, blocks, notes }
+  }
+
+  /** The first call of a ride computed here: the plan, the quote against the session cap, then the reservation. */
+  private async startRide(to: number, asOfInput: number | undefined): Promise<void> {
+    const { keeper, budget } = this.body
+    const plan = await this.planRide(to, asOfInput)
+    const { blocks, fromHeight, notes } = plan
     const seconds = estimateRideSeconds(this.body.calibration(), blocks, this.threads)
     const b = budget.state()
     if (!(seconds <= b.remainingSessionSeconds)) {
-      throw new Refusal(`A ride of ${blocks} block(s) from block ${fromHeight} to block ${to} is expected to take about ${seconds.toFixed(1)} s on this machine (${threadWords(this.threads)}), and the session has ${b.remainingSessionSeconds.toFixed(1)} s of its ${b.capSessionSeconds} s left. The ride computes in the background and is charged to the session cap as it goes. Pick a nearer block, or tell your operator by DM how many seconds it needs: a KEEP GOING from them renews the session budget.`)
+      throw new Refusal(`A ride of ${blocks} block(s) from block ${fromHeight} to block ${to} is expected to take about ${seconds.toFixed(1)} s on this machine (${threadWords(this.threads)}), and the session has ${b.remainingSessionSeconds.toFixed(1)} s of its ${b.capSessionSeconds} s left. The ride computes in the background and is charged to the session cap as it goes. Pick a nearer block, tell your operator by DM how many seconds it needs (a KEEP GOING from them renews the session budget), or buy the ride from HOSAKA with prover: "hosaka" (paid from your operator's wallet within their limits, or by your operator).`)
     }
     // A ride that was under way when this server last stopped, or that was canceled with its cache kept: say plainly whether this one picks it up.
     const earlier = this.interrupted
     if (earlier) {
-      if (earlier.previousId === state.previousId) {
+      if (earlier.previousId === plan.previousId) {
         notes.push(`The ride ${earlier.status === 'live' ? 'under way when the server last stopped' : 'canceled earlier'} left from this same head, so its ${earlier.leavesDone} cached leaf(s) are picked up${earlier.toHeight === to ? '' : ` where they overlap (it went to block ${earlier.toHeight})`}; none is computed again.`)
       } else {
-        notes.push(`The ride to block ${earlier.toHeight} ${earlier.status === 'live' ? 'under way when the server last stopped' : 'canceled earlier'} left from head ${earlier.previousId.slice(0, 8)}..., but your head is now ${state.previousId.slice(0, 8)}...: every leaf of that ride was seeded by the old head (DECK-0001 5.3), so it cannot be resumed from here, and this ride starts fresh.`)
+        notes.push(`The ride to block ${earlier.toHeight} ${earlier.status === 'live' ? 'under way when the server last stopped' : 'canceled earlier'} left from head ${earlier.previousId.slice(0, 8)}..., but your head is now ${plan.previousId.slice(0, 8)}...: every leaf of that ride was seeded by the old head (DECK-0001 5.3), so it cannot be resumed from here, and this ride starts fresh.`)
         this.runner.forget(earlier.previousId)
       }
     }
@@ -605,7 +692,7 @@ export class Transit {
     }
     this.interrupted = null
     this.flight = {
-      previousId: state.previousId, prevCoordHex: state.coordHex, genesisId: chain[0].id, fromHeight, toHeight: to, asOf, chained, blocks, quotedSeconds: seconds,
+      previousId: plan.previousId, prevCoordHex: plan.prevCoordHex, genesisId: plan.genesisId, fromHeight, toHeight: to, asOf: plan.asOf, chained: plan.chained, blocks, quotedSeconds: seconds,
       release, startedAt: Date.now(), calls: 0, workSeconds: 0, progress: null, notes,
       state: 'paused', run: null, abort: null, pauseAsked: false, charged: 0, chargedAt: performance.now(), proof: null, failure: null, signing: false,
       headCheckedAt: 0, headCheck: null, savedAt: 0,
@@ -846,6 +933,8 @@ export class Transit {
 
   /** Stop the background work for shutdown: finished leaves are flushed, and flight.json says a ride was under way. */
   async stop(): Promise<void> {
+    const step = this.bought.stop()
+    if (step) await step
     const flight = this.flight
     if (!flight) return
     await this.stopRun(flight, 'abort')
@@ -955,6 +1044,7 @@ export class Transit {
 
   /** The ride in flight, read only. */
   rideStatus(): ToolResult {
+    if (this.bought.inHand) return this.bought.status()
     const flight = this.flight
     const state = lineStateOf(this.body.keeper.chain())
     const onLine = state === null ? 'You are not on the line; board first.' : state.fromHeight === null ? 'You are boarded; ride to a block to travel.' : `You stand at the stop for block ${state.fromHeight}; ride again, or hop to leave the line.`
@@ -962,6 +1052,8 @@ export class Transit {
     if (!flight) {
       const said: string[] = []
       if (this.ended) said.push(`The ride to block ${this.ended.to} ended: ${this.ended.reason}`)
+      const let_go = this.bought.endedWords()
+      if (let_go) said.push(let_go)
       const earlier = this.interrupted
       if (earlier && earlier.status === 'live') {
         said.push(ride.state === 'interrupted'
@@ -984,19 +1076,21 @@ export class Transit {
    * every few seconds costs nothing.
    */
   rideState(): RideStateData {
-    const none: RideStateData = { state: null, to: null, done: 0, total: 0, attempts: 0, attemptsExpected: 0, etaSeconds: null, reason: null }
+    const none: RideStateData = { state: null, to: null, done: 0, total: 0, attempts: 0, attemptsExpected: 0, etaSeconds: null, reason: null, prover: null }
+    const bought = this.bought.rideState()
+    if (bought) return bought
     const flight = this.flight
     if (flight) {
       const p = flight.progress
       return {
         state: flight.state, to: flight.toHeight, done: p?.leavesDone ?? 0, total: flight.blocks, attempts: p?.attempts ?? 0, attemptsExpected: p?.attemptsExpected ?? 0,
-        etaSeconds: flight.state === 'ready' ? 0 : Math.ceil(this.needSeconds(flight)), reason: flight.state === 'failed' ? flight.failure : null,
+        etaSeconds: flight.state === 'ready' ? 0 : Math.ceil(this.needSeconds(flight)), reason: flight.state === 'failed' ? flight.failure : null, prover: 'local',
       }
     }
-    if (this.ended) return { ...none, state: 'failed', to: this.ended.to, reason: this.ended.reason }
+    if (this.ended) return { ...none, state: 'failed', to: this.ended.to, reason: this.ended.reason, prover: 'local' }
     const earlier = this.interrupted
     if (earlier && earlier.status === 'live' && this.body.keeper.head()?.id === earlier.previousId) {
-      return { ...none, state: 'interrupted', to: earlier.toHeight, done: earlier.leavesDone, total: earlier.blocks }
+      return { ...none, state: 'interrupted', to: earlier.toHeight, done: earlier.leavesDone, total: earlier.blocks, prover: 'local' }
     }
     return none
   }
@@ -1058,6 +1152,39 @@ export class Transit {
   }
 
   // ---- signing and publishing, shared ---------------------------------------
+
+  /**
+   * A HOSAKA ride's hyperjump, for a plan and a proof hosakaRide.ts has
+   * checked at Level 1 and a head it has confirmed: signed through both
+   * checks (signChainEvent), recorded, published. The same template a ride
+   * computed here is signed with.
+   */
+  private async signAndPublish(plan: RidePlan, proof: RideProof): Promise<{ event: NostrEvent; words: string[]; data: Record<string, unknown> }> {
+    const head = this.body.keeper.head()!
+    const toCoordHex = this.store.line.stopCoordHex(plan.toHeight)
+    if (!toCoordHex) throw new Refusal(`The line no longer holds block ${plan.toHeight} (verified to block ${this.store.line.asOf()} now). Call station with sync: true to verify it again; the proof is kept and signed on the next ride call.`)
+    const event = this.signChainEvent(hyperjumpTemplate({
+      createdAt: createdAtAfter(head), genesisId: plan.genesisId, previousId: plan.previousId, prevCoordHex: plan.prevCoordHex, toCoordHex,
+      fromHeight: plan.fromHeight, toHeight: plan.toHeight, ...(plan.asOf !== undefined ? { asOf: plan.asOf } : {}),
+      rootHex: proof.rootHex, mp: proof.mp, mnHex: proof.mnHex,
+    }), 'ride')
+    const published = await this.publish(event)
+    this.body.budget.moves++
+    this.body.settle()
+    return {
+      event,
+      words: this.relayWords(published.entry, published.result),
+      data: { accepted: published.entry.accepted, refused: published.entry.refused ?? {}, canonicalPending: !published.entry.accepted.includes(this.body.canonical) },
+    }
+  }
+
+  /** Where the agent stands after a ride to `to`, in words and data. */
+  private arrivalWords(to: number): { text: string; data: Record<string, unknown> } {
+    const line = this.store.line
+    const toCoordHex = line.stopCoordHex(to)!
+    const stop = line.stopAt(to)!
+    return { text: `You now stand at ${stopWords(stop, toCoordHex)}.`, data: { where: describePlace(placeFromHex(toCoordHex)), stop: stopData(stop, toCoordHex) } }
+  }
 
   /**
    * Sign a chain template after two checks (plan D1, D2): the builder's own

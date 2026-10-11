@@ -430,6 +430,24 @@ export class OperatorChannel {
     return Math.min(this.state.lastReadAt - REREAD_WINDOW_S, ...Object.values(this.state.waiting).map((t) => t - 1))
   }
 
+  /**
+   * Why a DM to the operator could not be sent right now, or null when it
+   * could: no operator, a profile that contradicts the human's
+   * configuration, no DM inbox, or no relay that answered. Asked before any
+   * work whose whole point is a message, such as a HOSAKA invoice, so that
+   * nothing is bought that nobody can be told about.
+   */
+  async undeliverable(): Promise<string | null> {
+    try {
+      this.requireOperator()
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err)
+    }
+    const facts = await this.sync()
+    if (!facts) return 'The operator channel is closed.'
+    return facts.inbox.length === 0 ? this.noInboxWords(facts) : null
+  }
+
   /** The message_operator tool: a private DM to the operator, and the agent's own copy. */
   async message(text: string): Promise<ToolResult> {
     const operator = this.requireOperator()
