@@ -95,6 +95,8 @@ interface DmsFile {
 const EMPTY: DmsFile = { version: 1, strategy: null, seen: {}, waiting: {}, lastReadAt: null, ignoredTotal: 0, published: null, renewals: {} }
 /** How many renewals are remembered; older ones fall long before any read window could return their wraps. */
 const RENEWALS_KEPT = 500
+/** How many DMs of this session the travel log's leak check remembers. */
+const SPOKEN_KEPT = 200
 
 /** A relay URL as the relay client keys it, or null when it is not a ws(s) URL with a real host. */
 export function normalizeDmRelay(url: string): string | null {
@@ -154,6 +156,12 @@ function relaysWords(urls: string[]): string {
 export class OperatorChannel {
   private state: DmsFile
   private syncing: Promise<OperatorFacts | null> | null = null
+  /**
+   * The texts of the DMs read and sent this session, newest last, in memory
+   * only, so the travel log can refuse to repeat them in public (arkinox,
+   * 2026-10-11). Never written to disk: dms.json keeps read marks, not words.
+   */
+  private readonly spoken: string[] = []
   private stopped = false
 
   constructor(private readonly deps: OperatorChannelDeps) {
@@ -182,6 +190,17 @@ export class OperatorChannel {
 
   stop(): void {
     this.stopped = true
+  }
+
+  /** The private words of this session: the STRATEGY and the DMs read and sent, for the travel log's leak check. */
+  privateTexts(): string[] {
+    const s = this.strategy()
+    return s ? [s.text, ...this.spoken] : [...this.spoken]
+  }
+
+  private remember(text: string): void {
+    this.spoken.push(text)
+    if (this.spoken.length > SPOKEN_KEPT) this.spoken.splice(0, this.spoken.length - SPOKEN_KEPT)
   }
 
   private where(): string[] {
@@ -321,6 +340,7 @@ export class OperatorChannel {
     this.prune()
     this.save()
     const renewed = renewing.length > 0 ? this.deps.renew!() : null
+    for (const m of unique) this.remember(m.text)
 
     const lines: string[] = []
     lines.push(unique.length === 0
@@ -458,6 +478,7 @@ export class OperatorChannel {
     if (!facts) throw new Refusal('The operator channel is closed.')
     if (facts.inbox.length === 0) throw new Refusal(`${this.noInboxWords(facts)} Nothing was sent.`)
     const wrapped = this.deps.wrap(operator, text)
+    this.remember(text)
     const toThem = await this.deps.relays.publishMany(facts.inbox, wrapped.toRecipient)
     if (!toThem.ok) {
       throw new Refusal(`Not delivered: no relay of your operator's DM inbox took it (${Object.entries(toThem.reasons).map(([u, r]) => `${u}: ${r}`).join('; ') || toThem.reason}). The relays' words are verbatim.`)

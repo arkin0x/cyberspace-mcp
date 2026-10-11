@@ -9,6 +9,7 @@ import { HOSAKA_DEFAULT_URL } from './hosaka.js'
 import { DEFAULT_RELAY } from './nostr/relays.js'
 import { parseNwc, Secret } from './nwc.js'
 import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS } from './wallet.js'
+import { DEFAULT_TRAVEL_PER_DAY, type TravelLogSettings } from './travel.js'
 
 export interface Settings {
   stateDir: string
@@ -30,6 +31,8 @@ export interface Settings {
   maxPaymentSats: number
   /** The most the payments of the rolling 24 hours may add up to, in sats; 0 turns paying off. */
   maxDailySats: number
+  /** The public travel log: the human's switch, never the model's (arkinox, 2026-10-11). */
+  travelLog: TravelLogSettings
 }
 
 const DEFAULTS = {
@@ -57,6 +60,8 @@ export interface ParsedArgs {
   nwc?: Secret
   maxPaymentSats?: number
   maxDailySats?: number
+  travelLog?: boolean
+  travelLogMaxPerDay?: number
   help?: boolean
 }
 
@@ -82,11 +87,14 @@ Usage: cyberspace-mcp --state <dir> [options]
   --max-payment-sats <n>        The most one payment may be. Default ${DEFAULTS.maxPaymentSats}; 0 turns paying off.
   --max-daily-sats <n>          The most the payments of the last 24 hours may add up to.
                                 Default ${DEFAULTS.maxDailySats}; 0 turns paying off.
+  --travel-log                  Let log_travel post public kind 1 notes about the agent's travels. Off by default.
+  --travel-log-max-per-day <n>  The most travel log notes in any 24 hours. Default ${DEFAULT_TRAVEL_PER_DAY}
   --help                        This text.
 
 The same keys may live in <state>/config.json: relays, operator, name, about,
 capCallSeconds, capSessionSeconds, maxSidestepHeight, allowRespawn, hosakaUrl,
-nwc, maxPaymentSats, maxDailySats. The wallet string may also be the "nwc" key
+nwc, maxPaymentSats, maxDailySats, and travelLog: { "enabled": true,
+"maxPerDay": 6, "tagOperator": false }. The wallet string may also be the "nwc" key
 of <state>/wallet.json, which the server only reads.`
 
 /** An http(s) URL without a trailing slash, or a thrown sentence. */
@@ -144,6 +152,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case '--nwc': out.nwc = nwcSecret(a, next()); break
       case '--max-payment-sats': out.maxPaymentSats = sats(a, next()); break
       case '--max-daily-sats': out.maxDailySats = sats(a, next()); break
+      case '--travel-log': out.travelLog = true; break
+      case '--travel-log-max-per-day': out.travelLogMaxPerDay = Math.max(1, Math.floor(num(a, next()))); break
       case '--help': case '-h': out.help = true; break
       // An argument that looks like a wallet string is never echoed, even into an error (arkinox, 2026-10-11).
       default: throw new Error(`unknown argument ${/walletconnect|secret=/i.test(a) ? '(it looks like a wallet connection string, so it is not repeated here; use --nwc <uri>)' : JSON.stringify(a)}; try --help`)
@@ -165,6 +175,7 @@ interface FileConfig {
   nwc?: unknown
   maxPaymentSats?: unknown
   maxDailySats?: unknown
+  travelLog?: unknown
 }
 
 /** <state>/wallet.json, which the human writes and the server only reads: {"nwc": "nostr+walletconnect://..."}. */
@@ -220,6 +231,7 @@ export function settingsFrom(args: ParsedArgs, file: FileConfig, walletFile: Wal
     ...nwcSetting(args, file, walletFile),
     maxPaymentSats: args.maxPaymentSats ?? (file.maxPaymentSats !== undefined ? sats('config.json maxPaymentSats', file.maxPaymentSats) : DEFAULTS.maxPaymentSats),
     maxDailySats: args.maxDailySats ?? (file.maxDailySats !== undefined ? sats('config.json maxDailySats', file.maxDailySats) : DEFAULTS.maxDailySats),
+    travelLog: travelLogSettings(args, file.travelLog),
   }
 }
 
@@ -228,4 +240,20 @@ function nwcSetting(args: ParsedArgs, file: FileConfig, walletFile: WalletFile):
   if (walletFile.nwc !== undefined) return { nwc: nwcSecret('wallet.json nwc', walletFile.nwc), nwcSource: 'wallet.json nwc' }
   if (file.nwc !== undefined) return { nwc: nwcSecret('config.json nwc', file.nwc), nwcSource: 'config.json nwc' }
   return { nwc: null, nwcSource: null }
+}
+
+/**
+ * The travel log's settings: off unless --travel-log or travelLog.enabled
+ * true; the daily limit from the flag, the file, or the default; tagOperator
+ * only from the file, and only when it is exactly true. Anything malformed
+ * reads as off (arkinox, 2026-10-11).
+ */
+function travelLogSettings(args: ParsedArgs, raw: unknown): TravelLogSettings {
+  const file = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {}
+  const perDay = typeof file.maxPerDay === 'number' && Number.isFinite(file.maxPerDay) && file.maxPerDay >= 1 ? Math.floor(file.maxPerDay) : undefined
+  return {
+    enabled: args.travelLog === true || file.enabled === true,
+    maxPerDay: args.travelLogMaxPerDay ?? perDay ?? DEFAULT_TRAVEL_PER_DAY,
+    tagOperator: file.tagOperator === true,
+  }
 }
