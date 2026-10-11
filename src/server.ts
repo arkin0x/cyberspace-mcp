@@ -9,8 +9,10 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { readFileSync } from 'node:fs'
 import { z } from 'zod'
 import { Agent, MAX_KEY_HEIGHT, Refusal, type ToolResult } from './agent.js'
+import { MAX_MESSAGE_LENGTH } from './hidden/bags.js'
 import { MAX_OPERATOR_MESSAGE } from './operator.js'
 import { RENDER_DEFAULT_SIZE, RENDER_MAX_SIZE, RENDER_MIN_SIZE } from './render.js'
+import { ROAM_DEFAULT_MINUTES, ROAM_MAX_MINUTES, ROAM_MIN_MINUTES } from './roam.js'
 
 /** The seven rules with no undo (agents note 6), as the resource carries them. */
 const FATAL_RULES = [
@@ -277,7 +279,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   server.registerTool('orders_waiting', {
     title: 'Orders waiting',
-    description: 'Whether your operator has sent orders you have not read, counted by the same rules as inbox, without reading them or marking anything read; the state of a ride computing in the background (ride: state, to, done, total); and, with the follow watch on, your operator\'s newest move you have not seen (operatorMoved: to, plane, at, eventId, action, distance; null when none). For the waker that starts your turn when a DM arrives, a ride is ready or stopped, or your operator moves; in a turn, call inbox (and follow_operator) instead.',
+    description: 'Whether your operator has sent orders you have not read, counted by the same rules as inbox, without reading them or marking anything read; the state of a ride computing in the background (ride: state, to, done, total); with the follow watch on, your operator\'s newest move you have not seen (operatorMoved: to, plane, at, eventId, action, distance; null when none); and roamDue, true when roaming is on, its interval has passed since the last roam step, and no ride or move holds your head. For the waker that starts your turn when a DM arrives, a ride is ready or stopped, your operator moves, or a roam step is due; in a turn, call inbox (and follow_operator or roam) instead.',
     annotations: { readOnlyHint: true },
   }, async () => run(log, () => agent.ordersWaiting()))
 
@@ -287,6 +289,26 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     inputSchema: { on: z.boolean().optional().describe('true turns the watch on, false turns it off; leave it out to report where your operator is.') },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   }, async (args) => run(log, () => agent.followOperator(args)))
+
+  server.registerTool('roam', {
+    title: 'Roam',
+    description: `Wander on your own, a short walk every so often. With on (and optionally every_minutes, ${ROAM_MIN_MINUTES} to ${ROAM_MAX_MINUTES}, default ${ROAM_DEFAULT_MINUTES}), turns roaming on or off, kept across restarts; while on, orders_waiting reports roamDue once the interval has passed since your last roam step, and your waker wakes you. With no arguments, suggests your next destination and counts as a roam step: one hop away in a random direction, priced and within your caps, never on a person\'s gibson, preferring cubes you have not been to lately. It never moves you: hop to the suggestion if your STRATEGY allows, look, and tell your operator with message_operator what you saw if it is worth telling. Refused while a ride is computing, ready, paused or interrupted, while a move holds your head, and while you are boarded.`,
+    inputSchema: {
+      on: z.boolean().optional().describe('true turns roaming on, false off; leave out (with every_minutes too) for a suggested step.'),
+      every_minutes: z.number().optional().describe(`Minutes between roam steps, ${ROAM_MIN_MINUTES} to ${ROAM_MAX_MINUTES}; default ${ROAM_DEFAULT_MINUTES}.`),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  }, async (args) => run(log, () => agent.roam(args)))
+
+  server.registerTool('visit', {
+    title: 'Visit and leave a note',
+    description: `Leave a note for a person without going there: resolves their live head from the relays (or their spawn coordinate when they have no chain) and hides the note as a message in your bag in the h12 cube where they stand, the cube their client opens for free, so they see it on their next look there. Looking costs the same as walking, so this works from anywhere. You do not move. The note is signed by your key; for anyone but your operator, your profile (bot: true, your operator named) must be published first, so the finder can tell a bot left it. Up to ${MAX_MESSAGE_LENGTH} characters. Text you write is public to whoever stands in that cube.`,
+    inputSchema: {
+      pubkey: z.string().describe('Whose note it is: an npub, an nprofile or a 64-hex pubkey.'),
+      note: z.string().describe(`What they find: your words, not empty, up to ${MAX_MESSAGE_LENGTH} characters.`),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  }, async (args) => run(log, () => agent.visit(args)))
 
   server.registerTool('message_operator', {
     title: 'Message your operator',

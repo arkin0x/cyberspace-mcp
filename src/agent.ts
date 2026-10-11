@@ -24,7 +24,7 @@ import type { ShardModel } from 'sno-core/shards'
 import { Budget } from './budget.js'
 import { ACTION_KIND, chainTemplateProblem, hopTemplate, sidestepTemplate, spawnTemplate } from './chain/builder.js'
 import { findDivergence } from './chain/divergence.js'
-import { CHAIN_RULES_REVISION, newestSpawn, type ActionEvent } from './chain/events.js'
+import { CHAIN_RULES_REVISION, buildChain, chainStatus, newestSpawn, type ActionEvent } from './chain/events.js'
 import { Holders } from './chain/holders.js'
 import { ChainKeeper } from './chain/keeper.js'
 import { askChainEvents, parsePubkey } from './chain/resolve.js'
@@ -46,6 +46,7 @@ import { DEFAULT_RELAY, GENERAL_RELAYS, Relays, normalizeRelay, type PublishResu
 import { OperatorWatch, type OperatorMove } from './follow.js'
 import { OperatorChannel } from './operator.js'
 import { Presence, neighborhoodFilter, sectorsApart, type Person } from './presence.js'
+import { ROAM_MAX_MINUTES, ROAM_MIN_MINUTES, Roam, roamCandidates, searchRoam } from './roam.js'
 import { profileTemplate, type ProfileFields, MAX_PICTURE_URL, pictureUrl, publishedFields } from './profile.js'
 import { objectHandle, renderShard, type NamedView } from './render.js'
 import { validateSnoPayload } from './sno.js'
@@ -84,6 +85,9 @@ export interface AgentConfig {
   /** Tests: a fetch that serves fixture blobs to the line store, and the ride runner's clock. */
   lineFetch?: typeof globalThis.fetch
   rideClock?: () => number
+  /** Tests: the roam clock (unix seconds) and the roam candidates, in place of the clock and the random walk. */
+  roamClock?: () => number
+  roamCandidates?: (from: Place, hopCeiling: number) => Iterable<Place>
   /** Where the operator's kind 10050 and kind 3 are looked up besides the configured relays. Default GENERAL_RELAYS; tests pass fake ones. */
   lookupRelays?: string[]
 }
@@ -133,6 +137,8 @@ export class Agent {
   readonly operatorChannel: OperatorChannel
   /** The follow watch: the operator's moves, verified, for follow_operator and orders_waiting (follow.ts). */
   readonly follow: OperatorWatch
+  /** The roam switch, its interval and the cubes visited lately (roam.ts). */
+  readonly roaming: Roam
   calibration: Calibration
   private readonly dir: StateDir
   private readonly sk: Uint8Array
@@ -203,6 +209,7 @@ export class Agent {
       follows: () => this.operatorChannel.operatorFollows(),
       now: nowSeconds, log: this.log,
     })
+    this.roaming = new Roam(dir, config.roamClock ?? nowSeconds)
   }
 
   /**
@@ -819,11 +826,17 @@ export class Agent {
     const moved = this.follow.unseen()
     const operatorMoved = moved ? this.moveData(moved) : null
     const movedWords = operatorMoved ? ` Your operator moved: ${operatorMoved.action} to ${operatorMoved.to} (${operatorMoved.distance} from you). Call follow_operator to see the way there.` : ''
+    // Whether a roam step is due (arkinox, 2026-10-11): from memory, and
+    // never while a ride or a move holds the head, so the waker wakes the
+    // agent only for a step it can take. Kept, like a move, when the DM
+    // question fails.
+    const roamDue = this.roaming.due() && this.roamBusy() === null
+    const roamWords = roamDue ? ' A roam step is due: call roam for a suggested destination.' : ''
     let result: ToolResult
     try {
       result = await this.operatorChannel.ordersWaiting()
     } catch (err) {
-      if (!operatorMoved || !(err instanceof Refusal)) throw err
+      if ((!operatorMoved && !roamDue) || !(err instanceof Refusal)) throw err
       result = { text: `Could not count orders: ${err.message}`, data: { orders: null, ordersError: err.message } }
     }
     // The ride's state rides along (arkinox, 2026-10-11), so the waker that
@@ -839,7 +852,7 @@ export class Agent {
       interrupted: 'interrupted by a restart: call ride to resume it',
     }
     const words = ride.state === null ? '' : ` A ride to block ${ride.to} is ${said[ride.state]}.`
-    return { text: `${result.text}${words}${movedWords}`, data: { ...result.data, ride, operatorMoved } }
+    return { text: `${result.text}${words}${movedWords}${roamWords}`, data: { ...result.data, ride, operatorMoved, roamDue } }
   }
 
   /** A verified operator move as orders_waiting and follow_operator show it, with the distance from where the agent stands (from memory). */
@@ -912,6 +925,157 @@ export class Agent {
       data: {
         on, operator: nip19.npubEncode(op), position: { ...move, where: describePlace(there) }, beside: target, besideAlready, needsRide,
         plan: plan ? { refused: plan.data.refused, plan: plan.data.plan } : null, notes,
+      },
+    }
+  }
+
+  // ---- roam (roam.ts; arkinox, 2026-10-11) -----------------------------------
+
+  /**
+   * Why the agent may not roam now, or null: a ride computing, ready,
+   * paused or interrupted needs the head it left from, a move in flight
+   * holds the head, and a boarding is waiting for its ride. From memory.
+   */
+  private roamBusy(): string | null {
+    const ride = this.transit.rideState()
+    if (ride.state && ride.state !== 'failed') {
+      return `Your ride to block ${ride.to} is ${ride.state === 'paused_cap' ? 'paused at the session cap' : ride.state}, and it needs the head it left from: a hop now would make it impossible to sign. Roaming waits until the ride is signed or released.`
+    }
+    if (this.keeper.moving) return 'Your head is reserved by a move in flight (a hop, a boarding or a ride), so roaming waits until it is done. One key, one mover.'
+    if (this.keeper.head()?.name === 'enter-hyperspace') return 'You are boarded on the line, waiting to ride: a hop now would leave the line and waste the boarding. Ride first, or roam from the stop you arrive at.'
+    return null
+  }
+
+  /**
+   * The roam switch, or one roam step. With `on` or `every_minutes`, turns
+   * roaming on or off and sets the interval; orders_waiting then reports
+   * roamDue once the interval has passed since the last step. With neither,
+   * suggests the next destination: one hop away in a random direction,
+   * priced and within the caps, never on a person's gibson, preferring cubes
+   * not visited lately; and marks the step taken. Never moves the agent.
+   */
+  async roam(input: { on?: boolean; every_minutes?: number } = {}): Promise<ToolResult> {
+    if (input.on !== undefined || input.every_minutes !== undefined) {
+      const every = input.every_minutes
+      if (every !== undefined && (!Number.isFinite(every) || every < ROAM_MIN_MINUTES || every > ROAM_MAX_MINUTES)) {
+        throw new Refusal(`every_minutes must be from ${ROAM_MIN_MINUTES} to ${ROAM_MAX_MINUTES} (a day); got ${every}. Roaming is a stroll every so often, not a patrol.`)
+      }
+      this.roaming.configure(input.on, every === undefined ? undefined : Math.round(every))
+      const on = this.roaming.on
+      const dueAt = this.roaming.dueAt()
+      const text = on
+        ? `Roaming on: every ${this.roaming.everyMinutes} min, orders_waiting reports roamDue and your waker wakes you; then call roam (with no arguments) for a suggested destination, hop there, look, and tell your operator what you saw if it is worth it. The next step is due at ${new Date(dueAt! * 1000).toISOString()}. Call roam now for a step right away.`
+        : `Roaming off${input.every_minutes !== undefined ? ` (the interval is kept: every ${this.roaming.everyMinutes} min)` : ''}: orders_waiting no longer reports roamDue. roam with no arguments still suggests a step on request.`
+      return { text, data: { on, everyMinutes: this.roaming.everyMinutes, dueAt, lastStepAt: this.roaming.lastStepAt } }
+    }
+
+    const busy = this.roamBusy()
+    if (busy) throw new Refusal(busy)
+    await this.refreshChain()
+    const busyNow = this.roamBusy()
+    if (busyNow) throw new Refusal(busyNow)
+    const status = this.keeper.status()
+    if (status === 'dead' || status === 'frozen') throw new Refusal(`${this.keeper.breakWords() ?? 'Your chain cannot be extended.'} Nowhere to roam until your human decides about a respawn.`)
+
+    const from = this.keeper.place()
+    const c = this.ceilings()
+    const found = searchRoam({
+      candidates: this.config.roamCandidates ? this.config.roamCandidates(from, c.hop) : roamCandidates(from, c.hop),
+      price: (target) => priceNextStep(from, target, c, this.calibration),
+      refusal: (step, target) => this.stepRefusal(step, target),
+      // Every person the server knows of nearby, and the operator wherever the follow watch saw them; a profile not read yet is protected.
+      taken: new Set(this.occupants().keys()),
+      visited: this.roaming.visited(),
+    })
+    const skippedWords = [
+      found.skipped.people ? `${found.skipped.people} on a person's gibson` : '',
+      found.skipped.refused ? `${found.skipped.refused} over your caps` : '',
+      found.skipped.notOneHop ? `${found.skipped.notOneHop} not one hop away` : '',
+      found.skipped.visited ? `${found.skipped.visited} in cubes visited lately` : '',
+    ].filter(Boolean).join(', ')
+    if (!found.pick) {
+      // Nothing fits: the clock restarts anyway, so the waker does not wake the agent for the same answer at every poll.
+      this.roaming.markStep([from])
+      throw new Refusal(`No roam step fits right now${found.lastRefusal ? `: ${found.lastRefusal}` : '.'} (Passed over: ${skippedWords || 'every candidate'}.) Roaming rests until the next interval${this.roaming.on ? ` (${this.roaming.everyMinutes} min)` : ''}.`)
+    }
+    const { target, step, fresh } = found.pick
+    this.roaming.markStep([from, target])
+    const plan = this.describeStep(step, target)
+    const where = describePlace(target)
+    const nextDue = this.roaming.dueAt()
+    const text = [
+      `Roam suggestion: ${where.hex} (${where.planeName}, sector ${where.sector}), ${distanceWords(distanceBetween(from, target))}, ${fresh ? 'a cube you have not been to lately' : 'a cube you have been to lately (nothing fresh fits your caps)'}.`,
+      `One ${step.kind} of h${step.maxHeight}, about ${step.seconds.toFixed(2)} s here, within your caps; nobody stands on that gibson.${this.keeper.status() === 'none' ? ' You have no chain yet: hop will sign your spawn first.' : ''}`,
+      `To go: hop with target ${where.hex}, then look, and tell your operator with message_operator if you saw something worth telling. Moving is your decision: your STRATEGY and your operator's orders come first.`,
+      `This counts as your roam step${nextDue ? `; the next is due at ${new Date(nextDue * 1000).toISOString()}` : ''}.`,
+    ].join('\n')
+    return { text, data: { suggestion: where, plan, fresh, skipped: found.skipped, on: this.roaming.on, everyMinutes: this.roaming.everyMinutes, nextDueAt: nextDue } }
+  }
+
+  // ---- visit (arkinox, 2026-10-11) -------------------------------------------
+  //
+  // "visit a pubkey and leave a message ... hide at their head or spawn cube
+  // from anywhere, since looking costs the same as walking." The note goes
+  // into the agent's bag in the h12 cube where the person stands, the cube
+  // every client scans for free around where it stands, so they see it the
+  // next time they look there. The agent does not move.
+
+  /** Leave a note for a person: hide it as a message at their live head's h12 cube, or their spawn cube when they have no chain. */
+  async visit(input: { pubkey: string; note: string }): Promise<ToolResult> {
+    const who = parsePubkey(String(input.pubkey ?? ''))
+    if (!who) throw new Refusal(`pubkey must be an npub, an nprofile or a 64-hex pubkey; got ${JSON.stringify(input.pubkey)}.`)
+    if (who === this.pubkey) throw new Refusal('That is your own pubkey. To leave something where you stand, use hide.')
+    const note = String(input.note ?? '')
+    if (!note.trim()) throw new Refusal('The note is empty: write what you want them to find.')
+    if (note.length > MAX_MESSAGE_LENGTH) throw new Refusal(`The note is ${note.length} characters; a hidden message holds at most ${MAX_MESSAGE_LENGTH}. Shorten it.`)
+    const npub = nip19.npubEncode(who)
+    const operator = this.operatorProblem() ? null : this.operatorOfProfile()
+    const forOperator = who === operator
+    if (!forOperator) {
+      // A note is signed by the agent's key; a stranger who finds it tells it came from a bot, and whose, only by the profile that key published.
+      const last = this.dir.readJson<ProfileFile | null>('profile.json', null)
+      if (!last || last.accepted.length === 0) {
+        throw new Refusal(`${npub} is not your operator, and no relay has accepted your profile yet, so whoever finds the note could not tell it was left by a bot, or whose. Call identity first (it publishes bot: true and names your operator), then visit.`)
+      }
+    }
+
+    // Where they stand: their chain as every chain read resolves it, asked of the relays with each answer kept, so silence is never taken for "no chain".
+    const noHolders = { noteFrom: () => {} } as unknown as Holders
+    let answers
+    try {
+      answers = await askChainEvents(this.relays, noHolders, who)
+    } catch (err) {
+      throw new Refusal(`Could not ask the relays where ${npub} is: ${err instanceof Error ? err.message : String(err)}. Nothing was hidden.`)
+    }
+    const verdict = decideSelfCheck(answers, this.relays.canonical)
+    if (verdict.status === 'unknown') throw new Refusal(`Cannot tell where ${npub} is: ${causeWords(verdict.cause)}. A note left at a guess could sit where they never look, so nothing was hidden. Try again in a moment.`)
+    const chain = verdict.status === 'found' ? buildChain(verdict.events, who) : []
+    const status = chainStatus(chain)
+    const head = chain.at(-1) ?? null
+    const atSpawn = !head || status === 'dead'
+    const at = atSpawn ? spawnPlace(who) : placeFromHex(head!.coordHex)
+    const whereWords = !head
+      ? `${forOperator ? 'Your operator has' : 'They have'} no chain yet, so the note is at their spawn cube: their first spawn puts them on that exact gibson, and they see it as soon as they arrive.`
+      : status === 'dead'
+        ? 'Their chain is dead, so their next spawn puts them back at their spawn coordinate; the note waits in that cube.'
+        : `That is where their newest move (${head.name} ${head.id.slice(0, 8)}..., signed ${new Date(head.createdAt * 1000).toISOString()}) put them.`
+
+    const hidden = await this.hide({ contents: { message: note }, coordinate: at.hex, height: SCAN_MAX_HEIGHT })
+    const cube = hidden.data.cube as { base: { x: string; y: string; z: string } }
+    const accepted = hidden.data.accepted as string[]
+    const place = describePlace(at)
+    const text = [
+      `Left your note for ${forOperator ? 'your operator ' : ''}${npub} in the h${SCAN_MAX_HEIGHT} cube around ${place.hex} (${place.planeName}, sector ${place.sector}; cube base x ${cube.base.x} y ${cube.base.y} z ${cube.base.z}). ${whereWords}`,
+      `How they find it: standing anywhere in that h${SCAN_MAX_HEIGHT} cube, a client opens it with the keys it derives for free (ONOSENDAI's scan, or find), so it shows on their next look there; if they have moved on, it waits in that cube. It is signed by your key (${this.npub}), whose profile says bot: true.`,
+      accepted.length ? `Bag ${(hidden.data.bagId as string).slice(0, 8)}... accepted by ${accepted.join(', ')}.` : 'No relay accepted the bag yet; it waits in the outbox.',
+      forOperator ? 'Tell your operator with message_operator that something is waiting for them, if your STRATEGY allows.' : 'You did not move.',
+    ].join('\n')
+    return {
+      text,
+      data: {
+        for: { pubkey: who, npub, operator: forOperator }, at: place, atSpawn, chainStatus: status,
+        head: head ? { eventId: head.id, action: head.name, at: head.createdAt } : null,
+        bagId: hidden.data.bagId, lookupId: hidden.data.lookupId, cube: hidden.data.cube, entries: hidden.data.entries, accepted, refused: hidden.data.refused,
       },
     }
   }
