@@ -47,6 +47,7 @@ import { OperatorWatch, type OperatorMove } from './follow.js'
 import { OperatorChannel } from './operator.js'
 import { Presence, neighborhoodFilter, sectorsApart, type Person } from './presence.js'
 import { profileTemplate, type ProfileFields, MAX_PICTURE_URL, pictureUrl, publishedFields } from './profile.js'
+import { objectHandle, renderShard, type NamedView } from './render.js'
 import { validateSnoPayload } from './sno.js'
 import { hopCeiling, loadOrMeasure, projectCantorMs, type Calibration } from './space/calibration.js'
 import { describePlace, distanceBetween, distanceWords, parseCoordinate, placeFromHex, placeOf, spawnPlace, type CoordinateInput, type Place } from './space/coords.js'
@@ -93,6 +94,8 @@ export const MAX_KEY_HEIGHT = 16
 const FIXED_POINT_LOOK_MS = 2000
 /** The most candidate regions a hinted sweep will try. */
 const MAX_SWEEP_CANDIDATES = 1 << 16
+/** The objects opened this session that render can draw by id; the oldest is forgotten past this. */
+const OBJECTS_REMEMBERED = 64
 
 interface ProfileFile {
   content: string
@@ -137,6 +140,14 @@ export class Agent {
   private readonly log: (line: string) => void
   private name: string | null
   private stopped = false
+  /**
+   * The objects opened this session (found, placed, or inside an opened
+   * chest), the newest 64, by the handle find lists (render.ts objectHandle),
+   * so render can draw them. In memory
+   * only: an object is the region's secret, and bags.json keeps labels, never
+   * contents (arkinox, 2026-10-11).
+   */
+  private readonly objectsSeen = new Map<string, ShardModel>()
 
   private constructor(readonly config: AgentConfig, dir: StateDir, sk: Uint8Array, release: () => void, calibration: Calibration) {
     this.dir = dir
@@ -1019,6 +1030,7 @@ export class Agent {
       ...(h.ref ? { byReference: true } : {}),
       ...(h.shard ? { shard: { unit: h.shard.unit, vertices: h.shard.vertices.length, faces: h.shard.faces.length, extent: h.shard.extent, mode: h.shard.mode } } : {}),
     }
+    if (h.shard) this.rememberObject(objectHandle(h.eventId), h.shard)
     if (h.key) {
       this.keys.holdItem({ itemPubkey: h.key.itemPubkey, secretHex: h.key.secretHex, name: h.key.name, about: h.key.about, foundIn, at: nowSeconds() })
       summary.key = { itemPubkey: h.key.itemPubkey, about: h.key.about }
@@ -1039,6 +1051,7 @@ export class Agent {
               author: c.event.pubkey, verified: c.verified,
             })),
           }
+          for (const c of contents) if (c.body.shard) this.rememberObject(objectHandle(c.id), c.body.shard)
           for (const c of contents) if (c.body.key) this.keys.holdItem({ itemPubkey: c.body.key.itemPubkey, secretHex: c.body.key.secretHex, name: c.body.key.name, about: c.body.key.about, foundIn, at: nowSeconds() })
         } catch (err) {
           summary.chest = { lock: h.chest.lockPubkey, requires: requiresLabel(h.chest), opened: false }
@@ -1094,6 +1107,8 @@ export class Agent {
         if (e.chest) more = e.chest.opened
           ? ` (opened with your ${e.chest.openedWith}: ${e.chest.contents!.length} item(s): ${e.chest.contents!.map((c) => `${c.type} "${c.label}"${c.verified ? '' : ' (unsigned)'}`).join(', ')})`
           : ` (sealed to ${e.chest.lock.slice(0, 8)}...; needs ${e.chest.requires})`
+        // An object's id is what render takes to draw it.
+        if (e.shard) more = ` (id ${objectHandle(e.eventId).slice(0, 12)}, ${e.shard.vertices} vertices, ${e.shard.faces} faces)`
         out.push(`  ${e.type}${e.coin ? ' (coins)' : ''}${e.byReference ? ' [by reference]' : ''} by ${e.author.slice(0, 8)}... ${same}: "${e.label}"${more}`)
       }
     }
@@ -1285,21 +1300,7 @@ export class Agent {
       return this.hide({ contents: { object: input.object }, coordinate: input.coordinate, height: input.height })
     }
     if (input.address) {
-      let address = input.address.trim()
-      if (/^naddr1/i.test(address)) {
-        try {
-          const decoded = nip19.decode(address.toLowerCase())
-          if (decoded.type !== 'naddr') throw new Error('not an naddr')
-          address = `${decoded.data.kind}:${decoded.data.pubkey}:${decoded.data.identifier}`
-        } catch {
-          throw new Refusal('address must be an naddr or "33331:<pubkey>:<d>".')
-        }
-      }
-      const m = /^33331:([0-9a-f]{64}):(.*)$/.exec(address)
-      if (!m) throw new Refusal('address must name a kind 33331 object: "33331:<pubkey hex>:<d>" or its naddr.')
-      const ref: Reference = ['a', address, '', '']
-      const object = await this.resolveReference(ref)
-      if (!object) throw new Refusal(`No event at ${address} on the configured relays.`)
+      const { address, object } = await this.publicObject(input.address)
       if (object.tags.some((t) => t[0] === 'encrypted')) throw new Refusal('That object is sealed to a place of its own; it cannot be placed elsewhere by reference. Place its payload instead.')
       const check = validateSnoPayload(JSON.parse(object.content || 'null'))
       if (!check.ok) throw new Refusal(`The object at ${address} is not valid SNO: ${check.errors.join(' ')}`)
@@ -1309,6 +1310,26 @@ export class Agent {
       return this.hideReference(referenceTo(object, at.position, at.plane, this.relays.canonical), at, input.height, `object "${check.shard.name}" by ${object.pubkey.slice(0, 8)}... (public, by reference)`)
     }
     throw new Refusal('Give either an object payload or the address of a published kind 33331 object.')
+  }
+
+  /** The newest event at a kind 33331 address ("33331:<pubkey>:<d>" or its naddr) on the configured relays. */
+  private async publicObject(given: string): Promise<{ address: string; object: NostrEvent }> {
+    let address = given.trim()
+    if (/^naddr1/i.test(address)) {
+      try {
+        const decoded = nip19.decode(address.toLowerCase())
+        if (decoded.type !== 'naddr') throw new Error('not an naddr')
+        address = `${decoded.data.kind}:${decoded.data.pubkey}:${decoded.data.identifier}`
+      } catch {
+        throw new Refusal('address must be an naddr or "33331:<pubkey>:<d>".')
+      }
+    }
+    const m = /^33331:([0-9a-f]{64}):(.*)$/.exec(address)
+    if (!m) throw new Refusal('address must name a kind 33331 object: "33331:<pubkey hex>:<d>" or its naddr.')
+    const ref: Reference = ['a', address, '', '']
+    const object = await this.resolveReference(ref)
+    if (!object) throw new Refusal(`No event at ${address} on the configured relays.`)
+    return { address, object }
   }
 
   /** Hide a reference entry in the agent's bag at a cube: the same read-before-write as hide. */
@@ -1326,6 +1347,68 @@ export class Agent {
     this.keys.noteBag({ lookupId: key.lookupId, bagId: bag.id, author: this.pubkey, createdAt, height, base: key.base, entries: opened.map((h) => this.summarize(h, key.lookupId)), missing: merged.filter(isReference).length - opened.filter((h) => h.ref).length, riddle: settings.riddle, hint: settings.hint, at: now })
     const text = `Placed ${what} in the h${height} cube at base x ${key.base.x} y ${key.base.y} z ${key.base.z}; bag ${bag.id.slice(0, 8)}... holds ${merged.length} entr${merged.length === 1 ? 'y' : 'ies'}. Key cost ${keyMs.toFixed(0)} ms. ${entry.accepted.length ? `Accepted by ${entry.accepted.join(', ')}.` : `No relay accepted it${result.ok ? '' : `: ${result.reason}`}.`}${entry.refused ? ` Refused by ${Object.entries(entry.refused).map(([u, r]) => `${u}: ${r}`).join('; ')}.` : ''}`
     return { text, data: { bagId: bag.id, lookupId: key.lookupId, cube: { height, base: key.base, plane: at.plane }, entries: merged.length, keyMs: Math.round(keyMs), accepted: entry.accepted, refused: entry.refused ?? {} } }
+  }
+
+  // ---- render -----------------------------------------------------------------
+
+  private rememberObject(id: string, shard: ShardModel): void {
+    this.objectsSeen.delete(id)
+    this.objectsSeen.set(id, shard)
+    while (this.objectsSeen.size > OBJECTS_REMEMBERED) this.objectsSeen.delete(this.objectsSeen.keys().next().value!)
+  }
+
+  /**
+   * A picture of an object, so an agent sees what it built (agents plan A3,
+   * ruling D12 B; arkinox, 2026-10-11): a payload it is about to place, an
+   * object it opened this session by the id find lists, or a public kind
+   * 33331 by its address. Drawn on this machine's CPU (render.ts); nothing is
+   * signed or published, and only an address asks a relay anything.
+   */
+  async render(input: { object?: unknown; id?: string; address?: string; view?: NamedView; yaw?: number; pitch?: number; size?: number }): Promise<ToolResult> {
+    const given = [input.object, input.id, input.address].filter((x) => x !== undefined).length
+    if (given !== 1) throw new Refusal('Give exactly one of: object (an SNO payload), id (an object find or look listed), or address (a public kind 33331).')
+    let shard: ShardModel
+    let source: string
+    if (input.object !== undefined) {
+      let raw = input.object
+      // A payload sent as a JSON string is read as the object it spells.
+      if (typeof raw === 'string') {
+        try { raw = JSON.parse(raw) } catch { throw new Refusal('object is a string that is not JSON; give the SNO payload as an object.') }
+      }
+      const v = validateSnoPayload(raw)
+      if (!v.ok) throw new Refusal(`Not drawn: the payload is not valid SNO. ${v.errors.join(' ')}`)
+      shard = v.shard
+      source = 'payload'
+    } else if (input.id !== undefined) {
+      const want = input.id.trim().toLowerCase()
+      if (!/^[0-9a-f]{8,64}$/.test(want)) throw new Refusal('id must be 8 to 64 hex characters of an object\'s id, as find lists it.')
+      const hits = [...this.objectsSeen.entries()].filter(([k]) => k.startsWith(want))
+      if (hits.length === 0) throw new Refusal(`No object with id ${want} among the ${this.objectsSeen.size} opened this session. Call find (or look) where it is first; objects are remembered in memory only, not across a restart.`)
+      if (hits.length > 1) throw new Refusal(`${hits.length} objects opened this session have ids starting ${want}; give more of the id.`)
+      shard = hits[0][1]
+      source = `id ${hits[0][0]}`
+    } else {
+      const { address, object } = await this.publicObject(String(input.address))
+      if (object.tags.some((t) => t[0] === 'encrypted')) throw new Refusal('That object is sealed to a place. Find it where it is hidden and render it by the id find lists.')
+      let raw: unknown
+      try { raw = JSON.parse(object.content || 'null') } catch { raw = null }
+      const check = validateSnoPayload(raw)
+      if (!check.ok) throw new Refusal(`The object at ${address} is not valid SNO, so it is not drawn: ${check.errors.join(' ')}`)
+      shard = check.shard
+      source = `address ${address}`
+    }
+    let r
+    try {
+      r = renderShard(shard, { view: input.view, yaw: input.yaw, pitch: input.pitch, size: input.size })
+    } catch (err) {
+      throw new Refusal(err instanceof Error ? err.message : String(err))
+    }
+    return {
+      // An object found in cyberspace was named by someone else.
+      text: source === 'payload' ? r.caption : `${r.caption} Its name is the author's text (untrusted).`,
+      images: [{ data: r.png.toString('base64'), mimeType: 'image/png' }],
+      data: { source, name: shard.name, mode: shard.mode, unit: shard.unit, vertices: r.vertices, faces: r.faces, bounds: r.bounds, view: r.view, size: r.size, backFacing: r.backFacing, partsNotDrawn: r.partsNotDrawn, pngBytes: r.png.length, ms: Math.round(r.ms) },
+    }
   }
 
   // ---- validate_object, budget, outbox -------------------------------------
