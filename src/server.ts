@@ -131,14 +131,14 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   server.registerTool('plan_hop', {
     title: 'Plan a hop',
-    description: 'Price the next step toward a target without moving: hop or sidestep, the heights involved, the terrain K, the expected seconds on this machine, whether it is within the caps, and how much of the route would remain. Call this before hop.',
+    description: 'Price the next step toward a target without moving: hop or sidestep, the heights involved, the terrain K, the expected seconds on this machine, whether it is within the caps, and how much of the route would remain. Refused when the step would land on the exact gibson a person (your operator, or anyone not known to be a bot) stands on; the refusal names the free gibson beside them. Call this before hop.',
     inputSchema: { target: coordinate },
     annotations: { readOnlyHint: true },
   }, async (args) => run(log, () => agent.planHop(args)))
 
   server.registerTool('hop', {
     title: 'Hop',
-    description: 'Move one step toward a target: confirms the live head, reserves it, computes the proof, confirms again, signs, publishes to the canonical relay and your relays, and records the result. On a fresh key with no chain it signs your spawn first. Refuses if the step exceeds the cap or the head moved. A target beyond a wall is reached one step per call; the result says how far remains.',
+    description: 'Move one step toward a target: confirms the live head, reserves it, computes the proof, confirms again, signs, publishes to the canonical relay and your relays, and records the result. On a fresh key with no chain it signs your spawn first. Refuses if the step exceeds the cap or the head moved, and never lands on the exact gibson a person stands on (the refusal names the free gibson beside them). A target beyond a wall is reached one step per call; the result says how far remains.',
     inputSchema: { target: coordinate, cap_seconds: z.number().positive().optional().describe('Your own cap on compute for this call, in seconds; the server\'s cap applies too.') },
     annotations: { readOnlyHint: false, destructiveHint: false },
   }, async (args) => run(log, () => agent.hop(args)))
@@ -260,9 +260,16 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   server.registerTool('orders_waiting', {
     title: 'Orders waiting',
-    description: 'Whether your operator has sent orders you have not read, counted by the same rules as inbox, without reading them or marking anything read, and the state of a ride computing in the background (ride: state, to, done, total). For the waker that starts your turn when a DM arrives or a ride is ready or stopped; in a turn, call inbox instead.',
+    description: 'Whether your operator has sent orders you have not read, counted by the same rules as inbox, without reading them or marking anything read; the state of a ride computing in the background (ride: state, to, done, total); and, with the follow watch on, your operator\'s newest move you have not seen (operatorMoved: to, plane, at, eventId, action, distance; null when none). For the waker that starts your turn when a DM arrives, a ride is ready or stopped, or your operator moves; in a turn, call inbox (and follow_operator) instead.',
     annotations: { readOnlyHint: true },
   }, async () => run(log, () => agent.ordersWaiting()))
+
+  server.registerTool('follow_operator', {
+    title: 'Follow your operator',
+    description: 'The follow watch. on: true watches your operator\'s movement (kind 3333, verified on their chain) and keeps watching across restarts; on: false stops it. Every call with the watch on reports where your operator is now, how far, the free gibson beside them to aim for (never their own gibson), and what plan_hop says about getting there within your caps, or that it needs a ride; it marks their newest move as seen. It never moves you: hop when your STRATEGY says to follow and the plan is within your caps, and tell your operator with message_operator when it is not. Only the operator your profile names, who follows you, is watched.',
+    inputSchema: { on: z.boolean().optional().describe('true turns the watch on, false turns it off; leave it out to report where your operator is.') },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  }, async (args) => run(log, () => agent.followOperator(args)))
 
   server.registerTool('message_operator', {
     title: 'Message your operator',
@@ -298,7 +305,9 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
           `3. Call station with destination${args.stop ? `: ${args.stop}` : ''} for the quote: how many blocks, how many seconds, how many calls. Agree the block with your human if none was named; any verified block is a stop.`,
           '4. Call board. You are on the line and have not moved.',
           `5. Call ride with to${args.stop ? `: ${args.stop}` : ''}. The ride computes in the background and the call returns at once: keep reading inbox and answering your operator meanwhile. When ride_status says the proof is ready, call ride with the same to again and it is signed. A HOLD from your operator means ride with pause: true; cancel: true releases the head if you must stop.`,
-          '6. At the stop, call look, say a line, and wait_for an arrival or a chat line addressed to you. Everyone who rides to that block arrives at the same coordinate.',
+          '6. At the stop, call look, say a line, and wait_for an arrival or a chat line addressed to you. Everyone who rides to that block arrives at the same coordinate: a ride exits exactly there, so sharing it is allowed, but when your human stands on that exact gibson step one gibson off (the ride result names the free one). Never hop onto a person\'s gibson; the tools refuse it.',
+          '',
+          'If your operator wants you to follow them, call follow_operator with on: true: when they move, your waker wakes you, and follow_operator says where they are and how to get beside them.',
           '',
           'Never spawn again to get closer, never ask for your human\'s key, quote every ride before spending work, and never try to hop to a far coordinate: plan_hop prices the crossing and refuses it.',
         ].join('\n'),

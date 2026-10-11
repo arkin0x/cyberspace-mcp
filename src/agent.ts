@@ -43,12 +43,14 @@ import { Outbox, type GuardVerdict } from './nostr/outbox.js'
 import { unwrapMessage, wrapMessage } from './nostr/dm.js'
 import { mergeAnswers } from './nostr/relayOutcome.js'
 import { DEFAULT_RELAY, GENERAL_RELAYS, Relays, normalizeRelay, type PublishResult } from './nostr/relays.js'
+import { OperatorWatch, type OperatorMove } from './follow.js'
 import { OperatorChannel } from './operator.js'
 import { Presence, neighborhoodFilter, sectorsApart, type Person } from './presence.js'
 import { profileTemplate, type ProfileFields, MAX_PICTURE_URL, pictureUrl, publishedFields } from './profile.js'
 import { validateSnoPayload } from './sno.js'
 import { hopCeiling, loadOrMeasure, projectCantorMs, type Calibration } from './space/calibration.js'
-import { describePlace, distanceBetween, parseCoordinate, placeOf, spawnPlace, type CoordinateInput, type Place } from './space/coords.js'
+import { describePlace, distanceBetween, distanceWords, parseCoordinate, placeFromHex, placeOf, spawnPlace, type CoordinateInput, type Place } from './space/coords.js'
+import { freeNeighbor } from './space/neighbors.js'
 import { planSummary, priceNextStep, type Ceilings, type PricedStep } from './space/plan.js'
 import { KeyStore, MAX_COMPUTE_HEIGHT, SCAN_MAX_HEIGHT, type EntrySummary, type HeldKey, type OpenedBag } from './space/regionKeys.js'
 import { StateDir } from './state/dir.js'
@@ -87,6 +89,8 @@ export interface AgentConfig {
 
 /** The highest cube a key is derived for on request (hide, find, look): a key at h16 is about a second. */
 export const MAX_KEY_HEIGHT = 16
+/** How long a ride's arrival waits for the relays to say who stands at the stop. */
+const FIXED_POINT_LOOK_MS = 2000
 /** The most candidate regions a hinted sweep will try. */
 const MAX_SWEEP_CANDIDATES = 1 << 16
 
@@ -124,6 +128,8 @@ export class Agent {
   readonly transit: Transit
   /** The private NIP-17 channel to the operator: inbox, message_operator, STRATEGY. */
   readonly operatorChannel: OperatorChannel
+  /** The follow watch: the operator's moves, verified, for follow_operator and orders_waiting (follow.ts). */
+  readonly follow: OperatorWatch
   calibration: Calibration
   private readonly dir: StateDir
   private readonly sk: Uint8Array
@@ -179,6 +185,12 @@ export class Agent {
         const ride = this.transit.rideState()
         return `Your operator's CONTINUE (KEEP GOING) renewed your session budget: a fresh ${this.budget.capSessionSeconds} s of work (the session before it spent ${spent.toFixed(1)} s). The cap itself is unchanged.${ride.state === 'paused_cap' ? ` Your ride to block ${ride.to} is paused at the cap: call ride with to: ${ride.to} to resume it from the cache.` : ''}`
       },
+    })
+    this.follow = new OperatorWatch({
+      relays: this.relays, dir,
+      operator: () => (this.operatorProblem() ? null : this.operatorOfProfile()),
+      follows: () => this.operatorChannel.operatorFollows(),
+      now: nowSeconds, log: this.log,
     })
   }
 
@@ -255,6 +267,8 @@ export class Agent {
     for (const d of dropped) this.log(`dropped ${d.event.id.slice(0, 8)}: ${d.dropped}`)
     this.settle()
     this.syncOperator()
+    // A watch left on keeps watching across a restart, and reads what the operator did meanwhile.
+    this.follow.refresh()
   }
 
   /**
@@ -462,6 +476,74 @@ export class Agent {
     return { text: report.text, data: { ...report.data, keyMs: Math.round(keyMs) } }
   }
 
+  // ---- nobody's gibson (arkinox, 2026-10-11) --------------------------------
+  //
+  // "don't ever let the agent land on the exact same gibson as the user,
+  // because that is uncomfortable. Unless the situation requires it (game
+  // entry, for example, enforces a single gibson entry point)." Every
+  // coordinate the agent chooses to land on (hop, plan_hop, the follow
+  // tool's aim) is checked against the people the server knows: the
+  // operator wherever the follow watch or presence last saw them, and every
+  // other avatar in the 27 sectors that is not known to be a bot (an
+  // unknown profile is protected; bots may share a gibson). There is no
+  // override. A point the protocol fixes (a ride exits exactly at its stop)
+  // is the one exception, and the ride's result says so (fixedPointNote).
+
+  /** Who stands where, by hex coordinate, from memory: the operator and every avatar nearby not known to be a bot. */
+  private occupants(): Map<string, { pubkey: string; words: string; unknown: boolean }> {
+    const out = new Map<string, { pubkey: string; words: string; unknown: boolean }>()
+    const operator = this.operatorOfProfile()
+    const seen = this.follow.latest()
+    for (const p of this.presence.others()) {
+      const isOperator = p.pubkey === operator
+      if (!isOperator && p.profile?.bot === true) continue
+      // Presence keeps the operator where they last were nearby; the watch's verified move, when newer, is where they are.
+      if (isOperator && seen && seen.at >= p.lastActive) continue
+      const name = p.profile?.name ? `${p.profile.name} (${p.pubkey.slice(0, 8)}...)` : `${p.pubkey.slice(0, 8)}...`
+      out.set(p.place.hex, { pubkey: p.pubkey, words: isOperator ? 'Your operator' : p.profile ? `The human ${name}` : `${name}, not known to be a bot,`, unknown: !isOperator && !p.profile })
+    }
+    if (seen && operator) out.set(seen.coordHex, { pubkey: operator, words: 'Your operator', unknown: false })
+    return out
+  }
+
+  /**
+   * Why the agent may not land on `landing`, or null: a person stands on
+   * that exact gibson. The refusal names the free gibson beside them that is
+   * cheapest from `from`, so the model can retry there in one call. With
+   * `fetch`, a profile not read yet is read first: a bot there is no bar.
+   */
+  private async gibsonRefusal(landing: Place, from: Place, fetch = true): Promise<string | null> {
+    let occ = this.occupants()
+    let who = occ.get(landing.hex)
+    if (who?.unknown && fetch) {
+      await this.presence.fetchProfiles()
+      occ = this.occupants()
+      who = occ.get(landing.hex)
+    }
+    if (!who) return null
+    const free = freeNeighbor(landing, from, new Set([...occ.keys(), landing.hex]))
+    return `${who.words} stands on ${landing.hex}, and you never land on the exact gibson a person stands on: it is uncomfortable for them. ${free ? (free.hex === from.hex ? 'You already stand beside it: stay.' : `Land beside them instead, at ${free.hex} (free, one gibson off): call plan_hop or hop with that target.`) : 'Every gibson beside it is taken; wait for them to move.'}`
+  }
+
+  /** The rule for one step: neither the target (a route toward a person's gibson is refused at its first step, not its last) nor where this step lands may be a person's gibson. */
+  private async landingRefusal(step: PricedStep, target: Place, from: Place, fetch = true): Promise<string | null> {
+    return (await this.gibsonRefusal(target, from, fetch)) ?? (step.to.hex !== target.hex ? this.gibsonRefusal(step.to, from, fetch) : null)
+  }
+
+  /**
+   * The exception, said where it applies: a point the protocol fixes (a ride
+   * exits exactly at its stop; a game's single entry gibson) may be shared,
+   * and when a person stands on it the agent is told to step one gibson off
+   * afterward, to the free neighbor plan_hop can price.
+   */
+  fixedPointNote(at: Place, why: string): { text: string; data: { why: string; sharedWith: string[]; stepOff: string | null } } {
+    const occ = this.occupants()
+    const who = occ.get(at.hex)
+    const free = who ? freeNeighbor(at, at, new Set([...occ.keys(), at.hex])) : null
+    const text = `${why} That is a single point the protocol fixes, so the rule against landing on a person's gibson yields here.${who ? ` ${who.words} stands on this exact gibson: step one gibson off now${free ? `, to ${free.hex} (plan_hop prices it)` : ''}.` : ''}`
+    return { text, data: { why, sharedWith: who ? [who.pubkey] : [], stepOff: free?.hex ?? null } }
+  }
+
   // ---- plan_hop and hop -----------------------------------------------------
 
   private target(input: CoordinateInput, from: Place): Place {
@@ -514,9 +596,13 @@ export class Agent {
   async planHop(input: { target: CoordinateInput }): Promise<ToolResult> {
     await this.refreshChain()
     const from = this.keeper.place()
-    const target = this.target(input.target, from)
+    return this.planFrom(from, this.target(input.target, from))
+  }
+
+  /** plan_hop from where the agent stands, the chain already refreshed. */
+  private async planFrom(from: Place, target: Place): Promise<ToolResult> {
     const step = priceNextStep(from, target, this.ceilings(), this.calibration)
-    const refusal = this.stepRefusal(step, target)
+    const refusal = this.stepRefusal(step, target) ?? (step ? await this.landingRefusal(step, target, from) : null)
     const plan = step ? this.describeStep(step, target) : null
     const chainWords = this.keeper.breakWords()
     const text = step
@@ -575,7 +661,7 @@ export class Agent {
     }
 
     const step = priceNextStep(from, target, this.ceilings(), this.calibration)
-    const refusal = this.stepRefusal(step, target, cap)
+    const refusal = this.stepRefusal(step, target, cap) ?? (step ? await this.landingRefusal(step, target, from) : null)
     if (refusal || !step) throw new Refusal(`${refusal ?? 'Nothing to do.'}${spawned ? ' Your spawn was signed and stands.' : ''}`)
 
     // Confirm the head, fresh, before any work; the head must be the one the plan was made from.
@@ -597,6 +683,9 @@ export class Agent {
     const again = await this.keeper.confirmHead()
     if (again) throw new Refusal(`${again} The proof (${seconds.toFixed(1)} s of work) was discarded unsigned.`)
     if (this.keeper.head()?.id !== head.id) throw new Refusal(`The head moved while the proof was computed: the relays hold a newer move (${this.keeper.head()?.id.slice(0, 8)}...), adopted now. The proof was discarded unsigned; plan again from where you stand.`)
+    // Someone may have stepped onto the landing gibson while the proof was computed: asked again from memory.
+    const arrived = await this.landingRefusal(step, target, from, false)
+    if (arrived) throw new Refusal(`${arrived} They arrived while the proof was computed, so it (${seconds.toFixed(1)} s of work) was discarded unsigned.`)
 
     const problem = chainTemplateProblem(template, this.pubkey)
     if (problem) throw new Error(`refusing to sign a malformed chain event: ${problem}`)
@@ -679,8 +768,14 @@ export class Agent {
   }
 
   /** Ride the line to a block: the work runs in the background, and the ride call after the proof is ready signs the hyperjump (DECK-0001 5). */
-  ride(input: { to?: number; budget_seconds?: number; wait_seconds?: number; as_of?: number; pause?: boolean; cancel?: boolean; forget?: boolean } = {}, signal?: AbortSignal): Promise<ToolResult> {
-    return this.transit.ride(input, signal)
+  async ride(input: { to?: number; budget_seconds?: number; wait_seconds?: number; as_of?: number; pause?: boolean; cancel?: boolean; forget?: boolean } = {}, signal?: AbortSignal): Promise<ToolResult> {
+    const result = await this.transit.ride(input, signal)
+    const where = result.data.where as { hex?: string } | undefined
+    if (result.data.action !== 'hyperjump' || !where?.hex) return result
+    // Arrived at the stop: who stands on it is asked of the relays, briefly, so a human there is seen before the agent is told to stay.
+    await Promise.race([this.presence.refresh(), new Promise((r) => setTimeout(r, FIXED_POINT_LOOK_MS))])
+    const note = this.fixedPointNote(placeFromHex(where.hex), `A ride exits exactly at its stop (DECK-0001), so you stand on the stop's own gibson.`)
+    return { text: `${result.text}\n${note.text}`, data: { ...result.data, fixedPoint: note.data } }
   }
 
   /** The ride in flight, if any. */
@@ -692,7 +787,21 @@ export class Agent {
 
   /** New orders from the operator since the last read, oldest first, the current STRATEGY, and the ignored count. Marks them read. */
   async ordersWaiting(): Promise<ToolResult> {
-    const result = await this.operatorChannel.ordersWaiting()
+    // The operator's newest unseen move, from memory (arkinox, 2026-10-11:
+    // the follow watch), so the waker can wake the agent when its operator
+    // moves. Read before the DM question, and kept when that question fails,
+    // so an unreachable DM inbox never hides a move.
+    this.follow.refresh()
+    const moved = this.follow.unseen()
+    const operatorMoved = moved ? this.moveData(moved) : null
+    const movedWords = operatorMoved ? ` Your operator moved: ${operatorMoved.action} to ${operatorMoved.to} (${operatorMoved.distance} from you). Call follow_operator to see the way there.` : ''
+    let result: ToolResult
+    try {
+      result = await this.operatorChannel.ordersWaiting()
+    } catch (err) {
+      if (!operatorMoved || !(err instanceof Refusal)) throw err
+      result = { text: `Could not count orders: ${err.message}`, data: { orders: null, ordersError: err.message } }
+    }
     // The ride's state rides along (arkinox, 2026-10-11), so the waker that
     // polls this can wake the agent when its proof is ready or its ride
     // stopped, without a second call. In memory; no relay is asked for it.
@@ -706,8 +815,83 @@ export class Agent {
       interrupted: 'interrupted by a restart: call ride to resume it',
     }
     const words = ride.state === null ? '' : ` A ride to block ${ride.to} is ${said[ride.state]}.`
-    return { text: `${result.text}${words}`, data: { ...result.data, ride } }
+    return { text: `${result.text}${words}${movedWords}`, data: { ...result.data, ride, operatorMoved } }
   }
+
+  /** A verified operator move as orders_waiting and follow_operator show it, with the distance from where the agent stands (from memory). */
+  private moveData(m: OperatorMove): { to: string; plane: number; planeName: string; at: number; eventId: string; action: string; distance: string } {
+    const there = placeFromHex(m.coordHex)
+    return { to: m.coordHex, plane: m.plane, planeName: m.plane === 0 ? 'dataspace' : 'ideaspace', at: m.at, eventId: m.eventId, action: m.action, distance: distanceWords(distanceBetween(this.keeper.place(), there)) }
+  }
+
+  // ---- follow_operator (follow.ts) ------------------------------------------
+
+  /**
+   * Turn the follow watch on or off, and report where the operator is now:
+   * how far, the free gibson beside them to aim for (never their own
+   * gibson), and what plan_hop says about getting there within the caps, or
+   * that it needs a ride. Marks the operator's newest move as seen. Never
+   * moves the agent.
+   */
+  async followOperator(input: { on?: boolean } = {}): Promise<ToolResult> {
+    if (input.on === false) {
+      this.follow.setOn(false)
+      return { text: 'Follow watch off: your operator\'s moves are no longer watched, and orders_waiting no longer reports them.', data: { on: false } }
+    }
+    const problem = this.operatorProblem()
+    if (problem) throw new Refusal(problem)
+    const op = this.operatorOfProfile()
+    if (!op) throw new Refusal('Your profile names no operator, so there is nobody to follow. Call identity with operator (your human\'s npub), or have the server started with --operator.')
+    if (input.on === true) this.follow.setOn(true)
+    const on = this.follow.on
+    if (!on) return { text: 'Follow watch off. Call follow_operator with on: true to watch your operator\'s moves and see where they are.', data: { on: false } }
+    const watchWords = 'Follow watch on: when your operator moves, orders_waiting reports it and your waker wakes you.'
+    // A fresh read of the operator's chain, the same read the watch runs on a move.
+    this.follow.refresh()
+    await this.follow.resolveNow()
+    const latest = this.follow.latest()
+    const notes = this.follow.notes().slice(-5).map((n) => n.text)
+    if (!latest) {
+      const text = [watchWords, 'Your operator\'s position is not known yet: no valid chain of theirs could be read and verified.', ...notes].join('\n')
+      return { text, data: { on, operator: nip19.npubEncode(op), position: null, notes } }
+    }
+    this.follow.acknowledge()
+    await this.refreshChain()
+    const me = this.keeper.place()
+    const there = placeFromHex(latest.coordHex)
+    const move = this.moveData(latest)
+    const taken = new Set(this.occupants().keys())
+    taken.add(there.hex)
+    const beside = freeNeighbor(there, me, taken)
+    if (!beside) throw new Refusal(`Every gibson beside your operator at ${latest.coordHex} is taken; wait for them to move.`)
+    const target = describePlace(beside)
+    const besideAlready = beside.hex === me.hex
+    const plan = besideAlready ? null : await this.planFrom(me, beside)
+    const needsRide = this.routeRefusal(me, placeFromHex(target.hex)) !== null
+    const advice = besideAlready
+      ? 'You already stand beside your operator: no move is needed.'
+      : needsRide
+        ? 'Too far to hop: a coordinate that distant is reached by riding the line to the stop nearest it (station, board, ride). Follow your STRATEGY; if you cannot reach them, tell your operator with message_operator.'
+        : plan!.data.refused
+          ? `Not within your caps: ${plan!.data.refused as string} Follow your STRATEGY; tell your operator with message_operator if you cannot follow.`
+          : `Within your caps: hop with target ${target.hex} to stand beside them (one step per hop call; plan_hop says how many remain). Moving is your decision, guided by your STRATEGY.`
+    const text = [
+      watchWords,
+      `Your operator is at ${latest.coordHex} (${move.planeName}), by a ${latest.action} signed ${new Date(latest.at * 1000).toISOString()} (event ${latest.eventId.slice(0, 8)}..., verified on their chain). From you: ${move.distance}.`,
+      `Aim for ${target.hex}, the free gibson beside them: never land on your operator's own gibson.`,
+      plan ? `plan_hop: ${plan.text}` : '',
+      advice,
+      ...notes.map((n) => `Note: ${n}`),
+    ].filter(Boolean).join('\n')
+    return {
+      text,
+      data: {
+        on, operator: nip19.npubEncode(op), position: { ...move, where: describePlace(there) }, beside: target, besideAlready, needsRide,
+        plan: plan ? { refused: plan.data.refused, plan: plan.data.plan } : null, notes,
+      },
+    }
+  }
+
 
   inbox(): Promise<ToolResult> {
     return this.operatorChannel.inbox()
@@ -1174,6 +1358,7 @@ export class Agent {
     // A ride computing in the background ends first, its finished leaves flushed to disk (arkinox, 2026-10-11).
     await this.transit.stop()
     this.outbox.stop()
+    this.follow.stop()
     this.operatorChannel.stop()
     this.chat.stop()
     this.presence.stop()

@@ -65,8 +65,8 @@ function newestSpawnId(events: NostrEvent[], pubkey?: string): string | null {
 /** The most extra questions one chain fetch asks to fill holes (chainGap). */
 const MAX_CHAIN_PAGES = 60
 
-/** A chain fetch that could not fill a hole: some event of the chain is on no relay asked. */
-class ChainGapError extends Error {
+/** A chain fetch that could not fill a hole: some event of the chain is on no relay asked. It carries what was fetched. */
+export class ChainGapError extends Error {
   constructor(readonly events: NostrEvent[]) {
     super(PARTIAL_CHAIN_REASON)
   }
