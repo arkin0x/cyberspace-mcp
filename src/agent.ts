@@ -672,6 +672,10 @@ export class Agent {
   // ---- inbox, message_operator (operator.ts) --------------------------------
 
   /** New orders from the operator since the last read, oldest first, the current STRATEGY, and the ignored count. Marks them read. */
+  ordersWaiting(): Promise<ToolResult> {
+    return this.operatorChannel.ordersWaiting()
+  }
+
   inbox(): Promise<ToolResult> {
     return this.operatorChannel.inbox()
   }

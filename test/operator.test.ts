@@ -177,6 +177,32 @@ describe('operator DMs', () => {
     await stop(a)
   }, 60_000)
 
+  it('orders_waiting counts the operator\'s unread orders, marks nothing read, and ignores strangers (arkinox, 2026-10-11)', async () => {
+    const w = world()
+    const opSk = generateSecretKey()
+    const op = getPublicKey(opSk)
+    const agentSk = generateSecretKey()
+    const me = getPublicKey(agentSk)
+    w.general.seed(sign(opSk, 10050, [['relay', INBOX]]), sign(opSk, 3, [['p', me]]))
+    const a = await start(w, dirWithKey(agentSk), op)
+    await a.identity({})
+
+    expect((await a.ordersWaiting()).data.orders).toBe(0)
+    w.inbox.seed(
+      nip17.wrapEvent(generateSecretKey(), { publicKey: me }, 'a stranger') as NostrEvent,
+      nip59.wrapEvent({ kind: 14, content: 'hold here', tags: [['p', me], ['agent', 'strategy']], created_at: nowSeconds() - 5 }, opSk, me) as NostrEvent,
+    )
+    const waiting = await a.ordersWaiting()
+    expect(waiting.data).toMatchObject({ orders: 1, strategy: true })
+    expect(waiting.text).toContain('Call inbox')
+    expect(waiting.text).not.toContain('hold here')
+    // Asked again, still waiting: nothing was marked read.
+    expect((await a.ordersWaiting()).data.orders).toBe(1)
+    expect((await a.inbox()).data.messages).toHaveLength(1)
+    expect((await a.ordersWaiting()).data.orders).toBe(0)
+    await stop(a)
+  }, 60_000)
+
   it('holds the operator\'s messages until the operator follows the agent', async () => {
     const w = world()
     const opSk = generateSecretKey()
