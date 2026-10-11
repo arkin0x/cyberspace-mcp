@@ -24,7 +24,7 @@ export const HEX_64 = /^[0-9a-f]{64}$/
  * published event carries it except auth events, which are proofs handed to
  * one server and never published.
  */
-const CLIENT_NAME = 'cyberspace-mcp'
+export const CLIENT_NAME = 'cyberspace-mcp'
 
 /** NIP-42 relay auth, Blossom upload auth, NIP-98 HTTP auth: never attributed. */
 const UNATTRIBUTED_KINDS = new Set([22242, 24242, 27235])

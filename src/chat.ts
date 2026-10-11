@@ -15,6 +15,19 @@
 // seconds, 500 characters, and the quiet rule: at most one unprompted line
 // per arrival, where a reply to a line that addressed the agent is never
 // unprompted.
+//
+// The agent answers chat only when it is addressed (arkinox, 2026-10-11:
+// "we don't want XOR to respond to every message I send in local chat. just
+// when I address him via tag"). A line addresses the agent when it mentions
+// it: a ["p", <agent hex>] tag on the inner event, as ONOSENDAI's Chat chip
+// writes for an @mention (PR #305, read first), a nostr:npub1 or nostr:nprofile1 of the agent in
+// the text (NIP-27), or the agent's name, npub or hex pubkey in the text (the
+// rule this file already had). Its operator is no exception: the operator's
+// unaddressed lines are context, never a call to speak. Every line is kept
+// and listen shows them all; the unread ones are counted for orders_waiting
+// (chatHeard), and only addressed ones say wake: the operator's at once, a
+// stranger's at most once per chatWakeMinutes, in total and per speaker, so
+// strangers cannot run up the agent's compute.
 
 import { EventEmitter } from 'node:events'
 import { nip19 } from 'nostr-tools'
@@ -47,6 +60,30 @@ export interface ChatLine {
   addressed: boolean
   /** When this server heard it. */
   heardAt: number
+  /** Not yet returned by listen. Lines kept before this field existed read as read. */
+  unread?: boolean
+}
+
+/** What orders_waiting says about chat, from memory: lines from others that listen has not returned yet. */
+export interface ChatHeard {
+  /** Unread lines from others. */
+  count: number
+  /** Unread lines from others that address the agent (a mention). */
+  addressed: number
+  /** Of those, the ones from the operator. */
+  addressedFromOperator: number
+  /** Unread lines that do not address the agent: context, never a reason to speak. */
+  unaddressed: number
+  /** Unread lines from the operator, addressed or not. */
+  fromOperator: number
+  /** The newest unread line's time as its sender signed it, or null. */
+  latestAt: number | null
+  /**
+   * Whether this report should wake the agent: "operator" for an addressed
+   * operator line not reported before, "stranger" for an addressed stranger
+   * line within the rate limit, or null. Each line wakes at most once.
+   */
+  wake: 'operator' | 'stranger' | null
 }
 
 interface ChatFile {
@@ -86,10 +123,16 @@ export function mergeLines(have: ChatLine[], add: ChatLine[]): ChatLine[] {
   return [...have, ...fresh].sort((a, b) => a.at - b.at).slice(-CHAT_MAX)
 }
 
-/** Whether a line names the agent: its name as a whole word, its npub, or its hex pubkey. */
+/** Whether a line names the agent: its name as a whole word, its npub (bare or nostr:), a nostr:nprofile of it, or its hex pubkey. */
 export function addressesMe(text: string, me: { pubkey: string; npub: string; name: string | null }): boolean {
   const lower = text.toLowerCase()
   if (lower.includes(me.npub) || lower.includes(me.pubkey)) return true
+  for (const m of lower.matchAll(/nprofile1[02-9ac-hj-np-z]+/g)) {
+    try {
+      const d = nip19.decode(m[0])
+      if (d.type === 'nprofile' && d.data.pubkey === me.pubkey) return true
+    } catch { /* not an nprofile */ }
+  }
   if (me.name && me.name.length >= 2) {
     const escaped = me.name.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`, 'i').test(lower)
@@ -97,9 +140,22 @@ export function addressesMe(text: string, me: { pubkey: string; npub: string; na
   return false
 }
 
+/** Whether an inner chat event mentions the agent: a p tag naming it (ONOSENDAI's @mention), or the text rules of addressesMe. */
+export function mentionsMe(inner: { tags: string[][]; content: string }, me: { pubkey: string; npub: string; name: string | null }): boolean {
+  if (inner.tags.some((t) => t[0] === 'p' && t[1] === me.pubkey)) return true
+  return addressesMe(inner.content, me)
+}
+
+/** The default least time between two wakes for strangers' lines, in minutes. */
+export const DEFAULT_CHAT_WAKE_MINUTES = 5
+
 interface ChatOptions {
   pubkey: string
   name: () => string | null
+  /** The locked operator, or null: whose lines are fromOperator. */
+  operator?: () => string | null
+  /** Least minutes between two wakes for strangers' addressed lines, in total and per speaker. */
+  wakeMinutes?: number
   sign: (template: EventTemplate) => NostrEvent
   log?: (line: string) => void
 }
@@ -117,6 +173,11 @@ export class Chat extends EventEmitter {
   private readonly npub: string
   /** Resolves when the current subscription has heard a relay say EOSE: it is listening. */
   private listeningPromise: Promise<void> = Promise.resolve()
+  /** Lines already reported as wake, so each wakes at most once. In memory: a restart may wake once more, within the limits. */
+  private readonly woken = new Set<string>()
+  /** When a stranger's line last woke the agent, in total and per speaker. */
+  private lastStrangerWake: number | null = null
+  private readonly lastSpeakerWake = new Map<string, number>()
 
   constructor(
     private readonly dir: StateDir,
@@ -232,7 +293,7 @@ export class Chat extends EventEmitter {
     const me = { pubkey: this.me.pubkey, npub: this.npub, name: this.me.name() }
     const add = inners.map((e): ChatLine => ({
       id: e.id, from: e.pubkey, text: e.content.slice(0, MAX_CHAT_LENGTH), at: e.created_at, region, height: key.height,
-      mine: e.pubkey === this.me.pubkey, addressed: e.pubkey !== this.me.pubkey && addressesMe(e.content, me), heardAt: now,
+      mine: e.pubkey === this.me.pubkey, addressed: e.pubkey !== this.me.pubkey && mentionsMe(e, me), heardAt: now, unread: e.pubkey !== this.me.pubkey,
     }))
     const before = this.lines
     this.lines = mergeLines(before, add)
@@ -247,9 +308,63 @@ export class Chat extends EventEmitter {
   heard(since: number | 'last', now: number = nowSeconds()): ChatLine[] {
     const from = since === 'last' ? (this.lastListenAt ?? 0) : since
     const out = this.lines.filter((l) => l.heardAt >= from || l.at >= from)
+    const read = new Set(out.map((l) => l.id))
+    // Returned is read: what orders_waiting counts as unread is what listen has not shown.
+    this.lines = this.lines.map((l) => (l.unread && read.has(l.id) ? { ...l, unread: false } : l))
     this.lastListenAt = now
     this.save()
     return out
+  }
+
+  /** The locked operator's pubkey, or null. */
+  operator(): string | null {
+    return this.me.operator?.() ?? null
+  }
+
+  /**
+   * The unread lines from others, counted from memory, and whether to wake
+   * the agent for them (orders_waiting's chatHeard). Only addressed lines
+   * wake: the operator's at once, each once; a stranger's only when no
+   * stranger's line woke the agent in the last wakeMinutes and this speaker's
+   * did not either. A report that says wake records it, so the next poll
+   * does not repeat it.
+   */
+  unreadSummary(now: number = nowSeconds()): ChatHeard {
+    const op = this.operator()
+    // Bounded by the lines kept: an id whose line has been dropped cannot wake again.
+    if (this.woken.size > CHAT_MAX) {
+      const kept = new Set(this.lines.map((l) => l.id))
+      for (const id of this.woken) if (!kept.has(id)) this.woken.delete(id)
+    }
+    const unread = this.lines.filter((l) => l.unread && !l.mine)
+    const addressed = unread.filter((l) => l.addressed)
+    const fresh = addressed.filter((l) => !this.woken.has(l.id))
+    const windowS = (this.me.wakeMinutes ?? DEFAULT_CHAT_WAKE_MINUTES) * 60
+    let wake: ChatHeard['wake'] = null
+    const fromOp = fresh.filter((l) => op !== null && l.from === op)
+    if (fromOp.length > 0) {
+      wake = 'operator'
+      for (const l of fromOp) this.woken.add(l.id)
+    } else if (this.lastStrangerWake === null || now - this.lastStrangerWake >= windowS) {
+      const due = fresh.filter((l) => {
+        const last = this.lastSpeakerWake.get(l.from)
+        return last === undefined || now - last >= windowS
+      })
+      if (due.length > 0) {
+        wake = 'stranger'
+        this.lastStrangerWake = now
+        for (const l of due) { this.woken.add(l.id); this.lastSpeakerWake.set(l.from, now) }
+      }
+    }
+    return {
+      count: unread.length,
+      addressed: addressed.length,
+      addressedFromOperator: addressed.filter((l) => op !== null && l.from === op).length,
+      unaddressed: unread.length - addressed.length,
+      fromOperator: unread.filter((l) => op !== null && l.from === op).length,
+      latestAt: unread.length ? Math.max(...unread.map((l) => l.at)) : null,
+      wake,
+    }
   }
 
   stop(): void {
