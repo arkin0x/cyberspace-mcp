@@ -75,6 +75,8 @@ export class FakeRelay {
   readonly published: NostrEvent[] = []
   /** Every message received, parsed, for assertions. */
   readonly received: unknown[][] = []
+  /** Called with every event a client publishes and the relay takes: a service listening on the relay (a fake NWC wallet). */
+  readonly onPublished: Array<(ev: NostrEvent) => void> = []
   private readonly conns = new Set<Connection>()
 
   constructor(url: string, policy: Partial<FakePolicy> = {}) {
@@ -192,6 +194,7 @@ export class FakeRelay {
       this.published.push(ev)
       this.reply(conn, ['OK', ev.id, true, fresh ? '' : 'duplicate: already have this event'])
       if (fresh) this.fan(ev)
+      if (fresh) for (const listen of this.onPublished) listen(ev)
       return
     }
     if (verb === 'AUTH') {

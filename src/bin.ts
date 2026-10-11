@@ -8,7 +8,7 @@
 
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { Agent } from './agent.js'
-import { parseArgs, readFileConfig, settingsFrom, USAGE } from './config.js'
+import { parseArgs, readFileConfig, readWalletFile, settingsFrom, USAGE } from './config.js'
 import { createServer } from './server.js'
 import { LockHeldError } from './state/dir.js'
 
@@ -33,7 +33,7 @@ async function main(): Promise<void> {
   }
   let settings
   try {
-    settings = settingsFrom(args, args.state ? readFileConfig(args.state) : {})
+    settings = settingsFrom(args, args.state ? readFileConfig(args.state) : {}, args.state ? readWalletFile(args.state) : {})
   } catch (err) {
     process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n\n${USAGE}\n`)
     process.exit(2)
