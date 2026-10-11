@@ -4,8 +4,9 @@
 //
 //   - The rumor is a kind 14, unsigned (id computed, no sig), pubkey the
 //     sender, tags one p tag naming the recipient, plus ["agent", "strategy"]
-//     when the message is a STRATEGY (standing orders). created_at is the
-//     real time.
+//     when the message is a STRATEGY (standing orders), or ["agent",
+//     "continue"] when it is a CONTINUE (KEEP GOING: renew the session
+//     budget; arkinox, 2026-10-11). created_at is the real time.
 //   - The seal is a kind 13 signed by the sender, tags empty (no client tag:
 //     a seal reveals nothing), content the rumor JSON encrypted with NIP-44
 //     v2 from the sender's key to the recipient. created_at is randomized up
@@ -33,6 +34,13 @@ export const WRAP_KIND = 1059
 export const DM_RELAYS_KIND = 10050
 /** The marker tag of a STRATEGY: the operator's standing orders. */
 export const STRATEGY_TAG = ['agent', 'strategy'] as const
+/**
+ * The marker tag of a CONTINUE: the operator's KEEP GOING, which renews the
+ * agent's session budget (arkinox, 2026-10-11: "if XOR runs out of time
+ * budget, I want to be able to tell him keep going"). Only the tag counts;
+ * the words "keep going" without it renew nothing.
+ */
+export const CONTINUE_TAG = ['agent', 'continue'] as const
 /** How far into the past a seal's and a wrap's created_at may be pushed (NIP-59: up to two days). */
 export const MAX_BACKDATE_SECONDS = 2 * 24 * 60 * 60
 
@@ -52,9 +60,10 @@ export function randomPast(now: number, random: () => number = Math.random): num
 }
 
 /** The rumor of one message from `senderPubkey` to `recipient`. */
-export function createRumor(input: { senderPubkey: string; recipient: string; text: string; strategy?: boolean; createdAt: number }): Rumor {
+export function createRumor(input: { senderPubkey: string; recipient: string; text: string; strategy?: boolean; continue?: boolean; createdAt: number }): Rumor {
   const tags: string[][] = [['p', input.recipient]]
   if (input.strategy) tags.push([...STRATEGY_TAG])
+  if (input.continue) tags.push([...CONTINUE_TAG])
   const unsigned = { pubkey: input.senderPubkey, created_at: input.createdAt, kind: RUMOR_KIND, tags, content: input.text }
   return { id: getEventHash(unsigned), ...unsigned }
 }
@@ -153,6 +162,11 @@ export function unwrapMessage(wrap: NostrEvent, recipientSk: Uint8Array): Unwrap
 /** Whether a rumor carries the STRATEGY marker. */
 export function isStrategy(rumor: Pick<Rumor, 'tags'>): boolean {
   return rumor.tags.some((t) => t[0] === STRATEGY_TAG[0] && t[1] === STRATEGY_TAG[1])
+}
+
+/** Whether a rumor carries the CONTINUE marker. */
+export function isContinue(rumor: Pick<Rumor, 'tags'>): boolean {
+  return rumor.tags.some((t) => t[0] === CONTINUE_TAG[0] && t[1] === CONTINUE_TAG[1])
 }
 
 /** The relays a kind 10050 names, valid ws(s) URLs only, in the order listed, each once. */

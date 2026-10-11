@@ -90,6 +90,14 @@ export interface RideRunOptions {
   budgetSeconds: number
   signal?: AbortSignal
   onProgress?: (progress: RideProgress) => void
+  /**
+   * A cut asked from outside, looked for wherever the budget is (between
+   * leaves and attempts, and on a timer while threads work): true ends the
+   * call as a spent budget does, `done: false` with everything on disk. A
+   * ride in the background uses it for the session cap, which other tools
+   * spend from while it computes (arkinox, 2026-10-11).
+   */
+  stop?: () => boolean
 }
 
 export interface RideRunnerOptions {
@@ -115,6 +123,8 @@ export const GRIND_CHUNK = 8
 /** How long the pool waits, after the deadline, for threads to finish the leaf in hand before terminating them. */
 const GRACE_MS = 1500
 const FLUSH_INTERVAL_MS = 250
+/** How often the pool looks for a cut while no thread posts. */
+const CUT_POLL_MS = 250
 const FLUSH_BATCH = 500
 const PROGRESS_INTERVAL_MS = 100
 /** Below this many fresh leaves (or attempts) the rate estimate is noise; report no ETA. */
@@ -161,6 +171,11 @@ function abortError(): Error {
   const err = new Error('aborted')
   err.name = 'AbortError'
   return err
+}
+
+/** One turn of the event loop: timers, I/O and other tool calls run before the next leaf. */
+function yieldToLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve))
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
@@ -398,6 +413,10 @@ export class RideRunner {
 
     const started = this.now()
     const deadline = started + Math.max(0, options.budgetSeconds) * 1000
+    // The budget, or a cut asked from outside (the session cap for a ride
+    // computing in the background, arkinox, 2026-10-11): either ends the
+    // call the same way, with everything computed on disk.
+    const past = (): boolean => this.now() >= deadline || options.stop?.() === true
     const signal = options.signal
     throwIfAborted(signal)
     const notes: string[] = []
@@ -423,7 +442,7 @@ export class RideRunner {
       const cut = (): RideRunResult => ({ done: false, progress: progress.snapshot(), workSeconds: workSeconds() })
 
       if (pending.length > 0) {
-        const outcome = await this.computeLeaves(prev, pending, leafHexByHeight, progress, deadline, signal)
+        const outcome = await this.computeLeaves(prev, pending, leafHexByHeight, progress, past, signal)
         if (outcome === 'cut') return cut()
       }
 
@@ -437,7 +456,7 @@ export class RideRunner {
       const rootHex = bytesToHex(tree.root)
       const from = this.cache.readGrind(prev, rootHex)
       progress.priceStart(from)
-      const found = await this.searchNonce(prev, rootHex, attemptsExpected, from, progress, deadline, signal)
+      const found = await this.searchNonce(prev, rootHex, attemptsExpected, from, progress, past, signal)
       if (found === null) return cut()
       const proof = rideProofFor(tree, BigInt(found.nonce), found.G)
 
@@ -455,7 +474,7 @@ export class RideRunner {
       }
       notes.push(`the finished proof did not verify (${verification.reason}); the cached leaves and price search for this ride were discarded, and the ride is recomputed from scratch`)
       this.cache.forget(prev)
-      if (this.now() >= deadline) return cut()
+      if (past()) return cut()
     }
     throw new Error('the ride was recomputed from scratch and its proof still does not verify: a bug in the ride code, not in the cache')
   }
@@ -466,7 +485,7 @@ export class RideRunner {
     pending: Block[],
     out: Map<number, string>,
     progress: ProgressReporter,
-    deadline: number,
+    past: () => boolean,
     signal: AbortSignal | undefined,
   ): Promise<PoolOutcome> {
     const persister = new LeafPersister(this.cache, prev, this.now)
@@ -477,13 +496,16 @@ export class RideRunner {
     }
     try {
       if (this.threads === 0) {
-        // Same semantics, sequential, with a microtask yield per leaf so an
-        // abort flagged between leaves is honored promptly.
+        // Same semantics, sequential, with a yield to the event loop per
+        // leaf (a macrotask, not a microtask: arkinox, 2026-10-11), so an
+        // abort flagged between leaves is honored promptly and the server's
+        // other tools answer between leaves while a ride computes in the
+        // background on this thread.
         for (const { height, blockHash } of pending) {
           throwIfAborted(signal)
-          if (this.now() >= deadline) return 'cut'
+          if (past()) return 'cut'
           landed(height, bytesToHex(computeRideLeaf(prev, height, blockHash)))
-          await Promise.resolve()
+          await yieldToLoop()
         }
         return 'finished'
       }
@@ -495,7 +517,7 @@ export class RideRunner {
           if (msg.type === 'leaf') landed(msg.height, msg.leafHex)
           return 'continue'
         },
-      }, deadline, signal)
+      }, past, signal)
     } finally {
       persister.flush()
     }
@@ -508,7 +530,7 @@ export class RideRunner {
     attempts: number,
     from: number,
     progress: ProgressReporter,
-    deadline: number,
+    past: () => boolean,
     signal: AbortSignal | undefined,
   ): Promise<Found | null> {
     const checkpoint = new GrindPersister(this.cache, prev, rootHex, this.now)
@@ -517,7 +539,7 @@ export class RideRunner {
         const root = hexToBytes(rootHex)
         for (let nonce = from; ; nonce++) {
           throwIfAborted(signal)
-          if (this.now() >= deadline) {
+          if (past()) {
             checkpoint.set(nonce)
             return null
           }
@@ -528,7 +550,7 @@ export class RideRunner {
             return { nonce, G }
           }
           checkpoint.set(nonce + 1)
-          await Promise.resolve()
+          await yieldToLoop()
         }
       }
       // Disjoint nonce ranges pulled in order, the first nonce meeting the
@@ -560,7 +582,7 @@ export class RideRunner {
           ranges.delete(id)
           checkpoint.set(grindCheckpoint(ranges.values(), nextStart))
         },
-      }, deadline, signal)
+      }, past, signal)
       if (found !== null) return found
       if (outcome === 'finished') throw new Error('the price search ended without a nonce')
       return null
@@ -576,7 +598,7 @@ export class RideRunner {
    * deadline passed and every thread stopped at the flag or the grace ran
    * out. A thread error or crash rejects; the signal rejects with AbortError.
    */
-  private runPool(size: number, handlers: PoolHandlers, deadline: number, signal: AbortSignal | undefined): Promise<PoolOutcome> {
+  private runPool(size: number, handlers: PoolHandlers, past: () => boolean, signal: AbortSignal | undefined): Promise<PoolOutcome> {
     return new Promise<PoolOutcome>((resolve, reject) => {
       const stopBuffer = new SharedArrayBuffer(4)
       const stop = new Int32Array(stopBuffer)
@@ -586,10 +608,16 @@ export class RideRunner {
       let inFlight = 0
       let nextId = 0
       let grace: ReturnType<typeof setTimeout> | null = null
+      // The cut is also looked for on a timer, not only when a thread posts:
+      // when every thread is deep in a heavy leaf (2^22 pairings is many
+      // seconds), nothing posts, and a cut asked from outside would wait for
+      // the next leaf to be seen (arkinox, 2026-10-11).
+      const watch = setInterval(() => { if (!settled && !cutting && past()) cut() }, CUT_POLL_MS)
 
       const settle = (outcome: PoolOutcome | Error): void => {
         if (settled) return
         settled = true
+        clearInterval(watch)
         Atomics.store(stop, 0, 1)
         if (grace !== null) clearTimeout(grace)
         signal?.removeEventListener('abort', onAbort)
@@ -609,7 +637,7 @@ export class RideRunner {
       }
       const assign = (worker: Worker): void => {
         if (settled) return
-        if (!cutting && this.now() >= deadline) cut()
+        if (!cutting && past()) cut()
         if (cutting) {
           if (inFlight === 0) settle('cut')
           return
@@ -629,7 +657,7 @@ export class RideRunner {
         return
       }
       // A budget already spent starts no thread: starting one costs more than the nothing it would be allowed to do.
-      if (this.now() >= deadline) {
+      if (past()) {
         settle('cut')
         return
       }
@@ -653,7 +681,7 @@ export class RideRunner {
             return
           }
           if (handlers.onMessage(msg) === 'finish') settle('finished')
-          else if (!cutting && this.now() >= deadline) cut()
+          else if (!cutting && past()) cut()
         })
         // A crashed thread never posts again; without this the ride would
         // hang silently one chunk short of done.

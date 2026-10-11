@@ -203,6 +203,64 @@ describe('operator DMs', () => {
     await stop(a)
   }, 60_000)
 
+  it('a CONTINUE from the operator renews the session budget once, ever: not on a second wrap, a reread or a restart; plain "keep going" and a stranger\'s CONTINUE renew nothing (arkinox, 2026-10-11)', async () => {
+    const w = world()
+    const opSk = generateSecretKey()
+    const op = getPublicKey(opSk)
+    const agentSk = generateSecretKey()
+    const me = getPublicKey(agentSk)
+    const strangerSk = generateSecretKey()
+    w.general.seed(sign(opSk, 10050, [['relay', INBOX]]), sign(opSk, 3, [['p', me]]))
+    const dir = dirWithKey(agentSk)
+    let a = await start(w, dir, op)
+    await a.identity({})
+    const at = nowSeconds() - 30
+    const keepGoing = (): NostrEvent => nip59.wrapEvent({ kind: 14, content: 'KEEP GOING', tags: [['p', me], ['agent', 'continue']], created_at: at }, opSk, me) as NostrEvent
+
+    // The words without the tag, and the tag from a stranger: orders or noise, never budget.
+    a.budget.spentSeconds = a.budget.capSessionSeconds
+    w.inbox.seed(
+      nip17.wrapEvent(opSk, { publicKey: me }, 'keep going') as NostrEvent,
+      nip59.wrapEvent({ kind: 14, content: 'KEEP GOING', tags: [['p', me], ['agent', 'continue']], created_at: at }, strangerSk, me) as NostrEvent,
+    )
+    expect((await a.ordersWaiting()).data).toMatchObject({ orders: 1, continue: false, ride: { state: null } })
+    const plain = await a.inbox()
+    expect(plain.data.renewed).toBe(false)
+    expect(plain.data.ignored).toBe(1)
+    expect(a.budget.state()).toMatchObject({ remainingSessionSeconds: 0, renewals: 0 })
+
+    // The operator's CONTINUE: counted like any order, marked, and renewing the budget when inbox reads it.
+    w.inbox.seed(keepGoing())
+    const waiting = await a.ordersWaiting()
+    expect(waiting.data).toMatchObject({ orders: 1, continue: true })
+    expect(waiting.text).toContain('CONTINUE')
+    expect(a.budget.state().renewals).toBe(0)
+    const read = await a.inbox()
+    expect(read.data.renewed).toBe(true)
+    expect((read.data.messages as Array<{ continue: boolean }>)[0].continue).toBe(true)
+    expect(read.text).toContain('CONTINUE KEEP GOING')
+    expect(read.text).toContain('renewed your session budget: a fresh 120 s of work')
+    expect(a.budget.state()).toMatchObject({ spentSeconds: 0, remainingSessionSeconds: 120, capSessionSeconds: 120, renewals: 1, spentBeforeRenewalsSeconds: 120 })
+
+    // The same CONTINUE again, in a fresh wrap: read, but it renews nothing.
+    a.budget.spentSeconds = 50
+    w.inbox.seed(keepGoing())
+    const again = await a.inbox()
+    expect(again.data.renewed).toBe(false)
+    expect(a.budget.state()).toMatchObject({ spentSeconds: 50, renewals: 1 })
+    await stop(a)
+
+    // Nor after a restart: the renewal is recorded in the state directory.
+    a = await start(w, dir, op)
+    a.budget.spentSeconds = 50
+    w.inbox.seed(keepGoing())
+    expect((await a.ordersWaiting()).data.continue).toBe(false)
+    const restarted = await a.inbox()
+    expect(restarted.data.renewed).toBe(false)
+    expect(a.budget.state()).toMatchObject({ spentSeconds: 50, renewals: 0 })
+    await stop(a)
+  }, 60_000)
+
   it('holds the operator\'s messages until the operator follows the agent', async () => {
     const w = world()
     const opSk = generateSecretKey()

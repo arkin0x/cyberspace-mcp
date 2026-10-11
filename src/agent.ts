@@ -171,6 +171,14 @@ export class Agent {
       wrap: (recipient, text) => wrapMessage({ senderSk: this.sk, recipient, text, now: nowSeconds() }),
       unwrap: (wrap) => unwrapMessage(wrap, this.sk),
       now: nowSeconds, log: this.log, maxWaitMs: config.relayMaxWaitMs,
+      // The operator's CONTINUE (KEEP GOING), and only it, renews the session budget (arkinox, 2026-10-11).
+      renew: () => {
+        const spent = this.budget.spentSeconds
+        this.budget.renew()
+        this.log(`session budget renewed by the operator's CONTINUE (renewal ${this.budget.renewals})`)
+        const ride = this.transit.rideState()
+        return `Your operator's CONTINUE (KEEP GOING) renewed your session budget: a fresh ${this.budget.capSessionSeconds} s of work (the session before it spent ${spent.toFixed(1)} s). The cap itself is unchanged.${ride.state === 'paused_cap' ? ` Your ride to block ${ride.to} is paused at the cap: call ride with to: ${ride.to} to resume it from the cache.` : ''}`
+      },
     })
   }
 
@@ -659,8 +667,8 @@ export class Agent {
     return this.transit.board(input)
   }
 
-  /** Ride the line to a block, over as many calls as the caps need; a hyperjump is signed when the proof is done (DECK-0001 5). */
-  ride(input: { to?: number; budget_seconds?: number; as_of?: number; cancel?: boolean; forget?: boolean } = {}, signal?: AbortSignal): Promise<ToolResult> {
+  /** Ride the line to a block: the work runs in the background, and the ride call after the proof is ready signs the hyperjump (DECK-0001 5). */
+  ride(input: { to?: number; budget_seconds?: number; wait_seconds?: number; as_of?: number; pause?: boolean; cancel?: boolean; forget?: boolean } = {}, signal?: AbortSignal): Promise<ToolResult> {
     return this.transit.ride(input, signal)
   }
 
@@ -672,8 +680,22 @@ export class Agent {
   // ---- inbox, message_operator (operator.ts) --------------------------------
 
   /** New orders from the operator since the last read, oldest first, the current STRATEGY, and the ignored count. Marks them read. */
-  ordersWaiting(): Promise<ToolResult> {
-    return this.operatorChannel.ordersWaiting()
+  async ordersWaiting(): Promise<ToolResult> {
+    const result = await this.operatorChannel.ordersWaiting()
+    // The ride's state rides along (arkinox, 2026-10-11), so the waker that
+    // polls this can wake the agent when its proof is ready or its ride
+    // stopped, without a second call. In memory; no relay is asked for it.
+    const ride = this.transit.rideState()
+    const said: Record<string, string> = {
+      computing: `computing (${ride.done} of ${ride.total} leaves)`,
+      ready: 'ready to sign: call ride',
+      paused: 'paused',
+      paused_cap: 'paused at the session cap',
+      failed: `stopped on an error (${ride.reason})`,
+      interrupted: 'interrupted by a restart: call ride to resume it',
+    }
+    const words = ride.state === null ? '' : ` A ride to block ${ride.to} is ${said[ride.state]}.`
+    return { text: `${result.text}${words}`, data: { ...result.data, ride } }
   }
 
   inbox(): Promise<ToolResult> {
@@ -1138,6 +1160,8 @@ export class Agent {
   async stop(): Promise<void> {
     if (this.stopped) return
     this.stopped = true
+    // A ride computing in the background ends first, its finished leaves flushed to disk (arkinox, 2026-10-11).
+    await this.transit.stop()
     this.outbox.stop()
     this.operatorChannel.stop()
     this.chat.stop()

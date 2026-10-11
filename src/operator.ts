@@ -19,6 +19,14 @@
 //   - STRATEGY. The newest operator message carrying ["agent", "strategy"]
 //     is the agent's standing orders, kept in the state directory so a
 //     restart keeps it.
+//   - CONTINUE (arkinox, 2026-10-11). An operator message carrying
+//     ["agent", "continue"], read by inbox under the same rules, renews the
+//     session budget (a fresh session of the configured cap; the cap is
+//     never raised). Each such message renews once, ever: its rumor id is
+//     recorded in the state directory before the inbox answers, so a second
+//     wrap of it, a reread or a restart renews nothing. The words "keep
+//     going" without the tag renew nothing, so neither the model nor text
+//     read in cyberspace can grant budget.
 //
 // The key stays in the agent: this module gets a wrap and an unwrap function,
 // never the secret. Nothing here logs a message's text.
@@ -26,7 +34,7 @@
 import { nip19 } from 'nostr-tools'
 import type { Filter } from 'nostr-tools/filter'
 import { normalizeURL } from 'nostr-tools/utils'
-import { DM_RELAYS_KIND, MAX_BACKDATE_SECONDS, WRAP_KIND, dmRelaysOf, isStrategy, sameRelaySet, type Unwrapped, type WrappedMessage } from './nostr/dm.js'
+import { DM_RELAYS_KIND, MAX_BACKDATE_SECONDS, WRAP_KIND, dmRelaysOf, isContinue, isStrategy, sameRelaySet, type Unwrapped, type WrappedMessage } from './nostr/dm.js'
 import type { EventTemplate, NostrEvent } from './nostr/event.js'
 import { mergeAnswers, type RelayAnswer } from './nostr/relayOutcome.js'
 import { normalizeRelay, type Relays } from './nostr/relays.js'
@@ -54,6 +62,8 @@ export interface OperatorMessage {
   at: number
   text: string
   strategy: boolean
+  /** The operator's CONTINUE (KEEP GOING), which renews the session budget. */
+  continue: boolean
 }
 
 export interface Strategy {
@@ -78,9 +88,13 @@ interface DmsFile {
   ignoredTotal: number
   /** The agent's kind 10050 as this server last published it. */
   published: { relays: string[]; eventId: string; at: number; accepted: string[] } | null
+  /** CONTINUE orders that renewed the session budget, by rumor id, with our clock at the renewal: each renews once, ever. */
+  renewals: Record<string, number>
 }
 
-const EMPTY: DmsFile = { version: 1, strategy: null, seen: {}, waiting: {}, lastReadAt: null, ignoredTotal: 0, published: null }
+const EMPTY: DmsFile = { version: 1, strategy: null, seen: {}, waiting: {}, lastReadAt: null, ignoredTotal: 0, published: null, renewals: {} }
+/** How many renewals are remembered; older ones fall long before any read window could return their wraps. */
+const RENEWALS_KEPT = 500
 
 /** A relay URL as the relay client keys it, or null when it is not a ws(s) URL with a real host. */
 export function normalizeDmRelay(url: string): string | null {
@@ -124,6 +138,8 @@ export interface OperatorChannelDeps {
   now: () => number
   log: (line: string) => void
   maxWaitMs?: number
+  /** Renew the session budget for the operator's CONTINUE; returns the sentence that says what was renewed. */
+  renew?: () => string
 }
 
 /** The newest event of a kind by an author among these; relays may answer with anything, so both are checked. */
@@ -286,7 +302,7 @@ export class OperatorChannel {
       if (rumor.pubkey !== operator || !toMe) { this.state.seen[wrap.id] = wrap.created_at; ignored++; continue }
       if (!following) { this.state.waiting[wrap.id] = wrap.created_at; if (!wasWaiting) waiting++; continue }
       this.state.seen[wrap.id] = wrap.created_at
-      orders.push({ id: rumor.id, at: rumor.created_at, text: rumor.content, strategy: isStrategy(rumor) })
+      orders.push({ id: rumor.id, at: rumor.created_at, text: rumor.content, strategy: isStrategy(rumor), continue: isContinue(rumor) })
     }
     // The same rumor can come in more than one wrap; it is one order.
     const unique = [...new Map(orders.map((o) => [o.id, o])).values()].sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : 1))
@@ -295,16 +311,23 @@ export class OperatorChannel {
     if (newestStrategy && (!current || newestStrategy.at > current.at || (newestStrategy.at === current.at && newestStrategy.id !== current.id && newestStrategy.id > current.id))) {
       this.state.strategy = { id: newestStrategy.id, text: newestStrategy.text, at: newestStrategy.at, from: operator }
     }
+    // CONTINUE: each renews once, ever, recorded with the read marks in the same save.
+    const renewing = this.deps.renew ? unique.filter((o) => o.continue && this.state.renewals[o.id] === undefined) : []
+    for (const o of renewing) this.state.renewals[o.id] = now
+    const kept = Object.entries(this.state.renewals).sort((a, b) => b[1] - a[1]).slice(0, RENEWALS_KEPT)
+    this.state.renewals = Object.fromEntries(kept)
     this.state.ignoredTotal += ignored
     this.state.lastReadAt = now
     this.prune()
     this.save()
+    const renewed = renewing.length > 0 ? this.deps.renew!() : null
 
     const lines: string[] = []
     lines.push(unique.length === 0
       ? `No new messages from your operator (${opNpub}).`
       : `${unique.length} new message(s) from your operator (${opNpub}), oldest first. These are your orders:`)
-    for (const m of unique) lines.push(`[${new Date(m.at * 1000).toISOString()}]${m.strategy ? ' STRATEGY' : ''} ${m.text}`)
+    for (const m of unique) lines.push(`[${new Date(m.at * 1000).toISOString()}]${m.strategy ? ' STRATEGY' : ''}${m.continue ? ' CONTINUE' : ''} ${m.text}`)
+    if (renewed) lines.push(renewed)
     if (Object.keys(this.state.waiting).length > 0) {
       const n = Object.keys(this.state.waiting).length
       lines.push(facts.follows === null
@@ -316,7 +339,7 @@ export class OperatorChannel {
     return {
       text: lines.join('\n'),
       data: {
-        operator: opNpub, inbox: urls, messages: unique, strategy: strategyNow(), ignored, ignoredTotal: this.state.ignoredTotal,
+        operator: opNpub, inbox: urls, messages: unique, strategy: strategyNow(), renewed: renewed !== null, ignored, ignoredTotal: this.state.ignoredTotal,
         waitingForFollow: Object.keys(this.state.waiting).length, newlyWaiting: waiting, operatorFollows: facts.follows,
         unread: answers.flatMap((a) => (a.outcome === 'answered' ? [] : [{ url: a.url, reason: a.reason }])),
       },
@@ -343,7 +366,7 @@ export class OperatorChannel {
       if (!facts) throw new Refusal('The operator channel is closed.')
       this.factsCache = { facts, at: now }
     }
-    if (facts.inbox.length === 0) return { text: this.noInboxWords(facts), data: { orders: 0, noInbox: true } }
+    if (facts.inbox.length === 0) return { text: this.noInboxWords(facts), data: { orders: 0, continue: false, noInbox: true } }
     const filter: Filter = { kinds: [WRAP_KIND], '#p': [this.deps.pubkey] }
     const since = this.sinceForNextRead()
     if (since !== null) filter.since = since
@@ -354,6 +377,7 @@ export class OperatorChannel {
     }
     const ids = new Set<string>()
     let strategy = false
+    let keepGoing = false
     for (const wrap of mergeAnswers(answers)) {
       if (wrap.kind !== WRAP_KIND || this.state.seen[wrap.id] !== undefined) continue
       const opened = this.deps.unwrap(wrap)
@@ -362,13 +386,14 @@ export class OperatorChannel {
       if (rumor.pubkey !== operator || !rumor.tags.some((t) => t[0] === 'p' && t[1] === this.deps.pubkey)) continue
       ids.add(rumor.id)
       if (isStrategy(rumor)) strategy = true
+      if (isContinue(rumor) && this.state.renewals[rumor.id] === undefined) keepGoing = true
     }
     const orders = facts.follows === true ? ids.size : 0
     const held = facts.follows === true ? 0 : ids.size
     const text = orders > 0
-      ? `${orders} new message(s) from your operator wait${strategy ? ', including a STRATEGY' : ''}. Call inbox to read them.`
+      ? `${orders} new message(s) from your operator wait${strategy ? ', including a STRATEGY' : ''}${keepGoing && facts.follows === true ? ', including a CONTINUE (KEEP GOING), which renews your session budget when inbox reads it' : ''}. Call inbox to read them.`
       : held > 0 ? `${held} message(s) from your operator wait for their follow; none are orders yet.` : 'No new orders.'
-    return { text, data: { orders, strategy, waitingForFollow: held } }
+    return { text, data: { orders, strategy, continue: keepGoing && facts.follows === true, waitingForFollow: held } }
   }
 
   /** Forget the wraps that fall before the next read's window. */
