@@ -5,6 +5,17 @@
 // passive scan derives the keys of the cubes around where the agent stands,
 // heights 1 to SCAN_MAX_HEIGHT, as ONOSENDAI's scan does; a hop, a hide and
 // a find add the keys they derived.
+//
+// Items and chests (Keys and Chests B1, and its 2026-10-10 addendum: keys ARE
+// items) live here too, as ONOSENDAI's ITEMS panel keeps them (src/lib/
+// inventory.ts), per identity: the items the agent holds (a key item is held
+// by whoever read its secret: forged, found in a bag, or found in a chest),
+// the contents it took out of chests (TAKE copies, it never empties a chest),
+// and the chests it has seen, so it can open one later with an item found
+// since (arkinox, 2026-10-12: "I don't think the MCP server gives the agent
+// any knowledge of items or sealed chests or how to use them"). An item's
+// secret is kept here, mode 600 like the agent's own key, and never reported
+// by any tool.
 
 import type { Plane } from 'cyberspace-core'
 import { bytesToHex } from '../nostr/event.js'
@@ -55,15 +66,80 @@ export interface EntrySummary {
   chest?: { lock: string; requires: string; opened: boolean; openedWith?: 'own key' | 'held item'; contents?: Array<{ type: HiddenType; label: string; author: string; verified: boolean }> }
 }
 
-/** A key item this server has found and therefore holds (B1 2.1): reading it is holding it. */
+/** How a held item came to be held, as ONOSENDAI's inventory says it (HeldSource), less pasted. */
+export type ItemSource = 'forged' | 'found' | 'taken'
+
+/** Where something was found or hidden: the bag's region and the point. */
+export interface ItemPlace {
+  lookupId: string
+  height: number
+  x: string
+  y: string
+  z: string
+  plane: Plane
+}
+
+/** The chest something came out of. */
+export interface ItemFrom {
+  chestId: string
+  chestName: string
+}
+
+/** A key item this server holds (B1 2.1): reading it is holding it. One row per item public key; the first holding stands. */
 export interface HeldItem {
   itemPubkey: string
   secretHex: string
   name: string
   about: string
-  /** The bag it was found in. */
+  /** The bag it was found in (its lookup id). */
   foundIn: string
   at: number
+  /** Forged by the agent, found in a bag or a chest, or taken out of a chest. Absent on items held before 2026-10-12. */
+  source?: ItemSource
+  /** Who signed the item event: its forger (a claim when the event was unsigned in a chest). */
+  hider?: string
+  /** The item event's id. */
+  eventId?: string
+  place?: ItemPlace
+  from?: ItemFrom
+}
+
+/** A content taken out of a chest (B1 3.3 Taken): a copy, so the chest still holds it for whoever else opens it. */
+export interface TakenItem {
+  /** The content's event id. */
+  id: string
+  type: HiddenType
+  name: string
+  /** A message's text (untrusted). */
+  text?: string
+  /** The message holds a Cashu token: money. */
+  coin?: boolean
+  /** A shard's SNO payload, so render and place can use it after a restart. */
+  payload?: unknown
+  /** A key's public half; the key itself is a held item. */
+  itemPubkey?: string
+  author: string
+  verified: boolean
+  from: ItemFrom
+  at: number
+}
+
+/** A chest the agent has seen (B1 2.2), sealed: everything needed to open it later with an item found since. */
+export interface SeenChest {
+  /** The chest event's id. */
+  id: string
+  name: string
+  lockPubkey: string
+  senderPubkey: string
+  requires: string
+  /** The NIP-44 payload, still sealed. */
+  payload: string
+  /** Who hid it. */
+  author: string
+  place: ItemPlace
+  /** Set when it was found inside another chest. */
+  inChest?: string
+  seenAt: number
 }
 
 export interface OpenedBag {
@@ -85,10 +161,16 @@ export interface OpenedBag {
 interface KeysFile { version: 1; keys: HeldKey[] }
 interface BagsFile { version: 1; bags: OpenedBag[] }
 interface ItemsFile { version: 1; items: HeldItem[] }
+interface TakenFile { version: 1; taken: TakenItem[] }
+interface ChestsFile { version: 1; chests: SeenChest[] }
 
 const KEYS_FILE = 'keys/regions.json'
 const BAGS_FILE = 'keys/bags.json'
 const ITEMS_FILE = 'keys/items.json'
+const TAKEN_FILE = 'keys/taken.json'
+const CHESTS_FILE = 'keys/chests.json'
+/** How many seen chests are kept; the oldest seen go first. */
+const CHESTS_KEPT = 1000
 
 function alignedBaseOf(p: Position, height: number): { x: string; y: string; z: string } {
   const h = BigInt(height)
@@ -98,8 +180,12 @@ function alignedBaseOf(p: Position, height: number): { x: string; y: string; z: 
 export class KeyStore {
   readonly keys = new Map<string, HeldKey>()
   readonly bags = new Map<string, OpenedBag>()
-  /** Key items found, by their public half. */
+  /** Key items held, by their public half. */
   readonly items = new Map<string, HeldItem>()
+  /** Contents taken out of chests, by their event id. */
+  readonly taken = new Map<string, TakenItem>()
+  /** Chests seen, by their event id. */
+  readonly chests = new Map<string, SeenChest>()
 
   constructor(private readonly dir: StateDir) {
     const keys = dir.readJson<KeysFile | null>(KEYS_FILE, null)
@@ -108,12 +194,47 @@ export class KeyStore {
     if (bags?.version === 1) for (const b of bags.bags) this.bags.set(b.lookupId, b)
     const items = dir.readJson<ItemsFile | null>(ITEMS_FILE, null)
     if (items?.version === 1) for (const i of items.items) this.items.set(i.itemPubkey, i)
+    const taken = dir.readJson<TakenFile | null>(TAKEN_FILE, null)
+    if (taken?.version === 1) for (const t of taken.taken) this.taken.set(t.id, t)
+    const chests = dir.readJson<ChestsFile | null>(CHESTS_FILE, null)
+    if (chests?.version === 1) for (const c of chests.chests) this.chests.set(c.id, c)
   }
 
-  /** Hold a key item that was found: from now on a chest sealed to it opens. */
-  holdItem(item: HeldItem): void {
+  /**
+   * Hold a key item: from now on a chest sealed to it opens. An item already
+   * held keeps its row (ONOSENDAI addHeld), so a key read again, in a rescan
+   * or inside a chest, is held once and its first holding stands. Returns
+   * whether it was new.
+   */
+  holdItem(item: HeldItem): boolean {
+    if (this.items.has(item.itemPubkey)) return false
     this.items.set(item.itemPubkey, item)
     this.dir.writeJson(ITEMS_FILE, { version: 1, items: [...this.items.values()] } satisfies ItemsFile)
+    return true
+  }
+
+  /** Keep a content taken out of a chest. One row per content; returns whether it was new. */
+  take(item: TakenItem): boolean {
+    if (this.taken.has(item.id)) return false
+    this.taken.set(item.id, item)
+    this.dir.writeJson(TAKEN_FILE, { version: 1, taken: [...this.taken.values()] } satisfies TakenFile)
+    return true
+  }
+
+  /** Remember a chest seen, sealed. A chest seen again keeps where it was first seen. */
+  noteChest(chest: SeenChest): void {
+    if (this.chests.has(chest.id)) return
+    this.chests.set(chest.id, chest)
+    if (this.chests.size > CHESTS_KEPT) {
+      const oldest = [...this.chests.values()].sort((a, b) => a.seenAt - b.seenAt).slice(0, this.chests.size - CHESTS_KEPT)
+      for (const c of oldest) this.chests.delete(c.id)
+    }
+    this.dir.writeJson(CHESTS_FILE, { version: 1, chests: [...this.chests.values()] } satisfies ChestsFile)
+  }
+
+  /** The seen chests this item opens: those locked to its public key (ONOSENDAI chestsOpenedBy). */
+  chestsOpenedBy(itemPubkey: string): SeenChest[] {
+    return [...this.chests.values()].filter((c) => c.lockPubkey === itemPubkey)
   }
 
   /** The held items as a chest opener needs them. */

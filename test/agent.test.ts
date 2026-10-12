@@ -318,7 +318,8 @@ describe('an agent on a fresh key', () => {
     const bSees = entriesOf(await b.find({})).filter((e) => e.type === 'chest')
     expect(bSees.find((c) => c.label === 'strongbox')?.chest?.opened).toBe(true)
     expect(bSees.find((c) => c.label === 'gift')?.chest?.opened).toBe(false)
-    expect(bSees.find((c) => c.label === 'gift')?.chest?.requires).toBe('an item you have not found')
+    // A chest sealed to a person says so by default, as ONOSENDAI's composer does (arkinox, 2026-10-12).
+    expect(bSees.find((c) => c.label === 'gift')?.chest?.requires).toBe('being the one it was sealed for')
   }, 60_000)
 
   it('wait_for resolves on a chat line and times out otherwise', async () => {

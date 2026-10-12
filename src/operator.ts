@@ -292,6 +292,11 @@ export class OperatorChannel {
     return () => { this.ordersListeners.delete(fn) }
   }
 
+  /** Whether a reaction is being sent right now. */
+  reacting(): boolean {
+    return this.sending.size > 0
+  }
+
   /** Resolves once every reaction sent so far has been delivered or given up on; for tests and a clean stop. */
   async reactionsSettled(): Promise<void> {
     while (this.sending.size > 0) await Promise.allSettled([...this.sending])
@@ -606,7 +611,8 @@ export class OperatorChannel {
       const opened = this.deps.unwrap(wrap)
       if (!opened.ok) continue
       const { rumor } = opened
-      if (rumor.pubkey !== operator || rumor.kind !== RUMOR_KIND || !rumor.tags.some((t) => t[0] === 'p' && t[1] === this.deps.pubkey)) continue
+      // The agent's own copies are history, never orders, as in inbox.
+      if (rumor.pubkey === this.deps.pubkey || rumor.pubkey !== operator || rumor.kind !== RUMOR_KIND || !rumor.tags.some((t) => t[0] === 'p' && t[1] === this.deps.pubkey)) continue
       found.set(wrap.id, rumor.id)
       if (isStrategy(rumor)) strategy = true
       if (isContinue(rumor) && this.state.renewals[rumor.id] === undefined) keepGoing = true
