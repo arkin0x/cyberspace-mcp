@@ -16,8 +16,14 @@
 //     JSON encrypted with NIP-44 v2 from that random key to the recipient.
 //     created_at is randomized up to two days into the past.
 //   - The sender wraps the same rumor to itself too, so its history survives.
+//   - A reaction (arkinox, 2026-10-12: the agent's 👀 on an order it has
+//     seen) is a kind 7 rumor, sealed and wrapped exactly like a message:
+//     content "👀", tags ["e", <the rumor id reacted to>] and ["p", <its
+//     author>], nothing else. It is the NIP-17 private reaction ONOSENDAI
+//     unwraps and shows under the message.
 //   - On receipt: unwrap, verify the seal's signature, and require the
-//     rumor's pubkey to be the seal's. Anything else is dropped.
+//     rumor's pubkey to be the seal's, and its kind a 14 or a 7. Anything
+//     else is dropped.
 //
 // Neither the seal nor the wrap goes through signEvent (event.ts), which
 // adds the client tag to everything it signs: these two must carry no tag
@@ -28,6 +34,10 @@ import { finalizeEvent, generateSecretKey, getEventHash, getPublicKey } from 'no
 import { HEX_64, isAuthentic, type NostrEvent } from './event.js'
 
 export const RUMOR_KIND = 14
+/** A private reaction rumor (NIP-17 with a NIP-25 kind 7 inside): never an order. */
+export const REACTION_KIND = 7
+/** What the agent reacts with when it first sees an order: "seen, working on it" (arkinox, 2026-10-12). */
+export const SEEN_REACTION = '👀'
 export const SEAL_KIND = 13
 export const WRAP_KIND = 1059
 /** NIP-17 DM relay list: where a person reads its DMs. */
@@ -80,6 +90,16 @@ export function wrapSeal(seal: NostrEvent, recipient: string, createdAt: number,
   return finalizeEvent({ kind: WRAP_KIND, created_at: createdAt, tags: [['p', recipient]], content }, wrapSk) as NostrEvent
 }
 
+/**
+ * The rumor of a private reaction from `senderPubkey` to the message
+ * `eventId` written by `recipient`: kind 7, the content the reaction, and
+ * exactly the two tags ONOSENDAI reads, the e tag first.
+ */
+export function createReactionRumor(input: { senderPubkey: string; recipient: string; eventId: string; content?: string; createdAt: number }): Rumor {
+  const unsigned = { pubkey: input.senderPubkey, created_at: input.createdAt, kind: REACTION_KIND, tags: [['e', input.eventId], ['p', input.recipient]], content: input.content ?? SEEN_REACTION }
+  return { id: getEventHash(unsigned), ...unsigned }
+}
+
 export interface WrappedMessage {
   rumor: Rumor
   /** The wrap addressed to the recipient. */
@@ -95,11 +115,22 @@ export interface WrappedMessage {
  */
 export function wrapMessage(input: { senderSk: Uint8Array; recipient: string; text: string; strategy?: boolean; now: number; random?: () => number }): WrappedMessage {
   const sender = getPublicKey(input.senderSk)
-  const random = input.random ?? Math.random
   const rumor = createRumor({ senderPubkey: sender, recipient: input.recipient, text: input.text, strategy: input.strategy, createdAt: input.now })
+  return wrapRumor(rumor, input.senderSk, input.recipient, input.now, input.random)
+}
+
+/** A private reaction to the message `eventId` from `recipient`, ready to send, wrapped exactly as a message is (arkinox, 2026-10-12). */
+export function wrapReaction(input: { senderSk: Uint8Array; recipient: string; eventId: string; content?: string; now: number; random?: () => number }): WrappedMessage {
+  const sender = getPublicKey(input.senderSk)
+  const rumor = createReactionRumor({ senderPubkey: sender, recipient: input.recipient, eventId: input.eventId, content: input.content, createdAt: input.now })
+  return wrapRumor(rumor, input.senderSk, input.recipient, input.now, input.random)
+}
+
+/** Any rumor sealed and wrapped once to the recipient and once to its sender, each seal and wrap with its own time and each wrap with its own key. */
+function wrapRumor(rumor: Rumor, senderSk: Uint8Array, recipient: string, now: number, random: () => number = Math.random): WrappedMessage {
   const wrapTo = (to: string): NostrEvent =>
-    wrapSeal(sealRumor(rumor, input.senderSk, to, randomPast(input.now, random)), to, randomPast(input.now, random))
-  return { rumor, toRecipient: wrapTo(input.recipient), toSelf: wrapTo(sender) }
+    wrapSeal(sealRumor(rumor, senderSk, to, randomPast(now, random)), to, randomPast(now, random))
+  return { rumor, toRecipient: wrapTo(recipient), toSelf: wrapTo(rumor.pubkey) }
 }
 
 export type Unwrapped =
@@ -122,7 +153,7 @@ function isTags(v: unknown): v is string[][] {
 /**
  * Open a gift wrap addressed to the holder of `recipientSk`. The wrap's own
  * signature is checked, then the seal's, and the rumor must be a kind 14
- * whose id is its hash and whose pubkey is the seal's signer. The reason
+ * (a message) or a kind 7 (a reaction, which the caller tells apart) whose id is its hash and whose pubkey is the seal's signer. The reason
  * says which check failed; nothing in it comes from the message.
  */
 export function unwrapMessage(wrap: NostrEvent, recipientSk: Uint8Array): Unwrapped {
@@ -151,7 +182,7 @@ export function unwrapMessage(wrap: NostrEvent, recipientSk: Uint8Array): Unwrap
   if (!r || typeof r.pubkey !== 'string' || typeof r.content !== 'string' || typeof r.created_at !== 'number' || typeof r.kind !== 'number' || !isTags(r.tags)) {
     return { ok: false, reason: 'the seal does not hold a rumor' }
   }
-  if (r.kind !== RUMOR_KIND) return { ok: false, reason: 'the rumor is not a kind 14 message' }
+  if (r.kind !== RUMOR_KIND && r.kind !== REACTION_KIND) return { ok: false, reason: 'the rumor is not a kind 14 message or a kind 7 reaction' }
   if (!HEX_64.test(r.pubkey) || r.pubkey !== seal.pubkey) return { ok: false, reason: 'the rumor\'s author is not the seal\'s signer' }
   const unsigned = { pubkey: r.pubkey, created_at: r.created_at, kind: r.kind, tags: r.tags, content: r.content }
   const id = getEventHash(unsigned)

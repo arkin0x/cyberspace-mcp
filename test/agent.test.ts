@@ -191,7 +191,8 @@ describe('an agent on a fresh key', () => {
   it('prices a key above the passive scan height and spends what it took', async () => {
     const spentBefore = a.budget.spentSeconds
     const found = await a.find({ max_height: 14 })
-    expect((found.data.scanned as { heights: number[] }).heights).toEqual([1, 14])
+    // From h0, the gibson itself, as ONOSENDAI scans (arkinox, 2026-10-12).
+    expect((found.data.scanned as { heights: number[] }).heights).toEqual([0, 14])
     expect(a.budget.spentSeconds).toBeGreaterThan(spentBefore)
     // Over the session cap, a high key is refused before it is derived.
     const spent = a.budget.spentSeconds
@@ -318,7 +319,8 @@ describe('an agent on a fresh key', () => {
     const bSees = entriesOf(await b.find({})).filter((e) => e.type === 'chest')
     expect(bSees.find((c) => c.label === 'strongbox')?.chest?.opened).toBe(true)
     expect(bSees.find((c) => c.label === 'gift')?.chest?.opened).toBe(false)
-    expect(bSees.find((c) => c.label === 'gift')?.chest?.requires).toBe('an item you have not found')
+    // A chest sealed to a person says so by default, as ONOSENDAI's composer does (arkinox, 2026-10-12).
+    expect(bSees.find((c) => c.label === 'gift')?.chest?.requires).toBe('being the one it was sealed for')
   }, 60_000)
 
   it('wait_for resolves on a chat line and times out otherwise', async () => {

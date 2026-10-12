@@ -18,9 +18,10 @@ import { randomBytes } from 'node:crypto'
 import { computeHopProof, computeSidestepProof, encodeNonce, encodeOpenings, type Plane } from 'cyberspace-core'
 import { nip19 } from 'nostr-tools'
 import type { Filter } from 'nostr-tools/filter'
-import { finalizeEvent, getPublicKey } from 'nostr-tools/pure'
+import { v2 as nip44 } from 'nostr-tools/nip44'
+import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { normalizeURL } from 'nostr-tools/utils'
-import type { ShardModel } from 'sno-core/shards'
+import { toPayload, type ShardModel } from 'sno-core/shards'
 import { Budget } from './budget.js'
 import { ACTION_KIND, chainTemplateProblem, hopTemplate, sidestepTemplate, spawnTemplate } from './chain/builder.js'
 import { findDivergence } from './chain/divergence.js'
@@ -33,20 +34,22 @@ import { AVATAR_KIND, MAX_AVATAR_BYTES, avatarPrice, avatarSeconds, avatarTempla
 import { avatarThreads, mineAvatar } from './avatarMine.js'
 import { Chat, type ChatLine } from './chat.js'
 import {
-  HIDDEN_KIND, MAX_ITEM_NAME, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, REFERENCE_THRESHOLD_BYTES, bagEntries, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
+  HIDDEN_KIND, MAX_ABOUT, MAX_ITEM_NAME, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, REFERENCE_THRESHOLD_BYTES, bagEntries, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
   keyInnerTemplate, messageInnerTemplate, messagePreview, objectTemplate, referenceCount, referenceTo, shardInnerTemplate, unbag, wantsReference, entryKey,
-  type BagEntry, type Hidden, type Reference,
+  type BagEntry, type Hidden, type HiddenType, type KeyItem, type Reference,
 } from './hidden/bags.js'
-import { forgeKey, openWithSecret, openerFor, readContents, requiresLabel, sealEntries } from './hidden/chests.js'
+import { MAX_COMMENT_LENGTH, itemKind, sealedComment, type CommentParent, type CommentSubject } from './hidden/comments.js'
+import { forgeKey, openWithSecret, openerFor, readContents, requiresLabel, sealEntries, type ChestEntry } from './hidden/chests.js'
+import { CASHU_TOKEN, chestStatus, contentLine, contentRow, handle, itemRow, placeWords, purposeOf, takenRow, type ContentRow } from './items.js'
 import { hintFits, hintTags, parseHint, hintCandidatesExponent, type HintHeights } from './hidden/hint.js'
 import { lookReport, type ChainFacts } from './look.js'
 import { bytesToHex, hexToBytes, nowSeconds, signEvent, tagValue, type EventTemplate, type NostrEvent } from './nostr/event.js'
 import { Outbox, type GuardVerdict } from './nostr/outbox.js'
-import { unwrapMessage, wrapMessage } from './nostr/dm.js'
+import { unwrapMessage, wrapMessage, wrapReaction } from './nostr/dm.js'
 import { mergeAnswers } from './nostr/relayOutcome.js'
 import { DEFAULT_RELAY, GENERAL_RELAYS, Relays, normalizeRelay, type PublishResult } from './nostr/relays.js'
 import { OperatorWatch, type OperatorMove } from './follow.js'
-import { OperatorChannel } from './operator.js'
+import { ORDERS_POLL_MS, OperatorChannel } from './operator.js'
 import { Presence, neighborhoodFilter, sectorsApart, type Person } from './presence.js'
 import { ROAM_MAX_MINUTES, ROAM_MIN_MINUTES, Roam, roamCandidates, searchRoam } from './roam.js'
 import { profileTemplate, type ProfileFields, MAX_PICTURE_URL, pictureUrl, publishedFields } from './profile.js'
@@ -57,13 +60,13 @@ import { describePlace, distanceBetween, distanceWords, parseCoordinate, placeFr
 import { apartOnBestAxis, nearestClear, overlapping, spacingFor, type Body } from './space/personalSpace.js'
 import { AvatarSizes } from './avatarSizes.js'
 import { planSummary, priceNextStep, type Ceilings, type PricedStep } from './space/plan.js'
-import { KeyStore, MAX_COMPUTE_HEIGHT, SCAN_MAX_HEIGHT, type EntrySummary, type HeldKey, type OpenedBag } from './space/regionKeys.js'
+import { KeyStore, MAX_COMPUTE_HEIGHT, SCAN_MAX_HEIGHT, SCAN_MIN_HEIGHT, type EntrySummary, type HeldItem, type HeldKey, type ItemPlace, type OpenedBag, type SeenChest } from './space/regionKeys.js'
 import { StateDir } from './state/dir.js'
 import { Refusal, type ToolResult } from './tool.js'
 import { Transit } from './transit.js'
 import type { Secret } from './nwc.js'
 import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS, Wallet } from './wallet.js'
-import { DEFAULT_TRAVEL_PER_DAY, TravelLog, type TravelLogSettings } from './travel.js'
+import { DEFAULT_TRAVEL_PER_DAY, TravelLog, repeatsPrivate, type TravelLogSettings } from './travel.js'
 
 export { Refusal, type ToolResult } from './tool.js'
 
@@ -118,6 +121,10 @@ export interface AgentConfig {
   chatWakeMinutes?: number
   /** Tests: threads an avatar is mined on. */
   avatarThreads?: number
+  /** How often the server checks for new operator orders on its own, in ms (default 15 s; 0 turns the poll off, for tests). */
+  ordersPollMs?: number
+  /** Tests: how long a failed 👀 waits before its one retry. */
+  reactionRetryMs?: number
 }
 
 /** The highest cube a key is derived for on request (hide, find, look): a key at h16 is about a second. */
@@ -150,7 +157,15 @@ export type Contents =
   | { message: string }
   | { object: unknown }
   | { key: { name: string; about?: string } }
-  | { chest: { name: string; lock: string; requires?: string; entries: Array<{ message: string } | { object: unknown }> } }
+  | { chest: { name: string; lock: string; requires?: string; entries: ChestContentInput[] } }
+
+/**
+ * One thing to seal in a chest (B1 3.1): a message (which may hold a Cashu
+ * token: a coin), an SNO object, a new item forged into it (chaining: the
+ * agent holds it too), or a copy of an item the agent holds, by its name or
+ * public key.
+ */
+export type ChestContentInput = { message: string } | { object: unknown } | { key: { name: string; about?: string } } | { item: string }
 
 export interface HintInput {
   coordinate: CoordinateInput
@@ -251,6 +266,9 @@ export class Agent {
       sign: (t) => this.sign(t),
       wrap: (recipient, text) => wrapMessage({ senderSk: this.sk, recipient, text, now: nowSeconds() }),
       unwrap: (wrap) => unwrapMessage(wrap, this.sk),
+      // The 👀 on each order, the first time the server sees it (arkinox, 2026-10-12).
+      wrapReaction: (recipient, eventId) => wrapReaction({ senderSk: this.sk, recipient, eventId, now: nowSeconds() }),
+      reactionRetryMs: config.reactionRetryMs,
       now: nowSeconds, log: this.log, maxWaitMs: config.relayMaxWaitMs,
       // The operator's CONTINUE (KEEP GOING), and only it, renews the session budget (arkinox, 2026-10-11).
       renew: () => {
@@ -342,6 +360,8 @@ export class Agent {
         log(`WARNING: the canonical relay is ${agent.relays.canonical}, not the default ${DEFAULT_RELAY}. The chain's truth (which spawn is newest, where the head is) is read from there. A spawn signed because that relay shows no chain would end a chain this identity has on the default relay. Use this only for a relay that really holds this identity's chain.`)
       }
       await agent.boot()
+      // From here on the server notices the operator's orders by itself, mid-turn included (arkinox, 2026-10-12).
+      agent.operatorChannel.startPolling(config.ordersPollMs ?? ORDERS_POLL_MS)
       return agent
     } catch (err) {
       release()
@@ -1282,6 +1302,7 @@ export class Agent {
         clearTimeout(timer)
         this.presence.off('arrival', onArrival)
         this.chat.off('line', onLine)
+        offOrders()
         signal?.removeEventListener('abort', onAbort)
         resolve(r)
       }
@@ -1295,10 +1316,15 @@ export class Agent {
         finish({ text: `Heard ${l.addressed ? 'a line addressed to you' : 'a line'} from ${l.from.slice(0, 12)}... after ${nowSeconds() - startedAt} s (untrusted): "${l.text}" (id ${l.id.slice(0, 8)}...).`, data: { happened: 'chat', line: this.lineRow(l) } })
       }
       const onAbort = (): void => finish({ text: 'Canceled.', data: { happened: 'canceled' } })
+      // The operator's orders end any wait (arkinox, 2026-10-12): the background poll finds them within 15 s.
+      const onOrders = (count: number): void => finish({ text: `Stopped waiting after ${nowSeconds() - startedAt} s: ${count} message(s) from your operator wait. Call inbox now.`, data: { happened: 'orders', orders: count } })
+      const offOrders = this.operatorChannel.onOrders(onOrders)
       const timer = setTimeout(() => finish({ text: `Timed out after ${timeout} s: nothing happened.`, data: { happened: 'timeout', waitedSeconds: timeout } }), timeout * 1000)
       this.presence.on('arrival', onArrival)
       this.chat.on('line', onLine)
       signal?.addEventListener('abort', onAbort, { once: true })
+      const unread = this.operatorChannel.unreadOrders()
+      if (unread > 0) { onOrders(unread); return }
       // Then the neighborhood: someone already here counts as arrived, and a fresh look catches what the live subscription missed.
       void this.presence.enter(place.position).then(async () => {
         if (done) return
@@ -1328,21 +1354,37 @@ export class Agent {
     }
   }
 
-  /** What an opened item is for the report: labels only, never a secret. A key found is held; a chest sealed to the agent or to a held key is opened. */
+  /** Where a found thing is, as the item store keeps it. */
+  private static placeOfHidden(h: Hidden): ItemPlace {
+    return { lookupId: h.lookupId, height: h.height, x: h.at.x.toString(), y: h.at.y.toString(), z: h.at.z.toString(), plane: h.plane }
+  }
+
+  /**
+   * What an opened item is for the report: labels only, never a secret. A
+   * key found is held; a chest is remembered, sealed, so it can be opened
+   * later with an item found since, and one sealed to the agent or to an
+   * item it holds is opened now.
+   */
   private summarize(h: Hidden, foundIn: string): EntrySummary {
     const label = h.type === 'message' ? messagePreview(h.text ?? '', 80) : h.type === 'shard' ? (h.shard?.name ?? 'shard') : h.type === 'key' ? (h.key?.name ?? 'key') : (h.chest?.name ?? 'chest')
     const summary: EntrySummary = {
       type: h.type, eventId: h.eventId, author: h.inner.pubkey, at: { x: h.at.x.toString(), y: h.at.y.toString(), z: h.at.z.toString() }, plane: h.plane, createdAt: h.createdAt, label,
-      ...(h.type === 'message' && /\bcashu[AB][A-Za-z0-9_-]+/.test(h.text ?? '') ? { coin: true } : {}),
+      ...(h.type === 'message' && CASHU_TOKEN.test(h.text ?? '') ? { coin: true } : {}),
       ...(h.ref ? { byReference: true } : {}),
       ...(h.shard ? { shard: { unit: h.shard.unit, vertices: h.shard.vertices.length, faces: h.shard.faces.length, extent: h.shard.extent, mode: h.shard.mode } } : {}),
     }
     if (h.shard) this.rememberObject(objectHandle(h.eventId), h.shard)
+    const place = Agent.placeOfHidden(h)
     if (h.key) {
-      this.keys.holdItem({ itemPubkey: h.key.itemPubkey, secretHex: h.key.secretHex, name: h.key.name, about: h.key.about, foundIn, at: nowSeconds() })
+      this.keys.holdItem({
+        itemPubkey: h.key.itemPubkey, secretHex: h.key.secretHex, name: h.key.name, about: h.key.about, foundIn, at: nowSeconds(),
+        source: h.inner.pubkey === this.pubkey ? 'forged' : 'found', hider: h.inner.pubkey, eventId: h.eventId, place,
+      })
       summary.key = { itemPubkey: h.key.itemPubkey, about: h.key.about }
     }
     if (h.chest) {
+      const seen: SeenChest = { id: h.eventId, name: h.chest.name, lockPubkey: h.chest.lockPubkey, senderPubkey: h.chest.senderPubkey, requires: h.chest.requires, payload: h.chest.payload, author: h.inner.pubkey, bagAuthor: h.author, place, seenAt: nowSeconds() }
+      this.keys.noteChest(seen)
       const opener = openerFor(h.chest, this.keys.heldItems(), this.pubkey)
       if (!opener) {
         summary.chest = { lock: h.chest.lockPubkey, requires: requiresLabel(h.chest), opened: false }
@@ -1358,8 +1400,7 @@ export class Agent {
               author: c.event.pubkey, verified: c.verified,
             })),
           }
-          for (const c of contents) if (c.body.shard) this.rememberObject(objectHandle(c.id), c.body.shard)
-          for (const c of contents) if (c.body.key) this.keys.holdItem({ itemPubkey: c.body.key.itemPubkey, secretHex: c.body.key.secretHex, name: c.body.key.name, about: c.body.key.about, foundIn, at: nowSeconds() })
+          this.reveal(seen, contents)
         } catch (err) {
           summary.chest = { lock: h.chest.lockPubkey, requires: requiresLabel(h.chest), opened: false }
           this.log(`chest ${h.eventId.slice(0, 8)} did not open: ${err instanceof Error ? err.message : String(err)}`)
@@ -1367,6 +1408,28 @@ export class Agent {
       }
     }
     return summary
+  }
+
+  /**
+   * What opening a chest makes known: its objects can be rendered, its items
+   * are held (reading an item is holding it, B1 2.1), and a chest inside it
+   * is remembered so it can be opened in turn.
+   */
+  private reveal(chest: SeenChest, contents: ChestEntry[]): void {
+    const from = { chestId: chest.id, chestName: chest.name }
+    this.keys.noteChestContents(chest.id, contents.map((c) => ({ id: c.id, type: c.body.type })))
+    for (const c of contents) {
+      if (c.body.shard) this.rememberObject(objectHandle(c.id), c.body.shard)
+      if (c.body.key) {
+        this.keys.holdItem({
+          itemPubkey: c.body.key.itemPubkey, secretHex: c.body.key.secretHex, name: c.body.key.name, about: c.body.key.about, foundIn: chest.place.lookupId, at: nowSeconds(),
+          source: 'found', hider: c.event.pubkey, eventId: c.id, place: chest.place, from,
+        })
+      }
+      if (c.body.chest) {
+        this.keys.noteChest({ id: c.id, name: c.body.chest.name, lockPubkey: c.body.chest.lockPubkey, senderPubkey: c.body.chest.senderPubkey, requires: c.body.chest.requires, payload: c.body.chest.payload, author: c.event.pubkey, bagAuthor: chest.bagAuthor ?? chest.author, place: chest.place, inChest: chest.id, seenAt: nowSeconds() })
+      }
+    }
   }
 
   /** Fetch the bags whose lookup ids are these, open each with its key, and note what was found. */
@@ -1410,10 +1473,10 @@ export class Agent {
         const at = placeOf({ x: BigInt(e.at.x), y: BigInt(e.at.y), z: BigInt(e.at.z) }, e.plane)
         const same = at.hex === here.hex ? 'right here' : `at x ${e.at.x} y ${e.at.y} z ${e.at.z}`
         let more = ''
-        if (e.key) more = ` (held now; public half ${e.key.itemPubkey.slice(0, 8)}...${e.key.about ? `; "${e.key.about}"` : ''})`
+        if (e.key) more = ` (an item: you hold it now; public key ${e.key.itemPubkey}${e.key.about ? `; "${e.key.about}"` : ''}; items lists what it opens)`
         if (e.chest) more = e.chest.opened
-          ? ` (opened with your ${e.chest.openedWith}: ${e.chest.contents!.length} item(s): ${e.chest.contents!.map((c) => `${c.type} "${c.label}"${c.verified ? '' : ' (unsigned)'}`).join(', ')})`
-          : ` (sealed to ${e.chest.lock.slice(0, 8)}...; needs ${e.chest.requires})`
+          ? ` (chest ${handle(e.eventId)}, opened with your ${e.chest.openedWith}: ${e.chest.contents!.length} thing(s): ${e.chest.contents!.map((c) => `${c.type} "${c.label}"${c.verified ? '' : ' (unsigned)'}`).join(', ')}; open_chest ${handle(e.eventId)} for all of it and what each is for, take to keep it)`
+          : ` (chest ${handle(e.eventId)}, sealed to ${e.chest.lock.slice(0, 8)}...; needs ${e.chest.requires}; remembered: open_chest works once you hold that item)`
         // An object's id is what render takes to draw it.
         if (e.shard) more = ` (id ${objectHandle(e.eventId).slice(0, 12)}, ${e.shard.vertices} vertices, ${e.shard.faces} faces)`
         out.push(`  ${e.type}${e.coin ? ' (coins)' : ''}${e.byReference ? ' [by reference]' : ''} by ${e.author.slice(0, 8)}... ${same}: "${e.label}"${more}`)
@@ -1425,16 +1488,18 @@ export class Agent {
   async find(input: { hint?: HintInput; max_height?: number } = {}): Promise<ToolResult> {
     const here = this.keeper.place()
     if (!input.hint) {
-      const cap = Math.min(MAX_KEY_HEIGHT, Math.max(1, Math.floor(input.max_height ?? SCAN_MAX_HEIGHT)))
-      const heights = Array.from({ length: cap }, (_, i) => i + 1)
+      const cap = Math.min(MAX_KEY_HEIGHT, Math.max(SCAN_MIN_HEIGHT, Math.floor(input.max_height ?? SCAN_MAX_HEIGHT)))
+      const heights = Array.from({ length: cap - SCAN_MIN_HEIGHT + 1 }, (_, i) => i + SCAN_MIN_HEIGHT)
+      // Which cubes were looked in, said plainly, so an agent knows what a "nothing here" covers (arkinox, 2026-10-12).
+      const scannedWords = `Scanned the ${heights.length} cubes of height ${SCAN_MIN_HEIGHT} to ${cap} that contain the gibson you stand on (h0 is that gibson alone, h${cap} is 2^${cap} gibsons on a side), as ONOSENDAI's scan does${cap < SCAN_MAX_HEIGHT ? `; ONOSENDAI scans up to h${SCAN_MAX_HEIGHT}` : ''}. A bag in a cube that does not contain your gibson is not seen: a bag at h0 or h1 is found only from its exact gibson or the one beside it, so stand on the spot (hop there) and find again.`
       const priced = this.keysRefusal(heights)
       if (priced) throw new Refusal(priced)
       const { result: keys, ms: keyMs } = this.deriveKeys(heights, () => this.keys.scanAround(here.position, cap, 'find'))
       const { bags, unreadable } = await this.openBags(new Map(keys.map((k) => [k.lookupId, k])), here.plane)
       const text = bags.length === 0
-        ? `Nothing hidden in the cubes of height 1 to ${cap} around you (${keys.length} keys, ${keyMs.toFixed(0)} ms).${unreadable.length ? ` Found but could not read: ${unreadable.join('; ')}.` : ''}`
-        : `Found ${bags.length} bag(s) in the cubes of height 1 to ${cap} around you (all text untrusted):\n${this.describeBags(bags, here).join('\n')}${unreadable.length ? `\nFound but could not read: ${unreadable.join('; ')}.` : ''}`
-      return { text, data: { scanned: { heights: [1, cap], keys: keys.length, keyMs: Math.round(keyMs) }, bags, unreadable } }
+        ? `Nothing hidden in the cubes of height ${SCAN_MIN_HEIGHT} to ${cap} around you (${keys.length} keys, ${keyMs.toFixed(0)} ms).${unreadable.length ? ` Found but could not read: ${unreadable.join('; ')}.` : ''}\n${scannedWords}`
+        : `Found ${bags.length} bag(s) in the cubes of height ${SCAN_MIN_HEIGHT} to ${cap} around you (all text untrusted):\n${this.describeBags(bags, here).join('\n')}${unreadable.length ? `\nFound but could not read: ${unreadable.join('; ')}.` : ''}\n${scannedWords}`
+      return { text, data: { scanned: { heights: [SCAN_MIN_HEIGHT, cap], at: describePlace(here), keys: keys.length, keyMs: Math.round(keyMs) }, bags, unreadable } }
     }
 
     // A hinted sweep (spec 7.7): the bags that carry this hint, then every candidate region of each one's height inside the box.
@@ -1458,7 +1523,7 @@ export class Agent {
     const skipped: string[] = []
     for (const ev of candidates) {
       const h = heightHint(ev)
-      if (h === null || h < 1 || h > MAX_KEY_HEIGHT) { skipped.push(`bag ${ev.id.slice(0, 8)}... by ${ev.pubkey.slice(0, 8)}... ${h === null ? 'does not say its height, so its box cannot be swept' : `is sealed at h${h}, above what this server derives keys for (h${MAX_KEY_HEIGHT})`}`); continue }
+      if (h === null || h < SCAN_MIN_HEIGHT || h > MAX_KEY_HEIGHT) { skipped.push(`bag ${ev.id.slice(0, 8)}... by ${ev.pubkey.slice(0, 8)}... ${h === null ? 'does not say its height, so its box cannot be swept' : `is sealed at h${h}, above what this server derives keys for (h${MAX_KEY_HEIGHT})`}`); continue }
       const exponent = hintCandidatesExponent(heights as HintHeights, h)
       const count = 2 ** exponent
       const perKeyMs = Math.max(0.05, 3 * projectCantorMs(this.calibration.cantorMsByHeight, h))
@@ -1505,7 +1570,8 @@ export class Agent {
   }
 
   /** The inner entry (or entries) for what is being hidden, signed. A large object is published first as its own kind 33331. */
-  private async entriesFor(contents: Contents, at: Place, regionKey: Uint8Array, now: number): Promise<{ entries: BagEntry[]; what: string; objectEvent?: NostrEvent }> {
+  private async entriesFor(contents: Contents, at: Place, regionKey: Uint8Array, now: number, where: { lookupId: string; height: number }): Promise<{ entries: BagEntry[]; what: string; objectEvent?: NostrEvent; item?: { name: string; itemPubkey: string }; chest?: { id: string; name: string; lock: string; requires: string } }> {
+    const place: ItemPlace = { lookupId: where.lookupId, height: where.height, x: at.position.x.toString(), y: at.position.y.toString(), z: at.position.z.toString(), plane: at.plane }
     if ('message' in contents) {
       const text = String(contents.message)
       if (!text.trim()) throw new Refusal('The message is empty.')
@@ -1524,29 +1590,66 @@ export class Agent {
       return { entries: [this.sign(shardInnerTemplate(shard, at.position, at.plane, now))], what: `an object (${shard.vertices.length} vertices, inline)` }
     }
     if ('key' in contents) {
-      const key = forgeKey(String(contents.key.name ?? 'key').slice(0, MAX_ITEM_NAME), contents.key.about ?? '')
-      return { entries: [this.sign(keyInnerTemplate(key, at.position, at.plane, now))], what: `a key item "${key.name}" (public half ${key.itemPubkey.slice(0, 8)}...)` }
+      const name = String(contents.key.name ?? '').trim().slice(0, MAX_ITEM_NAME)
+      if (!name) throw new Refusal('An item needs a name: what the finder sees, and what you seal chests to it by.')
+      const key = forgeKey(name, String(contents.key.about ?? '').trim().slice(0, MAX_ABOUT))
+      const event = this.sign(keyInnerTemplate(key, at.position, at.plane, now))
+      // Forged is held at once (B1 3.1), so chests can be sealed to it before anyone finds it.
+      this.keys.holdItem({ itemPubkey: key.itemPubkey, secretHex: key.secretHex, name: key.name, about: key.about, foundIn: where.lookupId, at: now, source: 'forged', hider: this.pubkey, eventId: event.id, place })
+      return { entries: [event], what: `an item "${key.name}" (public key ${key.itemPubkey})`, item: { name: key.name, itemPubkey: key.itemPubkey } }
     }
     if ('chest' in contents) {
-      const lock = parsePubkey(String(contents.chest.lock))
-      if (!lock) throw new Refusal('chest.lock must be an npub, a 64-hex pubkey, or a key item\'s public half.')
-      const inner: BagEntry[] = []
+      const name = String(contents.chest.name ?? '').trim().slice(0, MAX_ITEM_NAME)
+      if (!name) throw new Refusal('A chest needs a name: what a finder sees before it opens.')
+      const lock = this.resolveLock(String(contents.chest.lock ?? ''))
+      const inner: NostrEvent[] = []
+      const forged: Array<{ key: KeyItem; event: NostrEvent }> = []
       for (const e of contents.chest.entries ?? []) {
-        if ('message' in e) inner.push(this.sign(messageInnerTemplate(String(e.message), at.position, at.plane, now)))
-        else if ('object' in e) inner.push(this.sign(shardInnerTemplate(this.shardFrom(e.object), at.position, at.plane, now)))
+        if ('message' in e) {
+          const text = String(e.message)
+          if (!text.trim()) throw new Refusal('A message in the chest is empty.')
+          if (text.length > MAX_MESSAGE_LENGTH) throw new Refusal(`A message in the chest is ${text.length} characters; at most ${MAX_MESSAGE_LENGTH}.`)
+          inner.push(this.sign(messageInnerTemplate(text, at.position, at.plane, now)))
+        } else if ('object' in e) {
+          inner.push(this.sign(shardInnerTemplate(this.shardFrom(e.object), at.position, at.plane, now)))
+        } else if ('key' in e) {
+          const keyName = String(e.key?.name ?? '').trim().slice(0, MAX_ITEM_NAME)
+          if (!keyName) throw new Refusal('An item forged into a chest needs a name.')
+          const key = forgeKey(keyName, String(e.key.about ?? '').trim().slice(0, MAX_ABOUT))
+          const event = this.sign(keyInnerTemplate(key, at.position, at.plane, now))
+          inner.push(event)
+          forged.push({ key, event })
+        } else if ('item' in e) {
+          // A copy of an item the agent holds, signed by the agent: the same keypair, so the same chests open for the finder.
+          const held = this.heldItemBy(String(e.item))
+          inner.push(this.sign(keyInnerTemplate({ name: held.name, about: held.about, itemPubkey: held.itemPubkey, secretHex: held.secretHex }, at.position, at.plane, now)))
+        } else {
+          throw new Refusal('Each chest entry is one of: { message }, { object }, { key: { name, about } } (a new item), or { item } (an item you hold, by name or public key).')
+        }
       }
-      if (inner.length === 0) throw new Refusal('A chest needs at least one entry: a message or an object.')
+      if (inner.length === 0) throw new Refusal('A chest needs at least one entry: a message, an object or an item.')
       let sealed
-      try { sealed = sealEntries(inner, lock) } catch (err) { throw new Refusal(err instanceof Error ? err.message : String(err)) }
-      const chest = { name: String(contents.chest.name ?? 'chest').slice(0, MAX_ITEM_NAME), lockPubkey: lock, senderPubkey: sealed.senderPubkey, requires: (contents.chest.requires ?? '').slice(0, MAX_ITEM_NAME), payload: sealed.payload }
-      return { entries: [this.sign(chestInnerTemplate(chest, at.position, at.plane, now))], what: `a chest "${chest.name}" sealed to ${lock.slice(0, 8)}... with ${inner.length} entr${inner.length === 1 ? 'y' : 'ies'}` }
+      try { sealed = sealEntries(inner, lock.pubkey) } catch (err) { throw new Refusal(err instanceof Error ? err.message : String(err)) }
+      // ONOSENDAI's composer defaults (ChestCompose): "the <item>" for an item, "being the one it was sealed for" for a person.
+      const requires = (contents.chest.requires ?? (lock.item ? `the ${lock.item.name}` : lock.person ? 'being the one it was sealed for' : '')).trim().slice(0, MAX_ITEM_NAME)
+      const chest = { name, lockPubkey: lock.pubkey, senderPubkey: sealed.senderPubkey, requires, payload: sealed.payload }
+      const event = this.sign(chestInnerTemplate(chest, at.position, at.plane, now))
+      for (const f of forged) {
+        this.keys.holdItem({ itemPubkey: f.key.itemPubkey, secretHex: f.key.secretHex, name: f.key.name, about: f.key.about, foundIn: where.lookupId, at: now, source: 'forged', hider: this.pubkey, eventId: f.event.id, place, from: { chestId: event.id, chestName: name } })
+      }
+      const counts = (['message', 'object', 'item'] as const).map((k) => [k, (contents.chest.entries ?? []).filter((e) => k in e || (k === 'item' && 'key' in e)).length] as const).filter(([, n]) => n > 0).map(([k, n]) => `${n} ${k}${n === 1 ? '' : 's'}`)
+      return {
+        entries: [event],
+        what: `a chest "${name}" (id ${handle(event.id)}) sealed to ${lock.words}, holding ${counts.join(', ')}${forged.length ? `; you hold the new item(s) ${forged.map((f) => `"${f.key.name}" (public key ${f.key.itemPubkey})`).join(', ')}` : ''}`,
+        chest: { id: event.id, name, lock: lock.pubkey, requires },
+      }
     }
     throw new Refusal('contents must be one of: { message }, { object }, { key: { name } }, { chest: { name, lock, entries } }.')
   }
 
   /** The agent's bag in the cube of `height` at `at`, read before it is written, with the key priced and spent. */
   private async bagAt(at: Place, height: number): Promise<{ key: HeldKey; keyMs: number; regionKey: Uint8Array; current: NostrEvent | null; carried: BagEntry[] }> {
-    if (!Number.isInteger(height) || height < 1 || height > MAX_KEY_HEIGHT) throw new Refusal(`height must be an integer from 1 to ${MAX_KEY_HEIGHT} (a bag's region is at least height 1, spec 7.6; above h${MAX_KEY_HEIGHT} a key costs more than a second).`)
+    if (!Number.isInteger(height) || height < SCAN_MIN_HEIGHT || height > MAX_KEY_HEIGHT) throw new Refusal(`height must be an integer from ${SCAN_MIN_HEIGHT} to ${MAX_KEY_HEIGHT} (h0 is the one gibson, as ONOSENDAI hides and scans; above h${MAX_KEY_HEIGHT} a key costs more than a second).`)
     const priced = this.keysRefusal([height])
     if (priced) throw new Refusal(priced)
     const { result: key, ms: keyMs } = this.deriveKeys([height], () => this.keys.keyAt(at.position, height, 'hide'))
@@ -1570,12 +1673,13 @@ export class Agent {
     const { key, keyMs, regionKey, current, carried } = await this.bagAt(at, input.height)
     const height = input.height
     const now = nowSeconds()
-    const { entries, what, objectEvent } = await this.entriesFor(input.contents, at, regionKey, now)
-    const have = new Set(carried.map(entryKey))
-    const merged = [...carried, ...entries.filter((e) => !have.has(entryKey(e)))]
+    // The hint is checked before anything is signed or forged, so a refusal leaves no item held that was never hidden.
     const currentSettings = current ? bagSettingsOf(current, height) : null
     const hint = input.hint_heights ?? currentSettings?.hint ?? null
     if (hint && !hintFits(hint, height)) throw new Refusal(`hint_heights ${hint.join(',')} cannot contain a height ${height} region: each must be from ${height} to 85.`)
+    const { entries, what, objectEvent, item, chest } = await this.entriesFor(input.contents, at, regionKey, now, { lookupId: key.lookupId, height })
+    const have = new Set(carried.map(entryKey))
+    const merged = [...carried, ...entries.filter((e) => !have.has(entryKey(e)))]
     const riddle = (input.riddle ?? currentSettings?.riddle ?? '').slice(0, MAX_RIDDLE_LENGTH)
     const createdAt = Math.max(now, (current?.created_at ?? 0) + 1)
     const template = await bagTemplate(merged, regionKey, key.lookupId, height, createdAt, HIDDEN_KIND, { heightTag: true, hint, riddle }, { at: at.position, plane: at.plane })
@@ -1597,10 +1701,14 @@ export class Agent {
       Object.keys(refused).length ? `Refused by ${Object.entries(refused).map(([u, r]) => `${u}: ${r}`).join('; ')} (verbatim; a refusal is not retried).` : '',
       hint ? `Hinted at heights ${hint.join(',')}${riddle ? `, riddle "${riddle}"` : ''}.` : 'No hint: only someone who derives this cube\'s key will find it.',
     ].filter(Boolean).join('\n')
-    return { text, data: { bagId: bag.id, lookupId: key.lookupId, cube: { height, base: key.base, plane: at.plane }, entries: merged.length, carried: carried.length, keyMs: Math.round(keyMs), accepted, refused, hint, riddle, objectEventId: objectEvent?.id ?? null } }
+    return { text, data: { bagId: bag.id, lookupId: key.lookupId, cube: { height, base: key.base, plane: at.plane }, entries: merged.length, carried: carried.length, keyMs: Math.round(keyMs), accepted, refused, hint, riddle, objectEventId: objectEvent?.id ?? null, ...(item ? { item } : {}), ...(chest ? { chest } : {}) } }
   }
 
-  async place(input: { object?: unknown; address?: string; coordinate: CoordinateInput; height: number }): Promise<ToolResult> {
+  async place(input: { object?: unknown; address?: string; id?: string; coordinate: CoordinateInput; height: number }): Promise<ToolResult> {
+    // An object find or open_chest listed, or one taken from a chest, by its id: its payload is placed as given.
+    if (input.id !== undefined && input.object === undefined && input.address === undefined) {
+      return this.hide({ contents: { object: toPayload(this.objectById(input.id).shard) }, coordinate: input.coordinate, height: input.height })
+    }
     if (input.object !== undefined) {
       const v = validateSnoPayload(input.object)
       if (!v.ok) throw new Refusal(`Not placed: the payload is not valid SNO. ${v.errors.join(' ')}`)
@@ -1656,6 +1764,241 @@ export class Agent {
     return { text, data: { bagId: bag.id, lookupId: key.lookupId, cube: { height, base: key.base, plane: at.plane }, entries: merged.length, keyMs: Math.round(keyMs), accepted: entry.accepted, refused: entry.refused ?? {} } }
   }
 
+  // ---- items and chests --------------------------------------------------------
+  //
+  // Keys and Chests B1 as ONOSENDAI plays it (arkinox, 2026-10-12). An item
+  // is a keypair hidden in a bag: reading it is holding it. A chest is a list
+  // of things sealed to a public key: an item's (the item is its key) or a
+  // person's (a gift). The tools: items (what the agent holds and which
+  // chests each opens), forge_item and seal_chest (hide one), open_chest
+  // (read one it holds the key to), take (keep its contents). An item's
+  // secret is never in any answer or log.
+
+  /**
+   * What a chest is locked to: a public key (npub or hex; an item's or a
+   * person's), or the name of an item the agent holds. Refuses a key that is
+   * not a point on the curve, so nothing is sealed that nobody can open.
+   */
+  private resolveLock(given: string): { pubkey: string; item: HeldItem | null; person: boolean; words: string } {
+    const g = given.trim()
+    if (!g) throw new Refusal('Say what the chest is locked to (lock): the name or public key of an item you hold (items lists them), an item public key you were given, or a person\'s npub (a gift only they can open).')
+    const hex = parsePubkey(g)
+    if (hex) {
+      try { nip44.utils.getConversationKey(generateSecretKey(), hex) } catch { throw new Refusal(`${g.slice(0, 16)}... is not a public key a chest can be sealed to (not a point on the curve).`) }
+      const item = this.keys.items.get(hex) ?? null
+      if (item) return { pubkey: hex, item, person: false, words: `your item "${item.name}"` }
+      if (hex === this.pubkey) return { pubkey: hex, item: null, person: true, words: 'yourself' }
+      // A pasted hex may be an item someone gave out or a person; an npub is a person (ONOSENDAI ChestCompose parseLock).
+      return { pubkey: hex, item: null, person: g.startsWith('npub1') || g.startsWith('nprofile1'), words: `${hex.slice(0, 8)}...` }
+    }
+    const item = this.heldItemBy(g)
+    return { pubkey: item.itemPubkey, item, person: false, words: `your item "${item.name}"` }
+  }
+
+  /** An item the agent holds, by its public key (or at least 8 hex of it) or its name, or a refusal that lists what it holds. */
+  private heldItemBy(given: string): HeldItem {
+    const g = given.trim()
+    const all = [...this.keys.items.values()]
+    const byKey = /^[0-9a-f]{8,64}$/.test(g) ? all.filter((i) => i.itemPubkey.startsWith(g)) : []
+    const hits = byKey.length ? byKey : all.filter((i) => i.name.toLowerCase() === g.toLowerCase())
+    if (hits.length === 1) return hits[0]
+    const held = all.length ? `You hold: ${all.map((i) => `"${i.name}" (${i.itemPubkey.slice(0, 12)}...)`).join(', ')}.` : 'You hold no items: forge one with forge_item, or find one with find.'
+    if (hits.length > 1) throw new Refusal(`${hits.length} of your items match "${g}"; give its public key instead. ${held}`)
+    throw new Refusal(`You hold no item named or keyed "${g}". ${held}`)
+  }
+
+  /** A chest the agent has seen, by its id (at least 8 hex, as find and items list it) or its name. */
+  private chestBy(given: string): SeenChest {
+    const g = String(given ?? '').trim()
+    const all = [...this.keys.chests.values()]
+    const byId = /^[0-9a-f]{8,64}$/.test(g) ? all.filter((c) => c.id.startsWith(g)) : []
+    const hits = byId.length ? byId : all.filter((c) => c.name.toLowerCase() === g.toLowerCase())
+    if (hits.length === 1) return hits[0]
+    if (hits.length > 1) throw new Refusal(`${hits.length} chests you have seen match "${g}": ${hits.map((c) => `"${c.name}" (${handle(c.id)})`).join(', ')}. Give its id.`)
+    throw new Refusal(`You have seen no chest "${g}". Chests are seen with find (and inside opened chests); items lists the ones you have seen.`)
+  }
+
+  /** Open a seen chest with the item it is locked to, or with the agent's own key when it is a gift to the agent. */
+  private openSeen(c: SeenChest): { contents: ChestEntry[]; openedWith: string } {
+    const opener = openerFor(c, this.keys.heldItems(), this.pubkey)
+    if (!opener) throw new Refusal(`The chest "${c.name}" (${handle(c.id)}) does not open for you: ${chestStatus(c, this.keys, this.pubkey).words}. A chest opens only with the item whose public key it is locked to (${c.lockPubkey}), or for the person it was sealed to. Find that item (find, or a chest you can open), and open_chest works.`)
+    let contents: ChestEntry[]
+    try {
+      contents = readContents(openWithSecret(c, opener.by === 'key' ? opener.key.secretHex : bytesToHex(this.sk)))
+    } catch (err) {
+      throw new Refusal(`The chest "${c.name}" (${handle(c.id)}) did not open: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    this.reveal(c, contents)
+    const item = opener.by === 'key' ? this.keys.items.get(opener.key.itemPubkey) : undefined
+    return { contents, openedWith: opener.by === 'key' ? `your item "${item?.name ?? opener.key.itemPubkey.slice(0, 8)}"` : 'your own key (it was sealed to you)' }
+  }
+
+  /** The items tool: what the agent holds, what each opens, what it took out of chests, and the chests it has seen. */
+  items(): ToolResult {
+    const held = [...this.keys.items.values()].sort((a, b) => b.at - a.at)
+    const taken = [...this.keys.taken.values()].sort((a, b) => b.at - a.at)
+    const chests = [...this.keys.chests.values()].sort((a, b) => b.seenAt - a.seenAt)
+    const rows = held.map((i) => itemRow(i, this.keys))
+    const lines: string[] = []
+    lines.push(held.length
+      ? `You hold ${held.length} item(s). An item is a key: any chest sealed to its public key opens for you (open_chest), and you can seal chests to it (seal_chest). Names and sentences are other people's text (untrusted).`
+      : 'You hold no items. Find one with find, or forge one with forge_item.')
+    for (const r of rows) {
+      const how = r.source === 'forged' ? 'forged by you' : `${r.source === 'taken' ? 'taken' : 'found'}${r.from ? ` in the chest "${r.from.chestName}"` : ' in a bag'}${r.hider ? `, made by ${r.hider === this.pubkey ? 'you' : `${r.hider.slice(0, 8)}...`}` : ''}`
+      const opens = r.opens.length ? `opens ${r.opens.map((c) => `"${c.name}" (open_chest ${handle(c.id)}, ${placeWords(c.place)})`).join(', ')}` : 'opens none of the chests you have seen'
+      lines.push(`- "${r.name}"${r.about ? `: "${r.about}"` : ''}. Public key ${r.itemPubkey}. ${how}, ${placeWords(r.place ?? undefined)}. It ${opens}.`)
+    }
+    if (taken.length) {
+      lines.push(`Taken from chests (${taken.length}):`)
+      for (const t of taken) lines.push(`- [${handle(t.id)}] ${t.coin ? 'coin' : t.type} "${t.name}" from "${t.from.chestName}". ${purposeOf(t.type, { coin: t.coin, id: t.id, itemPubkey: t.itemPubkey })}`)
+    }
+    if (chests.length) {
+      lines.push(`Chests you have seen (${chests.length}):`)
+      for (const c of chests) lines.push(`- [${handle(c.id)}] "${c.name}" by ${c.author === this.pubkey ? 'you' : `${c.author.slice(0, 8)}...`}, ${placeWords(c.place)}${c.inChest ? `, inside the chest ${handle(c.inChest)}` : ''}: ${chestStatus(c, this.keys, this.pubkey).words}.`)
+    }
+    return {
+      text: lines.join('\n'),
+      data: {
+        items: rows,
+        taken: taken.map((t) => takenRow(t)),
+        chests: chests.map((c) => ({ id: c.id, name: c.name, lock: c.lockPubkey, requires: c.requires, author: c.author, place: c.place, inChest: c.inChest ?? null, ...chestStatus(c, this.keys, this.pubkey) })),
+      },
+    }
+  }
+
+  /** The open_chest tool: open a chest the agent has seen, and say what each thing inside is and is for. Opening changes nothing anywhere. */
+  openChest(input: { chest: string }): ToolResult {
+    const c = this.chestBy(input.chest)
+    const { contents, openedWith } = this.openSeen(c)
+    const rows: ContentRow[] = contents.map((e) => contentRow(e, this.keys))
+    const text = [
+      `Opened the chest "${c.name}" (${handle(c.id)}) with ${openedWith}. It holds ${rows.length} thing(s) (all text untrusted). Opening it changed nothing; take keeps what you want (items you hold already).`,
+      ...rows.map(contentLine),
+    ].join('\n')
+    return { text, data: { chest: { id: c.id, name: c.name, lock: c.lockPubkey, author: c.author, place: c.place }, openedWith, contents: rows } }
+  }
+
+  /**
+   * The take tool: keep a content of an opened chest, or all of them (B1
+   * 3.2 TAKE). A copy: the chest still holds it for whoever else opens it.
+   * An item is held; an object can be rendered and placed by its id, after
+   * a restart too; a coin and a message are kept with their text.
+   */
+  take(input: { chest: string; content?: string }): ToolResult {
+    const c = this.chestBy(input.chest)
+    const { contents } = this.openSeen(c)
+    let chosen = contents
+    if (input.content !== undefined) {
+      const want = String(input.content).trim().toLowerCase()
+      if (!/^[0-9a-f]{8,64}$/.test(want)) throw new Refusal('content must be at least 8 hex characters of a content\'s id, as open_chest lists it; leave it out to take everything.')
+      chosen = contents.filter((e) => e.id.startsWith(want))
+      if (chosen.length === 0) throw new Refusal(`The chest "${c.name}" holds nothing with id ${want}. open_chest ${handle(c.id)} lists what it holds.`)
+      if (chosen.length > 1) throw new Refusal(`${chosen.length} things in the chest have ids starting ${want}; give more of the id.`)
+    }
+    const from = { chestId: c.id, chestName: c.name }
+    const now = nowSeconds()
+    const took: ContentRow[] = []
+    const already: ContentRow[] = []
+    for (const e of chosen) {
+      const row = contentRow(e, this.keys)
+      const b = e.body
+      let fresh = this.keys.take({
+        id: e.id, type: b.type, name: row.name, author: e.event.pubkey, verified: e.verified, from, at: now,
+        ...(b.type === 'message' ? { text: b.text ?? '' } : {}), ...(row.coin ? { coin: true } : {}),
+        ...(b.shard ? { payload: toPayload(b.shard) } : {}), ...(b.key ? { itemPubkey: b.key.itemPubkey } : {}),
+      })
+      if (b.key) fresh = this.keys.holdItem({ itemPubkey: b.key.itemPubkey, secretHex: b.key.secretHex, name: b.key.name, about: b.key.about, foundIn: c.place.lookupId, at: now, source: 'taken', hider: e.event.pubkey, eventId: e.id, place: c.place, from }) || fresh
+      ;(fresh ? took : already).push(row)
+    }
+    const text = [
+      took.length ? `Took ${took.length} thing(s) from the chest "${c.name}" (${handle(c.id)}); the chest still holds them for others. items lists what you hold.` : `Nothing new to take from the chest "${c.name}" (${handle(c.id)}).`,
+      ...took.map(contentLine),
+      already.length ? `Already yours: ${already.map((r) => `${r.type} "${r.name}" [${handle(r.id)}]`).join(', ')}.` : '',
+    ].filter(Boolean).join('\n')
+    return { text, data: { chest: { id: c.id, name: c.name }, took, already: already.map((r) => r.id) } }
+  }
+
+  /** The forge_item tool: forge an item and hide it, held at once (B1 3.1). */
+  forgeItem(input: { name: string; about?: string; coordinate?: CoordinateInput; height: number; hint_heights?: [number, number, number]; riddle?: string }): Promise<ToolResult> {
+    return this.hide({ contents: { key: { name: input.name, about: input.about } }, coordinate: input.coordinate ?? { dx: 0, dy: 0, dz: 0 }, height: input.height, hint_heights: input.hint_heights, riddle: input.riddle })
+  }
+
+  /** The seal_chest tool: seal things to a public key and hide the chest (B1 3.1). */
+  sealChest(input: { name: string; lock: string; requires?: string; contents: ChestContentInput[]; coordinate?: CoordinateInput; height: number; hint_heights?: [number, number, number]; riddle?: string }): Promise<ToolResult> {
+    return this.hide({ contents: { chest: { name: input.name, lock: input.lock, requires: input.requires, entries: input.contents } }, coordinate: input.coordinate ?? { dx: 0, dy: 0, dz: 0 }, height: input.height, hint_heights: input.hint_heights, riddle: input.riddle })
+  }
+
+  /**
+   * What a comment on `given` answers (ONOSENDAI comments.ts itemParent): an
+   * item in a bag the agent opened, a chest, or a thing revealed from a chest
+   * it opened, by at least 8 hex of its id. The root is always the bag; the
+   * region key is the bag's, held or derived again from its place.
+   */
+  private commentTarget(given: string): { subject: CommentSubject; parent: CommentParent; key: Uint8Array; what: string } {
+    const want = String(given ?? '').trim().toLowerCase()
+    if (!/^[0-9a-f]{8,64}$/.test(want)) throw new Refusal('target must be at least 8 hex characters of an id find, open_chest or items listed: an item in a bag, a chest, or a thing inside an opened chest.')
+    type Hit = { id: string; type: HiddenType; author: string; lookupId: string; height: number; base: { x: string; y: string; z: string }; byReference?: boolean; label: string }
+    const hits = new Map<string, Hit>()
+    for (const bag of this.keys.bags.values()) {
+      for (const e of bag.entries) if (e.eventId.startsWith(want)) hits.set(e.eventId, { id: e.eventId, type: e.type, author: bag.author, lookupId: bag.lookupId, height: bag.height, base: bag.base, byReference: e.byReference, label: e.label })
+    }
+    for (const c of this.keys.chests.values()) {
+      for (const x of c.contents ?? []) {
+        if (x.id.startsWith(want) && !hits.has(x.id)) hits.set(x.id, { id: x.id, type: x.type, author: c.bagAuthor ?? c.author, lookupId: c.place.lookupId, height: c.place.height, base: { x: c.place.x, y: c.place.y, z: c.place.z }, label: `a ${x.type} inside the chest "${c.name}"` })
+      }
+    }
+    if (hits.size === 0) throw new Refusal(`Nothing you opened has an id starting ${want}. find lists the ids of what is in a bag, open_chest the ids of what is in a chest.`)
+    if (hits.size > 1) throw new Refusal(`${hits.size} things you opened have ids starting ${want}; give more of the id.`)
+    const hit = [...hits.values()][0]
+    if (hit.byReference) throw new Refusal('That object is hidden by reference; this server comments only on items carried in the bag itself, and on chests and what they hold.')
+    const key = this.keys.byLookupId(hit.lookupId) ?? this.keys.keyAt({ x: BigInt(hit.base.x), y: BigInt(hit.base.y), z: BigInt(hit.base.z) }, hit.height, 'find')
+    if (key.lookupId !== hit.lookupId) throw new Refusal('The key for the bag that holds it could not be derived again; call find there first.')
+    return {
+      subject: { author: hit.author, lookupId: hit.lookupId },
+      parent: { id: hit.id, kind: itemKind(hit.type), pubkey: hit.author },
+      key: hexToBytes(key.keyHex),
+      what: `${hit.type} "${hit.label}" in the bag of ${hit.author === this.pubkey ? 'yours' : `${hit.author.slice(0, 8)}...`} (h${hit.height})`,
+    }
+  }
+
+  /**
+   * The comment tool: a NIP-22 comment (kind 1111) on something the agent
+   * opened, written exactly as ONOSENDAI writes one, so it shows under that
+   * thing in ONOSENDAI. The words are sealed to the place: whoever reaches it
+   * reads them, everyone else sees a placeholder. Publishes to the agent's
+   * relays.
+   */
+  async comment(input: { target: string; text: string }): Promise<ToolResult> {
+    const text = String(input.text ?? '').trim()
+    if (!text) throw new Refusal('Say something: the comment is empty.')
+    if (text.length > MAX_COMMENT_LENGTH) throw new Refusal(`The comment is ${text.length} characters; at most ${MAX_COMMENT_LENGTH}.`)
+    // Whoever reaches the place reads it: never the operator's DMs, as the travel log refuses them (travel.ts), and never a coin.
+    if (repeatsPrivate(text, this.operatorChannel.privateTexts())) throw new Refusal('That comment repeats what your operator told you, or you told them, in private. Comments are read by whoever reaches the place; say it in your own words, without the private part. Nothing was published.')
+    if (CASHU_TOKEN.test(text)) throw new Refusal('That comment holds a Cashu token, which is money anyone who reads it can spend. Nothing was published.')
+    const { subject, parent, key, what } = this.commentTarget(input.target)
+    const event = this.sign(await sealedComment(subject, parent, text, nowSeconds(), key))
+    const result = await this.relays.publish(event)
+    const refused = Object.entries(result.reasons ?? {})
+    if (!result.ok) throw new Refusal(`The comment was not published: ${refused.map(([u, r]) => `${u}: ${r}`).join('; ') || result.reason}. The relays' words are verbatim.`)
+    return {
+      text: `Commented on the ${what}: accepted by ${result.accepted.join(', ')}${refused.length ? `; refused by ${refused.map(([u, r]) => `${u} (${r})`).join(', ')}` : ''}. The words are sealed to that place: whoever finds the bag reads them (ONOSENDAI shows them under it), and everyone else sees only a placeholder.`,
+      data: { id: event.id, target: parent.id, kind: parent.kind, bag: `33330:${subject.author}:${subject.lookupId}`, accepted: result.accepted, refused: Object.fromEntries(refused) },
+    }
+  }
+
+  /** An object by the id find, open_chest or items listed: opened this session, or taken from a chest (kept across restarts). */
+  private objectById(given: string): { id: string; shard: ShardModel } {
+    const want = given.trim().toLowerCase()
+    if (!/^[0-9a-f]{8,64}$/.test(want)) throw new Refusal('id must be 8 to 64 hex characters of an object\'s id, as find, open_chest or items lists it.')
+    const seen = [...this.objectsSeen.entries()].filter(([k]) => k.startsWith(want)).map(([id, shard]) => ({ id, shard }))
+    const taken = [...this.keys.taken.values()].filter((t) => t.type === 'shard' && t.payload !== undefined && objectHandle(t.id).startsWith(want) && !seen.some((x) => x.id === objectHandle(t.id)))
+      .flatMap((t) => { const v = validateSnoPayload(t.payload); return v.ok ? [{ id: objectHandle(t.id), shard: v.shard }] : [] })
+    const hits = [...seen, ...taken]
+    if (hits.length === 0) throw new Refusal(`No object with id ${want} among the ${this.objectsSeen.size} opened this session or those you took from chests. Call find (or look) where it is first; objects you did not take are remembered in memory only, not across a restart.`)
+    if (hits.length > 1) throw new Refusal(`${hits.length} objects have ids starting ${want}; give more of the id.`)
+    return hits[0]
+  }
+
   // ---- render -----------------------------------------------------------------
 
   private rememberObject(id: string, shard: ShardModel): void {
@@ -1687,13 +2030,9 @@ export class Agent {
       shard = v.shard
       source = 'payload'
     } else if (input.id !== undefined) {
-      const want = input.id.trim().toLowerCase()
-      if (!/^[0-9a-f]{8,64}$/.test(want)) throw new Refusal('id must be 8 to 64 hex characters of an object\'s id, as find lists it.')
-      const hits = [...this.objectsSeen.entries()].filter(([k]) => k.startsWith(want))
-      if (hits.length === 0) throw new Refusal(`No object with id ${want} among the ${this.objectsSeen.size} opened this session. Call find (or look) where it is first; objects are remembered in memory only, not across a restart.`)
-      if (hits.length > 1) throw new Refusal(`${hits.length} objects opened this session have ids starting ${want}; give more of the id.`)
-      shard = hits[0][1]
-      source = `id ${hits[0][0]}`
+      const hit = this.objectById(input.id)
+      shard = hit.shard
+      source = `id ${hit.id}`
     } else {
       const { address, object } = await this.publicObject(String(input.address))
       if (object.tags.some((t) => t[0] === 'encrypted')) throw new Refusal('That object is sealed to a place. Find it where it is hidden and render it by the id find lists.')
@@ -1861,12 +2200,31 @@ export class Agent {
     return this.keeper.place()
   }
 
+  /**
+   * What every tool result says on top of its own answer (arkinox,
+   * 2026-10-12): that the operator's orders wait unread, from the
+   * background poll, and that the operator tagged the agent in chat. A model
+   * deep in a long sweep sees it on its next tool call. Null when there is
+   * nothing to say. Counts only; never a message's words.
+   */
+  notices(): { lines: string[]; newOrders: number; operatorTaggedInChat: number } | null {
+    const newOrders = this.operatorChannel.unreadOrders()
+    const operatorTaggedInChat = this.chat.unreadSummary().addressedFromOperator
+    const lines: string[] = []
+    if (newOrders > 0) lines.push(`NEW ORDERS: ${newOrders} message(s) from your operator wait. Call inbox now, before continuing.`)
+    if (operatorTaggedInChat > 0) lines.push('Your operator tagged you in chat: call listen.')
+    return lines.length ? { lines, newOrders, operatorTaggedInChat } : null
+  }
+
   /** Stop listening, close the sockets, release the lock. */
   async stop(): Promise<void> {
     if (this.stopped) return
     this.stopped = true
     // A ride computing in the background ends first, its finished leaves flushed to disk (arkinox, 2026-10-11).
     await this.transit.stop()
+    // A 👀 already on its way gets a moment to land (arkinox, 2026-10-12). Only when one is: from here to the close nothing yields, so no subscription opens on a closing socket.
+    this.operatorChannel.stop()
+    if (this.operatorChannel.reacting()) await Promise.race([this.operatorChannel.reactionsSettled(), new Promise((r) => setTimeout(r, 3000).unref())])
     this.wallet.stop()
     this.outbox.stop()
     this.follow.stop()
