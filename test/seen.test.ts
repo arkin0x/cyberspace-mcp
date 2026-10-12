@@ -261,6 +261,8 @@ describe('NEW ORDERS on every tool result (arkinox, 2026-10-12)', () => {
 
     const read = await call('inbox')
     expect(read.text).toContain('drop everything and come home')
+    // The 👀 says it arrived; this asks the agent to say it understood before long work (arkinox, 2026-10-12).
+    expect(read.text).toContain('Before starting work that takes more than a minute, reply to your operator with message_operator saying what you are about to do.')
     const after = await call('budget')
     expect(after.text).not.toContain('NEW ORDERS')
     expect(after.data.newOrders).toBeUndefined()

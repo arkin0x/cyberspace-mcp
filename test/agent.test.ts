@@ -191,7 +191,8 @@ describe('an agent on a fresh key', () => {
   it('prices a key above the passive scan height and spends what it took', async () => {
     const spentBefore = a.budget.spentSeconds
     const found = await a.find({ max_height: 14 })
-    expect((found.data.scanned as { heights: number[] }).heights).toEqual([1, 14])
+    // From h0, the gibson itself, as ONOSENDAI scans (arkinox, 2026-10-12).
+    expect((found.data.scanned as { heights: number[] }).heights).toEqual([0, 14])
     expect(a.budget.spentSeconds).toBeGreaterThan(spentBefore)
     // Over the session cap, a high key is refused before it is derived.
     const spent = a.budget.spentSeconds

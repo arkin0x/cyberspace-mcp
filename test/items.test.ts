@@ -2,11 +2,13 @@
 // B1 and its 2026-10-10 addendum; arkinox, 2026-10-12: "I don't think the
 // MCP server gives the agent any knowledge of items or sealed chests or how
 // to use them"). fixtures/onosendai-items.json was made with ONOSENDAI's own
-// code (origin/v2 f9e9f02: src/lib/hidden.ts, chests.ts, inventory.ts and
-// client.ts, run outside this repository) and test keys: a bag ONOSENDAI
-// sealed at the test agent's spawn holding an item and three chests, its key
-// and chest templates for fixed inputs, and what ONOSENDAI's readers made of
-// a key and a chest sealed by this server's code. The agent finds, holds,
+// code (origin/v2 b615675: src/lib/hidden.ts, chests.ts, inventory.ts,
+// client.ts and comments.ts, run outside this repository) and test keys: a
+// bag ONOSENDAI sealed at the test agent's spawn holding an item and three
+// chests, a bag it sealed at h0 (the spawn gibson alone), its key, chest and
+// comment templates for fixed inputs, and what ONOSENDAI's readers made of a
+// key, a chest and a comment sealed by this server's code. The agent scans
+// h0 to h12 as ONOSENDAI does, and comments as ONOSENDAI comments. The agent finds, holds,
 // opens and takes what ONOSENDAI hid; what the agent forges and seals has
 // ONOSENDAI's tags exactly; no answer, log or state file but the item store
 // carries an item's secret. Fake relays only.
@@ -20,6 +22,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { Agent, Refusal } from '../src/agent.js'
 import { chestInnerTemplate, chestItemOf, keyInnerTemplate, keyItemOf, unbag, type KeyItem } from '../src/hidden/bags.js'
 import { openWithSecret, readContents } from '../src/hidden/chests.js'
+import { commentTemplate, readComment } from '../src/hidden/comments.js'
 import { hexToBytes, type NostrEvent } from '../src/nostr/event.js'
 import { createServer } from '../src/server.js'
 import type { Calibration } from '../src/space/calibration.js'
@@ -44,6 +47,13 @@ interface Fixture {
   }
   templates: { key: { kind: number; created_at: number; tags: string[][]; content: string }; chest: { kind: number; created_at: number; tags: string[][]; content: string }; chestInput: { name: string; lockPubkey: string; senderPubkey: string; requires: string; payload: string } }
   mcpBag: NostrEvent
+  h0: { lookupId: string; bag: NostrEvent; text: string; messageId: string }
+  comments: {
+    subject: { author: string; lookupId: string }
+    cases: Array<{ name: string; parent: { id: string; kind: number; pubkey: string }; template: { kind: number; created_at: number; tags: string[][]; content: string } }>
+    mcpComment: NostrEvent
+    onosendaiRead: { count: number; text: string; sealed: boolean; pubkey: string; parentId: string }
+  }
   reverse: { keyName: string; keyAbout: string; keyItemPubkey: string; keyMatches: boolean; chestName: string; chestRequires: string; chestLock: string; contents: Array<{ type: string; verified: boolean; text: string | null; shardName: string | null }> }
 }
 
@@ -57,7 +67,7 @@ const CANONICAL = 'wss://canonical.example'
 const MINE = 'wss://mine.example'
 const cal: Calibration = { version: 1, at: Date.now(), fingerprint: 'test', cantorMsByHeight: { 12: 10, 14: 60, 16: 400 }, sha256PerSec: 2_000_000 }
 
-describe('the wire, against ONOSENDAI (f9e9f02)', () => {
+describe('the wire, against ONOSENDAI (b615675)', () => {
   it('a key item and a chest are ONOSENDAI\'s templates, tag for tag', () => {
     const key: KeyItem = { name: 'Fixed', about: 'A fixed sentence.', itemPubkey: fx.expect.key.itemPubkey, secretHex: brassSecret }
     const t = fx.templates.key
@@ -93,6 +103,23 @@ describe('the wire, against ONOSENDAI (f9e9f02)', () => {
     expect(key.itemPubkey).toBe(fx.reverse.keyItemPubkey)
     const chest = mine.find((h) => h.type === 'chest')!.chest!
     expect(readContents(openWithSecret(chest, key.secretHex)).map((c) => c.body.text ?? c.body.shard?.name)).toEqual(['Sealed by the agent.', fx.expect.vault.shardName])
+  })
+})
+
+describe('comments, against ONOSENDAI (b615675)', () => {
+  it('a comment on an item, a chest and a thing inside a chest is ONOSENDAI\'s template, tag for tag (the client named as this server)', () => {
+    for (const c of fx.comments.cases) {
+      const ours = commentTemplate(fx.comments.subject, c.parent, 'CIPHERTEXT', c.template.created_at)
+      const theirs = { ...c.template, tags: c.template.tags.map((t) => (t[0] === 'client' ? ['client', 'cyberspace-mcp'] : t)) }
+      expect(ours).toEqual(theirs)
+      expect(ours.tags.map((t) => t[0])).toEqual(['A', 'K', 'P', 'e', 'k', 'p', 'client', 'encrypted'])
+    }
+  })
+
+  it('ONOSENDAI threaded a comment this server sealed under the item it answers, and opened its words', async () => {
+    expect(fx.comments.onosendaiRead).toMatchObject({ count: 1, text: 'Found a coin in the Vault.', sealed: false, pubkey: fx.agent, parentId: fx.comments.cases[2].parent.id })
+    const read = await readComment(fx.comments.mcpComment, regionKey)
+    expect(read).toEqual({ root: `33330:${fx.hider}:${fx.lookupId}`, parentId: fx.comments.cases[2].parent.id, parentKind: 1, text: 'Found a coin in the Vault.' })
   })
 })
 
@@ -136,12 +163,21 @@ describe('the agent and ONOSENDAI\'s items and chests', () => {
   }
 
   it('finds the item, holds it, opens what it can, and remembers the rest; items says what each item opens', async () => {
-    mine.seed(fx.bag)
+    mine.seed(fx.bag, fx.h0.bag)
     const { a, call } = await start()
     expect(a.pubkey).toBe(fx.agent)
     const found = await call('find', { max_height: fx.height })
     expect(found.text).toContain('Brass Key')
     expect(found.text).toContain('open_chest')
+    // The bag ONOSENDAI hid at h0, the spawn gibson alone, is found, and find says which cubes it scanned (arkinox, 2026-10-12).
+    expect(found.text).toContain(fx.h0.text)
+    expect(found.text).toContain(`Scanned the ${fx.height + 1} cubes of height 0 to ${fx.height} that contain the gibson you stand on`)
+    expect(found.data.scanned).toMatchObject({ heights: [0, fx.height] })
+    expect((found.data.bags as Array<{ height: number }>).map((b) => b.height).sort()).toEqual([0, fx.height])
+    // The passive scan holds the h0 key too, as ONOSENDAI's thirteen.
+    expect(a.keys.byLookupId(fx.h0.lookupId)?.height).toBe(0)
+    const full = await call('find', {})
+    expect(full.text).toContain('Scanned the 13 cubes of height 0 to 12')
     // The item is held, with where it came from and who made it.
     const brass = a.keys.items.get(fx.expect.key.itemPubkey)!
     expect(brass).toMatchObject({ name: 'Brass Key', source: 'found', hider: fx.hider, eventId: fx.expect.key.eventId, place: { lookupId: fx.lookupId, height: fx.height, x: fx.at.x } })
@@ -199,6 +235,25 @@ describe('the agent and ONOSENDAI\'s items and chests', () => {
     const items = await call('items')
     expect(items.text).toContain('Taken from chests (4)')
     expect(items.text).toContain('coin "Here is a coin: cashuBexampletokenAAAA"')
+
+    // A comment on the coin inside the Vault, as ONOSENDAI writes one: root the bag, parent the coin, words sealed to the place.
+    const plain = (tags: string[][]): string[][] => tags.filter((t) => t[0] !== 'encrypted' && t[0] !== 'client')
+    const coinId = contents[1].id
+    const said = await call('comment', { target: coinId.slice(0, 12), text: 'A coin was here, and I left it for the next finder.' })
+    expect(said.isError).toBe(false)
+    const ev = mine.all().find((e) => e.id === (said.data.id as string))!
+    expect(plain(ev.tags)).toEqual(plain(fx.comments.cases[2].template.tags))
+    expect(ev.tags.map((t) => t[0])).toEqual(['A', 'K', 'P', 'e', 'k', 'p', 'client', 'encrypted'])
+    expect(ev.content).toBe(fx.comments.cases[2].template.content)
+    expect(await readComment(ev, regionKey)).toMatchObject({ parentId: coinId, text: 'A coin was here, and I left it for the next finder.' })
+    // On the chest itself and on the item in the bag: the same scope, their own kinds.
+    const onChest = await call('comment', { target: fx.expect.vault.id.slice(0, 12), text: 'Opened it with the Brass Key.' })
+    expect(plain(mine.all().find((e) => e.id === onChest.data.id)!.tags)).toEqual(plain(fx.comments.cases[1].template.tags))
+    const onKey = await call('comment', { target: fx.expect.key.eventId.slice(0, 12), text: 'Found the key.' })
+    expect(plain(mine.all().find((e) => e.id === onKey.data.id)!.tags)).toEqual(plain(fx.comments.cases[0].template.tags))
+    // Never a coin; never something it never opened.
+    expect((await call('comment', { target: coinId.slice(0, 12), text: 'here: cashuBexampletokenAAAA' })).text).toContain('Cashu token')
+    expect((await call('comment', { target: 'deadbeefdeadbeef', text: 'x' })).text).toContain('Nothing you opened has an id starting deadbeefdeadbeef')
   }, 60_000)
 
   it('forges an item and seals chests to it the way ONOSENDAI does, and refuses a lock it cannot seal to', async () => {

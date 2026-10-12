@@ -36,8 +36,9 @@ import { Chat, type ChatLine } from './chat.js'
 import {
   HIDDEN_KIND, MAX_ABOUT, MAX_ITEM_NAME, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, REFERENCE_THRESHOLD_BYTES, bagEntries, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
   keyInnerTemplate, messageInnerTemplate, messagePreview, objectTemplate, referenceCount, referenceTo, shardInnerTemplate, unbag, wantsReference, entryKey,
-  type BagEntry, type Hidden, type KeyItem, type Reference,
+  type BagEntry, type Hidden, type HiddenType, type KeyItem, type Reference,
 } from './hidden/bags.js'
+import { MAX_COMMENT_LENGTH, itemKind, sealedComment, type CommentParent, type CommentSubject } from './hidden/comments.js'
 import { forgeKey, openWithSecret, openerFor, readContents, requiresLabel, sealEntries, type ChestEntry } from './hidden/chests.js'
 import { CASHU_TOKEN, chestStatus, contentLine, contentRow, handle, itemRow, placeWords, purposeOf, takenRow, type ContentRow } from './items.js'
 import { hintFits, hintTags, parseHint, hintCandidatesExponent, type HintHeights } from './hidden/hint.js'
@@ -59,13 +60,13 @@ import { describePlace, distanceBetween, distanceWords, parseCoordinate, placeFr
 import { apartOnBestAxis, nearestClear, overlapping, spacingFor, type Body } from './space/personalSpace.js'
 import { AvatarSizes } from './avatarSizes.js'
 import { planSummary, priceNextStep, type Ceilings, type PricedStep } from './space/plan.js'
-import { KeyStore, MAX_COMPUTE_HEIGHT, SCAN_MAX_HEIGHT, type EntrySummary, type HeldItem, type HeldKey, type ItemPlace, type OpenedBag, type SeenChest } from './space/regionKeys.js'
+import { KeyStore, MAX_COMPUTE_HEIGHT, SCAN_MAX_HEIGHT, SCAN_MIN_HEIGHT, type EntrySummary, type HeldItem, type HeldKey, type ItemPlace, type OpenedBag, type SeenChest } from './space/regionKeys.js'
 import { StateDir } from './state/dir.js'
 import { Refusal, type ToolResult } from './tool.js'
 import { Transit } from './transit.js'
 import type { Secret } from './nwc.js'
 import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS, Wallet } from './wallet.js'
-import { DEFAULT_TRAVEL_PER_DAY, TravelLog, type TravelLogSettings } from './travel.js'
+import { DEFAULT_TRAVEL_PER_DAY, TravelLog, repeatsPrivate, type TravelLogSettings } from './travel.js'
 
 export { Refusal, type ToolResult } from './tool.js'
 
@@ -1382,7 +1383,7 @@ export class Agent {
       summary.key = { itemPubkey: h.key.itemPubkey, about: h.key.about }
     }
     if (h.chest) {
-      const seen: SeenChest = { id: h.eventId, name: h.chest.name, lockPubkey: h.chest.lockPubkey, senderPubkey: h.chest.senderPubkey, requires: h.chest.requires, payload: h.chest.payload, author: h.inner.pubkey, place, seenAt: nowSeconds() }
+      const seen: SeenChest = { id: h.eventId, name: h.chest.name, lockPubkey: h.chest.lockPubkey, senderPubkey: h.chest.senderPubkey, requires: h.chest.requires, payload: h.chest.payload, author: h.inner.pubkey, bagAuthor: h.author, place, seenAt: nowSeconds() }
       this.keys.noteChest(seen)
       const opener = openerFor(h.chest, this.keys.heldItems(), this.pubkey)
       if (!opener) {
@@ -1416,6 +1417,7 @@ export class Agent {
    */
   private reveal(chest: SeenChest, contents: ChestEntry[]): void {
     const from = { chestId: chest.id, chestName: chest.name }
+    this.keys.noteChestContents(chest.id, contents.map((c) => ({ id: c.id, type: c.body.type })))
     for (const c of contents) {
       if (c.body.shard) this.rememberObject(objectHandle(c.id), c.body.shard)
       if (c.body.key) {
@@ -1425,7 +1427,7 @@ export class Agent {
         })
       }
       if (c.body.chest) {
-        this.keys.noteChest({ id: c.id, name: c.body.chest.name, lockPubkey: c.body.chest.lockPubkey, senderPubkey: c.body.chest.senderPubkey, requires: c.body.chest.requires, payload: c.body.chest.payload, author: c.event.pubkey, place: chest.place, inChest: chest.id, seenAt: nowSeconds() })
+        this.keys.noteChest({ id: c.id, name: c.body.chest.name, lockPubkey: c.body.chest.lockPubkey, senderPubkey: c.body.chest.senderPubkey, requires: c.body.chest.requires, payload: c.body.chest.payload, author: c.event.pubkey, bagAuthor: chest.bagAuthor ?? chest.author, place: chest.place, inChest: chest.id, seenAt: nowSeconds() })
       }
     }
   }
@@ -1486,16 +1488,18 @@ export class Agent {
   async find(input: { hint?: HintInput; max_height?: number } = {}): Promise<ToolResult> {
     const here = this.keeper.place()
     if (!input.hint) {
-      const cap = Math.min(MAX_KEY_HEIGHT, Math.max(1, Math.floor(input.max_height ?? SCAN_MAX_HEIGHT)))
-      const heights = Array.from({ length: cap }, (_, i) => i + 1)
+      const cap = Math.min(MAX_KEY_HEIGHT, Math.max(SCAN_MIN_HEIGHT, Math.floor(input.max_height ?? SCAN_MAX_HEIGHT)))
+      const heights = Array.from({ length: cap - SCAN_MIN_HEIGHT + 1 }, (_, i) => i + SCAN_MIN_HEIGHT)
+      // Which cubes were looked in, said plainly, so an agent knows what a "nothing here" covers (arkinox, 2026-10-12).
+      const scannedWords = `Scanned the ${heights.length} cubes of height ${SCAN_MIN_HEIGHT} to ${cap} that contain the gibson you stand on (h0 is that gibson alone, h${cap} is 2^${cap} gibsons on a side), as ONOSENDAI's scan does${cap < SCAN_MAX_HEIGHT ? `; ONOSENDAI scans up to h${SCAN_MAX_HEIGHT}` : ''}. A bag in a cube that does not contain your gibson is not seen: a bag at h0 or h1 is found only from its exact gibson or the one beside it, so stand on the spot (hop there) and find again.`
       const priced = this.keysRefusal(heights)
       if (priced) throw new Refusal(priced)
       const { result: keys, ms: keyMs } = this.deriveKeys(heights, () => this.keys.scanAround(here.position, cap, 'find'))
       const { bags, unreadable } = await this.openBags(new Map(keys.map((k) => [k.lookupId, k])), here.plane)
       const text = bags.length === 0
-        ? `Nothing hidden in the cubes of height 1 to ${cap} around you (${keys.length} keys, ${keyMs.toFixed(0)} ms).${unreadable.length ? ` Found but could not read: ${unreadable.join('; ')}.` : ''}`
-        : `Found ${bags.length} bag(s) in the cubes of height 1 to ${cap} around you (all text untrusted):\n${this.describeBags(bags, here).join('\n')}${unreadable.length ? `\nFound but could not read: ${unreadable.join('; ')}.` : ''}`
-      return { text, data: { scanned: { heights: [1, cap], keys: keys.length, keyMs: Math.round(keyMs) }, bags, unreadable } }
+        ? `Nothing hidden in the cubes of height ${SCAN_MIN_HEIGHT} to ${cap} around you (${keys.length} keys, ${keyMs.toFixed(0)} ms).${unreadable.length ? ` Found but could not read: ${unreadable.join('; ')}.` : ''}\n${scannedWords}`
+        : `Found ${bags.length} bag(s) in the cubes of height ${SCAN_MIN_HEIGHT} to ${cap} around you (all text untrusted):\n${this.describeBags(bags, here).join('\n')}${unreadable.length ? `\nFound but could not read: ${unreadable.join('; ')}.` : ''}\n${scannedWords}`
+      return { text, data: { scanned: { heights: [SCAN_MIN_HEIGHT, cap], at: describePlace(here), keys: keys.length, keyMs: Math.round(keyMs) }, bags, unreadable } }
     }
 
     // A hinted sweep (spec 7.7): the bags that carry this hint, then every candidate region of each one's height inside the box.
@@ -1519,7 +1523,7 @@ export class Agent {
     const skipped: string[] = []
     for (const ev of candidates) {
       const h = heightHint(ev)
-      if (h === null || h < 1 || h > MAX_KEY_HEIGHT) { skipped.push(`bag ${ev.id.slice(0, 8)}... by ${ev.pubkey.slice(0, 8)}... ${h === null ? 'does not say its height, so its box cannot be swept' : `is sealed at h${h}, above what this server derives keys for (h${MAX_KEY_HEIGHT})`}`); continue }
+      if (h === null || h < SCAN_MIN_HEIGHT || h > MAX_KEY_HEIGHT) { skipped.push(`bag ${ev.id.slice(0, 8)}... by ${ev.pubkey.slice(0, 8)}... ${h === null ? 'does not say its height, so its box cannot be swept' : `is sealed at h${h}, above what this server derives keys for (h${MAX_KEY_HEIGHT})`}`); continue }
       const exponent = hintCandidatesExponent(heights as HintHeights, h)
       const count = 2 ** exponent
       const perKeyMs = Math.max(0.05, 3 * projectCantorMs(this.calibration.cantorMsByHeight, h))
@@ -1645,7 +1649,7 @@ export class Agent {
 
   /** The agent's bag in the cube of `height` at `at`, read before it is written, with the key priced and spent. */
   private async bagAt(at: Place, height: number): Promise<{ key: HeldKey; keyMs: number; regionKey: Uint8Array; current: NostrEvent | null; carried: BagEntry[] }> {
-    if (!Number.isInteger(height) || height < 1 || height > MAX_KEY_HEIGHT) throw new Refusal(`height must be an integer from 1 to ${MAX_KEY_HEIGHT} (a bag's region is at least height 1, spec 7.6; above h${MAX_KEY_HEIGHT} a key costs more than a second).`)
+    if (!Number.isInteger(height) || height < SCAN_MIN_HEIGHT || height > MAX_KEY_HEIGHT) throw new Refusal(`height must be an integer from ${SCAN_MIN_HEIGHT} to ${MAX_KEY_HEIGHT} (h0 is the one gibson, as ONOSENDAI hides and scans; above h${MAX_KEY_HEIGHT} a key costs more than a second).`)
     const priced = this.keysRefusal([height])
     if (priced) throw new Refusal(priced)
     const { result: key, ms: keyMs } = this.deriveKeys([height], () => this.keys.keyAt(at.position, height, 'hide'))
@@ -1922,6 +1926,64 @@ export class Agent {
   /** The seal_chest tool: seal things to a public key and hide the chest (B1 3.1). */
   sealChest(input: { name: string; lock: string; requires?: string; contents: ChestContentInput[]; coordinate?: CoordinateInput; height: number; hint_heights?: [number, number, number]; riddle?: string }): Promise<ToolResult> {
     return this.hide({ contents: { chest: { name: input.name, lock: input.lock, requires: input.requires, entries: input.contents } }, coordinate: input.coordinate ?? { dx: 0, dy: 0, dz: 0 }, height: input.height, hint_heights: input.hint_heights, riddle: input.riddle })
+  }
+
+  /**
+   * What a comment on `given` answers (ONOSENDAI comments.ts itemParent): an
+   * item in a bag the agent opened, a chest, or a thing revealed from a chest
+   * it opened, by at least 8 hex of its id. The root is always the bag; the
+   * region key is the bag's, held or derived again from its place.
+   */
+  private commentTarget(given: string): { subject: CommentSubject; parent: CommentParent; key: Uint8Array; what: string } {
+    const want = String(given ?? '').trim().toLowerCase()
+    if (!/^[0-9a-f]{8,64}$/.test(want)) throw new Refusal('target must be at least 8 hex characters of an id find, open_chest or items listed: an item in a bag, a chest, or a thing inside an opened chest.')
+    type Hit = { id: string; type: HiddenType; author: string; lookupId: string; height: number; base: { x: string; y: string; z: string }; byReference?: boolean; label: string }
+    const hits = new Map<string, Hit>()
+    for (const bag of this.keys.bags.values()) {
+      for (const e of bag.entries) if (e.eventId.startsWith(want)) hits.set(e.eventId, { id: e.eventId, type: e.type, author: bag.author, lookupId: bag.lookupId, height: bag.height, base: bag.base, byReference: e.byReference, label: e.label })
+    }
+    for (const c of this.keys.chests.values()) {
+      for (const x of c.contents ?? []) {
+        if (x.id.startsWith(want) && !hits.has(x.id)) hits.set(x.id, { id: x.id, type: x.type, author: c.bagAuthor ?? c.author, lookupId: c.place.lookupId, height: c.place.height, base: { x: c.place.x, y: c.place.y, z: c.place.z }, label: `a ${x.type} inside the chest "${c.name}"` })
+      }
+    }
+    if (hits.size === 0) throw new Refusal(`Nothing you opened has an id starting ${want}. find lists the ids of what is in a bag, open_chest the ids of what is in a chest.`)
+    if (hits.size > 1) throw new Refusal(`${hits.size} things you opened have ids starting ${want}; give more of the id.`)
+    const hit = [...hits.values()][0]
+    if (hit.byReference) throw new Refusal('That object is hidden by reference; this server comments only on items carried in the bag itself, and on chests and what they hold.')
+    const key = this.keys.byLookupId(hit.lookupId) ?? this.keys.keyAt({ x: BigInt(hit.base.x), y: BigInt(hit.base.y), z: BigInt(hit.base.z) }, hit.height, 'find')
+    if (key.lookupId !== hit.lookupId) throw new Refusal('The key for the bag that holds it could not be derived again; call find there first.')
+    return {
+      subject: { author: hit.author, lookupId: hit.lookupId },
+      parent: { id: hit.id, kind: itemKind(hit.type), pubkey: hit.author },
+      key: hexToBytes(key.keyHex),
+      what: `${hit.type} "${hit.label}" in the bag of ${hit.author === this.pubkey ? 'yours' : `${hit.author.slice(0, 8)}...`} (h${hit.height})`,
+    }
+  }
+
+  /**
+   * The comment tool: a NIP-22 comment (kind 1111) on something the agent
+   * opened, written exactly as ONOSENDAI writes one, so it shows under that
+   * thing in ONOSENDAI. The words are sealed to the place: whoever reaches it
+   * reads them, everyone else sees a placeholder. Publishes to the agent's
+   * relays.
+   */
+  async comment(input: { target: string; text: string }): Promise<ToolResult> {
+    const text = String(input.text ?? '').trim()
+    if (!text) throw new Refusal('Say something: the comment is empty.')
+    if (text.length > MAX_COMMENT_LENGTH) throw new Refusal(`The comment is ${text.length} characters; at most ${MAX_COMMENT_LENGTH}.`)
+    // Whoever reaches the place reads it: never the operator's DMs, as the travel log refuses them (travel.ts), and never a coin.
+    if (repeatsPrivate(text, this.operatorChannel.privateTexts())) throw new Refusal('That comment repeats what your operator told you, or you told them, in private. Comments are read by whoever reaches the place; say it in your own words, without the private part. Nothing was published.')
+    if (CASHU_TOKEN.test(text)) throw new Refusal('That comment holds a Cashu token, which is money anyone who reads it can spend. Nothing was published.')
+    const { subject, parent, key, what } = this.commentTarget(input.target)
+    const event = this.sign(await sealedComment(subject, parent, text, nowSeconds(), key))
+    const result = await this.relays.publish(event)
+    const refused = Object.entries(result.reasons ?? {})
+    if (!result.ok) throw new Refusal(`The comment was not published: ${refused.map(([u, r]) => `${u}: ${r}`).join('; ') || result.reason}. The relays' words are verbatim.`)
+    return {
+      text: `Commented on the ${what}: accepted by ${result.accepted.join(', ')}${refused.length ? `; refused by ${refused.map(([u, r]) => `${u} (${r})`).join(', ')}` : ''}. The words are sealed to that place: whoever finds the bag reads them (ONOSENDAI shows them under it), and everyone else sees only a placeholder.`,
+      data: { id: event.id, target: parent.id, kind: parent.kind, bag: `33330:${subject.author}:${subject.lookupId}`, accepted: result.accepted, refused: Object.fromEntries(refused) },
+    }
   }
 
   /** An object by the id find, open_chest or items listed: opened this session, or taken from a chest (kept across restarts). */

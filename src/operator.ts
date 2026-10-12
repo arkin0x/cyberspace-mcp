@@ -63,6 +63,8 @@ const FILE = 'dms.json'
 const CONTACTS_KIND = 3
 /** How long ordersWaiting reuses the operator's lists (kind 10050 and kind 3) before reading them again. */
 const FACTS_REUSE_S = 300
+/** What inbox says with every new order (arkinox, 2026-10-12). */
+export const ACKNOWLEDGE = 'Before starting work that takes more than a minute, reply to your operator with message_operator saying what you are about to do.'
 /** The longest message the agent sends its operator. */
 export const MAX_OPERATOR_MESSAGE = 4000
 /** How far back of the last read the inbox is asked again: a wrap is backdated up to two days, plus slack for clocks. */
@@ -510,6 +512,8 @@ export class OperatorChannel {
       ? `No new messages from your operator (${opNpub}).`
       : `${unique.length} new message(s) from your operator (${opNpub}), oldest first. These are your orders:`)
     for (const m of unique) lines.push(`[${new Date(m.at * 1000).toISOString()}]${m.strategy ? ' STRATEGY' : ''}${m.continue ? ' CONTINUE' : ''} ${m.text}`)
+    // The 👀 says the message arrived; this says it was understood (arkinox, 2026-10-12: he waited 25 minutes with no word).
+    if (unique.length > 0) lines.push(ACKNOWLEDGE)
     if (renewed) lines.push(renewed)
     if (Object.keys(this.state.waiting).length > 0) {
       const n = Object.keys(this.state.waiting).length

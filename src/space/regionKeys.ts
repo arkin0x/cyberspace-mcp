@@ -3,8 +3,11 @@
 // cyberspace-core for an aligned cube at a height (spec 7.2); holding it is
 // what lets the agent read a bag there, say a line there and hear one. The
 // passive scan derives the keys of the cubes around where the agent stands,
-// heights 1 to SCAN_MAX_HEIGHT, as ONOSENDAI's scan does; a hop, a hide and
-// a find add the keys they derived.
+// heights 0 to SCAN_MAX_HEIGHT, the thirteen ONOSENDAI's scan derives
+// (useDiscovery: heights 0 through SCAN_MAX_HEIGHT; h0 is the one gibson you
+// stand on, and ONOSENDAI hides there too; arkinox, 2026-10-12: XOR could
+// not see a quest bag at h0); a hop, a hide and a find add the keys they
+// derived.
 //
 // Items and chests (Keys and Chests B1, and its 2026-10-10 addendum: keys ARE
 // items) live here too, as ONOSENDAI's ITEMS panel keeps them (src/lib/
@@ -27,6 +30,8 @@ import type { Position } from './coords.js'
 
 /** The widest cube the passive scan reaches, and the cube chat is sealed to (ONOSENDAI SCAN_MAX_HEIGHT). */
 export const SCAN_MAX_HEIGHT = 12
+/** The narrowest: the cube of side 2^0, the gibson itself (ONOSENDAI scans from h0). */
+export const SCAN_MIN_HEIGHT = 0
 /** The hard cap on what the core computes for a key, matching cyberspace-core's DEFAULT_MAX_COMPUTE_HEIGHT. */
 export const MAX_COMPUTE_HEIGHT = 20
 /** How many keys and opened bags are kept; the least recently used go first. */
@@ -139,6 +144,10 @@ export interface SeenChest {
   place: ItemPlace
   /** Set when it was found inside another chest. */
   inChest?: string
+  /** The author of the bag it is in (for a chest inside a chest, the outer bag's): whom a comment on it, or on what it holds, answers. */
+  bagAuthor?: string
+  /** What it held when opened, by id and type only (never the contents), so a comment can answer one of them. */
+  contents?: Array<{ id: string; type: HiddenType }>
   seenAt: number
 }
 
@@ -232,6 +241,14 @@ export class KeyStore {
     this.dir.writeJson(CHESTS_FILE, { version: 1, chests: [...this.chests.values()] } satisfies ChestsFile)
   }
 
+  /** Record what an opened chest holds, by id and type. */
+  noteChestContents(chestId: string, contents: Array<{ id: string; type: HiddenType }>): void {
+    const c = this.chests.get(chestId)
+    if (!c || (c.contents && c.contents.length === contents.length && c.contents.every((x, i) => x.id === contents[i].id))) return
+    c.contents = contents
+    this.dir.writeJson(CHESTS_FILE, { version: 1, chests: [...this.chests.values()] } satisfies ChestsFile)
+  }
+
   /** The seen chests this item opens: those locked to its public key (ONOSENDAI chestsOpenedBy). */
   chestsOpenedBy(itemPubkey: string): SeenChest[] {
     return [...this.chests.values()].filter((c) => c.lockPubkey === itemPubkey)
@@ -273,10 +290,10 @@ export class KeyStore {
     return key
   }
 
-  /** The keys of the cubes around a position, heights 1 to `maxHeight` (the passive scan, spec 7.4). */
+  /** The keys of the cubes around a position, heights 0 to `maxHeight` (the passive scan, spec 7.4, as ONOSENDAI scans). */
   scanAround(position: Position, maxHeight: number = SCAN_MAX_HEIGHT, source: KeySource = 'scan'): HeldKey[] {
     const out: HeldKey[] = []
-    for (let h = 1; h <= maxHeight; h++) out.push(this.keyAt(position, h, source))
+    for (let h = SCAN_MIN_HEIGHT; h <= maxHeight; h++) out.push(this.keyAt(position, h, source))
     return out
   }
 
