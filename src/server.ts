@@ -106,52 +106,84 @@ function refused(message: string): CallToolResult {
   return { content: [{ type: 'text', text: `REFUSED: ${message}` }], structuredContent: { refused: message }, isError: true }
 }
 
-async function run(log: (line: string) => void, fn: () => Promise<ToolResult> | ToolResult): Promise<CallToolResult> {
-  try {
-    return ok(await fn())
-  } catch (err) {
-    if (err instanceof Refusal) return refused(err.message)
-    const message = err instanceof Error ? err.message : String(err)
-    log(`tool error: ${err instanceof Error ? err.stack ?? err.message : String(err)}`)
-    return { content: [{ type: 'text', text: `ERROR: ${message}` }], isError: true }
+type Notices = ReturnType<Agent['notices']>
+
+/**
+ * Every result, refusals and errors included, carries the notices (arkinox,
+ * 2026-10-12: NEW ORDERS mid-turn): one line each at the end of the text,
+ * and newOrders and operatorTaggedInChat in the structured content.
+ */
+function withNotices(result: CallToolResult, notices: Notices): CallToolResult {
+  if (!notices) return result
+  const content = [...result.content]
+  let last = -1
+  content.forEach((c, i) => { if (c.type === 'text') last = i })
+  const lines = notices.lines.join('\n')
+  if (last >= 0) {
+    const t = content[last] as { type: 'text'; text: string }
+    content[last] = { ...t, text: `${t.text}\n${lines}` }
+  } else {
+    content.push({ type: 'text', text: lines })
   }
+  const structured = { ...(result.structuredContent ?? {}), newOrders: notices.newOrders, operatorTaggedInChat: notices.operatorTaggedInChat }
+  return { ...result, content, structuredContent: structured }
+}
+
+async function run(log: (line: string) => void, fn: () => Promise<ToolResult> | ToolResult, notices: () => Notices = () => null): Promise<CallToolResult> {
+  let result: CallToolResult
+  try {
+    result = ok(await fn())
+  } catch (err) {
+    if (err instanceof Refusal) {
+      result = refused(err.message)
+    } else {
+      const message = err instanceof Error ? err.message : String(err)
+      log(`tool error: ${err instanceof Error ? err.stack ?? err.message : String(err)}`)
+      result = { content: [{ type: 'text', text: `ERROR: ${message}` }], isError: true }
+    }
+  }
+  let n: Notices = null
+  try { n = notices() } catch { n = null }
+  return withNotices(result, n)
 }
 
 export function createServer(agent: Agent, log: (line: string) => void = () => {}): McpServer {
   const server = new McpServer({ name: 'cyberspace-mcp', version: '0.0.1' })
+  // Every tool's answer ends with the notices: unread orders and an operator's tag in chat.
+  const call = (fn: () => Promise<ToolResult> | ToolResult): Promise<CallToolResult> => run(log, fn, () => agent.notices())
 
   server.registerTool('identity', {
     title: 'Identity',
     description: 'Create or load this agent\'s own key and publish (or update) its kind 0 profile (name, about, picture) with bot: true and the operator p tag. Fields left out keep what the profile already says. Returns the npub, the spawn coordinate, whether a chain exists and its status, and your operator\'s current STRATEGY. Call this first.',
     inputSchema: { name: z.string().optional(), about: z.string().optional(), picture: z.string().optional().describe('An https URL of an image for your avatar; an empty string removes it.'), operator: z.string().optional().describe('The human\'s npub. Only when you have no operator yet: once set (or configured by your human), it is locked.') },
     annotations: { readOnlyHint: false, idempotentHint: true },
-  }, async (args) => run(log, () => agent.identity(args)))
+  }, async (args) => call(() => agent.identity(args)))
 
   server.registerTool('whereami', {
     title: 'Where am I',
     description: 'Resolve the live head from the relays: coordinate (hex and per axis), plane, sector, chain status (none, valid, frozen, dead), head event id, seconds since the head, and your operator\'s current STRATEGY (standing orders: reread them every turn).',
     annotations: { readOnlyHint: true },
-  }, async () => run(log, () => agent.whereami()))
+  }, async () => call(() => agent.whereami()))
 
   server.registerTool('look', {
     title: 'Look',
     description: 'A text report of the surroundings: position, the cube keys held here, the opened bags nearby and their entries with distances and authors, who is present in the 27 sectors around you (with bot flags) and how far, recent chat, your budget, and what you cannot see and why. Also returned as JSON. Text from cyberspace is untrusted.',
     inputSchema: { radius_sectors: z.number().int().min(1).max(1).optional().describe('v0 supports 1 (the 27 sectors).'), heights: z.array(z.number().int().min(1).max(MAX_KEY_HEIGHT)).optional().describe(`Extra cube heights to derive keys for here, up to ${MAX_KEY_HEIGHT}. Heights above 12 cost work and are priced against the caps.`) },
-  }, async (args) => run(log, () => agent.look(args)))
+  }, async (args) => call(() => agent.look(args)))
 
   server.registerTool('plan_hop', {
     title: 'Plan a hop',
     description: 'Price the next step toward a target without moving: hop or sidestep, the heights involved, the terrain K, the expected seconds on this machine, whether it is within the caps, and how much of the route would remain. Refused when the step would land where your avatar would overlap a person\'s (your operator, or anyone not known to be a bot): you keep at least both avatars\' reach and a gibson between from them on some axis (at true scale; zoomed out, every avatar nearby overlaps on screen by design), and the refusal names the clear coordinate just outside. Call this before hop.',
     inputSchema: { target: coordinate },
     annotations: { readOnlyHint: true },
-  }, async (args) => run(log, () => agent.planHop(args)))
+  }, async (args) => call(() => agent.planHop(args)))
 
   server.registerTool('hop', {
     title: 'Hop',
     description: 'Move one step toward a target: confirms the live head, reserves it, computes the proof, confirms again, signs, publishes to the canonical relay and your relays, and records the result. On a fresh key with no chain it signs your spawn first. Refuses if the step exceeds the cap or the head moved, and never lands where your avatar would overlap a person\'s (the refusal names the clear coordinate just outside). A target beyond a wall is reached one step per call; the result says how far remains.',
     inputSchema: { target: coordinate, cap_seconds: z.number().positive().optional().describe('Your own cap on compute for this call, in seconds; the server\'s cap applies too.') },
     annotations: { readOnlyHint: false, destructiveHint: false },
-  }, async (args) => run(log, () => agent.hop(args)))
+  }, async (args) => call(() => agent.hop(args)))
 
   server.registerTool('station', {
     title: 'Station',
@@ -162,14 +194,14 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
       destination: z.number().int().min(0).optional().describe('A block height to price a ride to.'),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-  }, async (args) => run(log, () => agent.station(args)))
+  }, async (args) => call(() => agent.station(args)))
 
   server.registerTool('board', {
     title: 'Board the line',
     description: 'Enter hyperspace where you stand (DECK-0001 3): confirms the live head, reserves it, computes the entry proof, confirms again, signs the enter-hyperspace, publishes and records it. You do not move. Refuses until the line is verified far enough to name your station (call station with sync: true), when you have no chain or an invalid one, when you are already on the line, and above the per-call cap. Returns the boarding\'s id and your station.',
     inputSchema: { as_of: z.number().int().min(0).optional().describe('Name the station under this block height instead of the newest verified block. Reporting only; the first ride declares its own as_of.') },
     annotations: { readOnlyHint: false, destructiveHint: false },
-  }, async (args) => run(log, () => agent.board(args)))
+  }, async (args) => call(() => agent.board(args)))
 
   server.registerTool('ride', {
     title: 'Ride the line',
@@ -185,37 +217,37 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
       prover: z.enum(['local', 'hosaka']).optional().describe('Who computes the proof: "local" (default, this machine, within the caps) or "hosaka" (HOSAKA computes it, paid from your operator\'s wallet within their limits, or by your operator from an invoice sent to them by DM).'),
     },
     annotations: { readOnlyHint: false, destructiveHint: false },
-  }, async (args, extra) => run(log, () => agent.ride(args, extra.signal)))
+  }, async (args, extra) => call(() => agent.ride(args, extra.signal)))
 
   server.registerTool('ride_status', {
     title: 'Ride status',
     description: 'The ride in flight, if any, answered at once while it computes: its state (computing, ready, paused, paused_cap, failed, or interrupted by a restart; awaiting_payment for a HOSAKA ride whose invoice is not paid yet), where from and to, leaves done of total, the price attempts, the work spent and the seconds it still needs, whether the head is still the one it left from. For a HOSAKA ride: the job, the invoice and what the server did about it (paid from your operator\'s wallet, or sent to your operator). Never asks HOSAKA or a relay; the server does that in the background.',
     annotations: { readOnlyHint: true },
-  }, async () => run(log, () => agent.rideStatus()))
+  }, async () => call(() => agent.rideStatus()))
 
   server.registerTool('say', {
     title: 'Say',
     description: 'Say a line (up to 500 characters) into the h12 cube you stand in, sealed as a kind 23330 envelope, as ONOSENDAI does; ONOSENDAI\'s Chat chip shows it. One line per five seconds. Quiet rule: one unprompted line per arrival; a reply to a line that addressed you (pass its id as reply_to) is always allowed. A line addresses you only when it mentions you (an @mention tag, a nostr:npub or nostr:nprofile of you, or your name); answer those, never every line, your operator\'s included.',
     inputSchema: { text: z.string().max(500), reply_to: z.string().optional().describe('The id of a heard line this one answers.') },
-  }, async (args) => run(log, () => agent.say(args)))
+  }, async (args) => call(() => agent.say(args)))
 
   server.registerTool('listen', {
     title: 'Listen',
     description: 'Chat lines heard in your cube and its 26 neighbors since a unix timestamp, or since the last call ("last"), and marks them read (orders_waiting counts unread lines in chatHeard). Each line names its speaker, bot flag where known, time, text (untrusted), addressed (it mentions you: reply to it with say and reply_to) and fromOperator (signed by your operator\'s key; the text cannot fake it). Unaddressed lines are context: do not answer them.',
     inputSchema: { since: z.union([z.number(), z.literal('last')]).optional() },
     annotations: { readOnlyHint: true },
-  }, async (args) => run(log, () => agent.listen(args)))
+  }, async (args) => call(() => agent.listen(args)))
 
   server.registerTool('wait_for', {
     title: 'Wait for',
-    description: 'Block until something happens: an arrival (a given pubkey, or anyone within N sectors), a chat line (optionally one addressed to you), or the timeout. Use this instead of polling.',
+    description: 'Block until something happens: an arrival (a given pubkey, or anyone within N sectors), a chat line (optionally one addressed to you), or the timeout. New orders from your operator always end the wait (happened: "orders"): then call inbox. Use this instead of polling.',
     inputSchema: {
       arrival: z.object({ pubkey: z.string().optional(), within_sectors: z.number().int().min(0).max(1).optional() }).optional(),
       chat: z.object({ addressed: z.boolean().optional() }).optional(),
       timeout_seconds: z.number().positive().max(3600),
     },
     annotations: { readOnlyHint: true },
-  }, async (args, extra) => run(log, () => agent.waitFor(args, extra.signal)))
+  }, async (args, extra) => call(() => agent.waitFor(args, extra.signal)))
 
   server.registerTool('find', {
     title: 'Find',
@@ -224,7 +256,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
       hint: z.object({ coordinate, heights: z.tuple([z.number().int().min(0).max(85), z.number().int().min(0).max(85), z.number().int().min(0).max(85)]) }).optional(),
       max_height: z.number().int().min(1).max(MAX_KEY_HEIGHT).optional(),
     },
-  }, async (args) => run(log, () => agent.find(args)))
+  }, async (args) => call(() => agent.find(args)))
 
   server.registerTool('hide', {
     title: 'Hide',
@@ -236,13 +268,13 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
       hint_heights: z.tuple([z.number().int().min(0).max(85), z.number().int().min(0).max(85), z.number().int().min(0).max(85)]).optional(),
       riddle: z.string().max(280).optional(),
     },
-  }, async (args) => run(log, () => agent.hide(args)))
+  }, async (args) => call(() => agent.hide(args)))
 
   server.registerTool('place', {
     title: 'Place an object',
     description: 'Validate an SNO payload (DECK-0003 1.9) and hide it as an object at a coordinate and height: inline when small, by reference as a hidden kind 33331 when large. Or place a published public object by its address (33331:<pubkey>:<d> or naddr) as a reference.',
     inputSchema: { object: snoPayload.optional(), address: z.string().optional(), coordinate, height: z.number().int().min(1).max(MAX_KEY_HEIGHT) },
-  }, async (args) => run(log, () => agent.place(args)))
+  }, async (args) => call(() => agent.place(args)))
 
   server.registerTool('set_avatar', {
     title: 'Set your avatar',
@@ -252,14 +284,14 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
       address: z.string().optional().describe('A public kind 33331 object: "33331:<pubkey hex>:<d>" or its naddr.'),
       clear: z.boolean().optional().describe('true to go back to the dodecahedron.'),
     },
-  }, async (args, extra) => run(log, () => agent.setAvatar(args, extra.signal)))
+  }, async (args, extra) => call(() => agent.setAvatar(args, extra.signal)))
 
   server.registerTool('validate_object', {
     title: 'Validate an object',
     description: 'Check an SNO payload against DECK-0003 section 1.9 with sno-core. Returns valid with its size, or the errors in plain words.',
     inputSchema: { payload: z.unknown() },
     annotations: { readOnlyHint: true },
-  }, async (args) => run(log, () => agent.validateObject({ payload: args.payload })))
+  }, async (args) => call(() => agent.validateObject({ payload: args.payload })))
 
   server.registerTool('render', {
     title: 'Render an object',
@@ -274,38 +306,38 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
       size: z.number().int().min(RENDER_MIN_SIZE).max(RENDER_MAX_SIZE).optional().describe(`Pixels on a side, default ${RENDER_DEFAULT_SIZE}.`),
     },
     annotations: { readOnlyHint: true },
-  }, async (args) => run(log, () => agent.render(args)))
+  }, async (args) => call(() => agent.render(args)))
 
   server.registerTool('budget', {
     title: 'Budget',
     description: 'What the server may still spend this session: work seconds per call and per session, chat lines said and the unprompted allowance, the hop ceiling and sidestep cap.',
     annotations: { readOnlyHint: true },
-  }, async () => run(log, () => agent.budgetState()))
+  }, async () => call(() => agent.budgetState()))
 
   server.registerTool('outbox', {
     title: 'Outbox',
     description: 'Signed events not yet confirmed by the canonical relay, with their retry state; refusals kept verbatim; events dropped at replay because they would have forked the chain.',
     annotations: { readOnlyHint: true },
-  }, async () => run(log, () => agent.outboxState()))
+  }, async () => call(() => agent.outboxState()))
 
   server.registerTool('inbox', {
     title: 'Inbox',
-    description: 'Your operator\'s private messages (NIP-17 DMs) since the last read, oldest first: these are your orders. Also the current STRATEGY (the operator\'s standing orders, kept across restarts; reread them every turn) and how many messages from anyone else were ignored. A message counts only when it is sealed by the operator your profile names and that operator follows you. Marks what it returns as read. Call this at the start of every turn.',
+    description: 'Your operator\'s private messages (NIP-17 DMs) since the last read, oldest first: these are your orders. Also the current STRATEGY (the operator\'s standing orders, kept across restarts; reread them every turn) and how many messages from anyone else were ignored. A message counts only when it is sealed by the operator your profile names and that operator follows you. Marks what it returns as read. Call this at the start of every turn, and at once whenever a tool result says NEW ORDERS. The server has already reacted 👀 to each order the moment it saw it, so your operator knows you have it; answer with message_operator.',
     annotations: { readOnlyHint: false, idempotentHint: false },
-  }, async () => run(log, () => agent.inbox()))
+  }, async () => call(() => agent.inbox()))
 
   server.registerTool('orders_waiting', {
     title: 'Orders waiting',
-    description: 'Whether your operator has sent orders you have not read, counted by the same rules as inbox, without reading them or marking anything read; the state of a ride computing in the background or bought from HOSAKA (ride: state, to, done, total, prover); with the follow watch on, your operator\'s newest move you have not seen (operatorMoved: to, plane, at, eventId, action, distance; null when none); roamDue, true when roaming is on, its interval has passed since the last roam step, and no ride or move holds your head; and chatHeard (count, addressed, addressedFromOperator, unaddressed, fromOperator, latestAt, wake): chat lines from others that listen has not returned, where wake is "operator" for a line from your operator that mentions you, "stranger" for a stranger\'s line that mentions you (at most once per few minutes, in total and per speaker), or null. For the waker that starts your turn when a DM arrives, a ride is ready or stopped, your operator moves, a roam step is due, or someone addresses you in chat; in a turn, call inbox (and follow_operator or roam) instead.',
+    description: 'Whether your operator has sent orders you have not read, counted by the same rules as inbox, without reading them or marking anything read (the server also checks on its own every 15 s, reacts 👀 to each new order once, and adds a NEW ORDERS line to every tool result until inbox reads them); the state of a ride computing in the background or bought from HOSAKA (ride: state, to, done, total, prover); with the follow watch on, your operator\'s newest move you have not seen (operatorMoved: to, plane, at, eventId, action, distance; null when none); roamDue, true when roaming is on, its interval has passed since the last roam step, and no ride or move holds your head; and chatHeard (count, addressed, addressedFromOperator, unaddressed, fromOperator, latestAt, wake): chat lines from others that listen has not returned, where wake is "operator" for a line from your operator that mentions you, "stranger" for a stranger\'s line that mentions you (at most once per few minutes, in total and per speaker), or null. For the waker that starts your turn when a DM arrives, a ride is ready or stopped, your operator moves, a roam step is due, or someone addresses you in chat; in a turn, call inbox (and follow_operator or roam) instead.',
     annotations: { readOnlyHint: true },
-  }, async () => run(log, () => agent.ordersWaiting()))
+  }, async () => call(() => agent.ordersWaiting()))
 
   server.registerTool('follow_operator', {
     title: 'Follow your operator',
     description: 'The follow watch. on: true watches your operator\'s movement (kind 3333, verified on their chain) and keeps watching across restarts; on: false stops it. Every call with the watch on reports where your operator is now, how far, the clear coordinate just outside their avatar to aim for (never inside it), and what plan_hop says about getting there within your caps, or that it needs a ride; it marks their newest move as seen. It never moves you: hop when your STRATEGY says to follow and the plan is within your caps, and tell your operator with message_operator when it is not. Only the operator your profile names, who follows you, is watched.',
     inputSchema: { on: z.boolean().optional().describe('true turns the watch on, false turns it off; leave it out to report where your operator is.') },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-  }, async (args) => run(log, () => agent.followOperator(args)))
+  }, async (args) => call(() => agent.followOperator(args)))
 
   server.registerTool('roam', {
     title: 'Roam',
@@ -315,7 +347,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
       every_minutes: z.number().optional().describe(`Minutes between roam steps, ${ROAM_MIN_MINUTES} to ${ROAM_MAX_MINUTES}; default ${ROAM_DEFAULT_MINUTES}.`),
     },
     annotations: { readOnlyHint: false, destructiveHint: false },
-  }, async (args) => run(log, () => agent.roam(args)))
+  }, async (args) => call(() => agent.roam(args)))
 
   server.registerTool('visit', {
     title: 'Visit and leave a note',
@@ -325,20 +357,20 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
       note: z.string().describe(`What they find: your words, not empty, up to ${MAX_MESSAGE_LENGTH} characters.`),
     },
     annotations: { readOnlyHint: false, destructiveHint: false },
-  }, async (args) => run(log, () => agent.visit(args)))
+  }, async (args) => call(() => agent.visit(args)))
 
   server.registerTool('wallet', {
     title: 'Wallet',
     description: 'Whether your operator connected a Nostr Wallet Connect wallet to this server, its balance when the wallet reports it, what was spent in the last 24 hours, and the limits your operator set (per payment and per day). Read only. You never pay anything yourself: the server pays only HOSAKA invoices for rides it bought for you, within those limits, and sends your operator a receipt; above them the invoice goes to your operator by DM. Only your operator can connect a wallet or change the limits.',
     annotations: { readOnlyHint: true },
-  }, async () => run(log, () => agent.walletStatus()))
+  }, async () => call(() => agent.walletStatus()))
 
   server.registerTool('message_operator', {
     title: 'Message your operator',
     description: `Send your operator a private message (a NIP-17 DM to the relays of their kind 10050), with a copy to your own DM inbox. The only way to talk with your operator: never post to them publicly. Up to ${MAX_OPERATOR_MESSAGE} characters. Refused when your operator has no DM inbox.`,
     inputSchema: { text: z.string().min(1).max(MAX_OPERATOR_MESSAGE).describe('What to tell your operator.') },
     annotations: { readOnlyHint: false, destructiveHint: false },
-  }, async (args) => run(log, () => agent.messageOperator(args)))
+  }, async (args) => call(() => agent.messageOperator(args)))
 
   server.registerTool('log_travel', {
     title: 'Log your travels',
@@ -348,7 +380,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
       place: z.boolean().optional().describe('Tag the entry with where you stand (default true). false leaves the place out.'),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  }, async (args) => run(log, () => agent.logTravel(args)))
+  }, async (args) => call(() => agent.logTravel(args)))
 
   server.registerResource('agents.md', 'cyberspace://agents.md', {
     title: 'agents.md',

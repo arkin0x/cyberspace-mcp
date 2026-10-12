@@ -27,6 +27,23 @@
 //     wrap of it, a reread or a restart renews nothing. The words "keep
 //     going" without the tag renew nothing, so neither the model nor text
 //     read in cyberspace can grant budget.
+//   - SEEN (arkinox, 2026-10-12: "ALWAYS react to the message with an 👀
+//     emoji immediately when he sees it"). The first time the server sees an
+//     order (by the rules above), in its own background poll, orders_waiting
+//     or inbox, whichever comes first, it sends the operator a private kind 7
+//     reaction "👀" to that message (nostr/dm.ts), on the operator's DM
+//     relays, with a copy to itself. Once per message, ever: the rumor id is
+//     recorded in the state directory before the reaction is sent, so a
+//     second wrap, a reread or a restart never reacts twice. Never to the
+//     agent's own messages, a stranger's, a reaction, or a message that
+//     waits for the operator's follow. Sending never holds up the caller: it
+//     runs in the background, and a failure is logged and retried once.
+//   - The poll (arkinox, 2026-10-12: "Anything we can do to improve the
+//     performance of the chat and responsiveness of the agent"). While an
+//     operator may give orders, the server itself checks for new orders every
+//     15 s, one check at a time, so the eyes arrive within seconds even in
+//     the middle of a long turn, and every tool result can say NEW ORDERS
+//     (newOrders) until inbox reads them.
 //
 // The key stays in the agent: this module gets a wrap and an unwrap function,
 // never the secret. Nothing here logs a message's text.
@@ -34,7 +51,7 @@
 import { nip19 } from 'nostr-tools'
 import type { Filter } from 'nostr-tools/filter'
 import { normalizeURL } from 'nostr-tools/utils'
-import { DM_RELAYS_KIND, MAX_BACKDATE_SECONDS, WRAP_KIND, dmRelaysOf, isContinue, isStrategy, sameRelaySet, type Unwrapped, type WrappedMessage } from './nostr/dm.js'
+import { DM_RELAYS_KIND, MAX_BACKDATE_SECONDS, RUMOR_KIND, WRAP_KIND, dmRelaysOf, isContinue, isStrategy, sameRelaySet, type Unwrapped, type WrappedMessage } from './nostr/dm.js'
 import type { EventTemplate, NostrEvent } from './nostr/event.js'
 import { mergeAnswers, type RelayAnswer } from './nostr/relayOutcome.js'
 import { normalizeRelay, type Relays } from './nostr/relays.js'
@@ -90,9 +107,30 @@ interface DmsFile {
   published: { relays: string[]; eventId: string; at: number; accepted: string[] } | null
   /** CONTINUE orders that renewed the session budget, by rumor id, with our clock at the renewal: each renews once, ever. */
   renewals: Record<string, number>
+  /** Orders the agent reacted to with 👀, by rumor id, with our clock when it was decided: each gets one, ever (arkinox, 2026-10-12). */
+  reacted: Record<string, number>
 }
 
-const EMPTY: DmsFile = { version: 1, strategy: null, seen: {}, waiting: {}, lastReadAt: null, ignoredTotal: 0, published: null, renewals: {} }
+const EMPTY: DmsFile = { version: 1, strategy: null, seen: {}, waiting: {}, lastReadAt: null, ignoredTotal: 0, published: null, renewals: {}, reacted: {} }
+/** How long a 👀 mark is kept: longer than any read can return the message (a follow is waited for 30 days), plus a day. */
+const REACTED_KEPT_S = WAITING_KEPT_S + REREAD_WINDOW_S + 24 * 60 * 60
+/** How many 👀 marks are kept at most, newest first. */
+const REACTED_MAX = 2000
+/** How often the server checks for new orders on its own. */
+export const ORDERS_POLL_MS = 15_000
+/** How long a failed 👀 waits before its one retry. */
+const REACTION_RETRY_MS = 5_000
+
+/** What one check of the DM inbox found: the orders it counted, and which wraps they came in, so a read can retire them. */
+interface OrdersCheck {
+  /** The operator's unread messages that are orders now, by wrap id, with their rumor id. */
+  orders: Map<string, string>
+  strategy: boolean
+  keepGoing: boolean
+  /** The operator's messages that wait for their follow. */
+  held: number
+  facts: OperatorFacts
+}
 /** How many renewals are remembered; older ones fall long before any read window could return their wraps. */
 const RENEWALS_KEPT = 500
 /** How many DMs of this session the travel log's leak check remembers. */
@@ -142,6 +180,10 @@ export interface OperatorChannelDeps {
   maxWaitMs?: number
   /** Renew the session budget for the operator's CONTINUE; returns the sentence that says what was renewed. */
   renew?: () => string
+  /** Wrap the 👀 reaction to the operator's message `eventId` with the agent's key, to them and to the agent itself; without it no reaction is sent. */
+  wrapReaction?: (recipient: string, eventId: string) => WrappedMessage
+  /** How long a failed reaction waits before its one retry; for tests. */
+  reactionRetryMs?: number
 }
 
 /** The newest event of a kind by an author among these; relays may answer with anything, so both are checked. */
@@ -163,10 +205,22 @@ export class OperatorChannel {
    */
   private readonly spoken: string[] = []
   private stopped = false
+  /** The check in flight, shared by the poll and orders_waiting. */
+  private checking: Promise<OrdersCheck> | null = null
+  /** What the newest check found; the notice counts what of it is still unread. */
+  private lastCheck: OrdersCheck | null = null
+  private pollTimer: ReturnType<typeof setInterval> | null = null
+  /** The last poll failure logged, so a relay that stays down is logged once, not every 15 s. */
+  private pollError: string | null = null
+  /** Reactions being sent in the background. */
+  private readonly sending = new Set<Promise<void>>()
+  /** Who wants to know when a check finds unread orders (wait_for). */
+  private readonly ordersListeners = new Set<(count: number) => void>()
 
   constructor(private readonly deps: OperatorChannelDeps) {
     const saved = deps.dir.readJson<DmsFile | null>(FILE, null)
     this.state = saved?.version === 1 ? { ...EMPTY, ...saved } : { ...EMPTY }
+    this.state.reacted ??= {}
   }
 
   private save(): void {
@@ -190,6 +244,105 @@ export class OperatorChannel {
 
   stop(): void {
     this.stopped = true
+    if (this.pollTimer) clearInterval(this.pollTimer)
+    this.pollTimer = null
+  }
+
+  /**
+   * Check for new orders every `everyMs` in the background (arkinox,
+   * 2026-10-12), while an operator may give orders: one check at a time,
+   * never in the way of a tool, and a check that fails is logged once and
+   * tried again at the next tick. The first 👀 of an order is sent from here
+   * when no tool saw it first.
+   */
+  startPolling(everyMs: number = ORDERS_POLL_MS): void {
+    if (this.pollTimer || this.stopped || everyMs <= 0) return
+    this.pollTimer = setInterval(() => { void this.pollOnce() }, everyMs)
+    this.pollTimer.unref?.()
+  }
+
+  /** One background check; nothing when no operator may give orders or a check is already running. */
+  async pollOnce(): Promise<void> {
+    if (this.stopped || this.checking || !this.deps.operator() || this.deps.operatorProblem?.()) return
+    try {
+      await this.check()
+      this.pollError = null
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      if (message !== this.pollError) this.deps.log(`orders poll: ${message}`)
+      this.pollError = message
+    }
+  }
+
+  /**
+   * How many of the operator's orders wait unread, from the newest check:
+   * what it counted minus what inbox has read since, so the count drops to
+   * zero the moment inbox reads them. Zero when no operator may give orders.
+   */
+  unreadOrders(): number {
+    if (!this.lastCheck || this.deps.operatorProblem?.() || this.deps.operator() !== this.lastCheck.facts.operator) return 0
+    const left = new Set<string>()
+    for (const [wrapId, rumorId] of this.lastCheck.orders) if (this.state.seen[wrapId] === undefined) left.add(rumorId)
+    return left.size
+  }
+
+  /** Call `fn` with the count each time a check finds unread orders; returns the unsubscribe. */
+  onOrders(fn: (count: number) => void): () => void {
+    this.ordersListeners.add(fn)
+    return () => { this.ordersListeners.delete(fn) }
+  }
+
+  /** Resolves once every reaction sent so far has been delivered or given up on; for tests and a clean stop. */
+  async reactionsSettled(): Promise<void> {
+    while (this.sending.size > 0) await Promise.allSettled([...this.sending])
+  }
+
+  /**
+   * Whether this order gets its 👀 now: it never had one, and it is not old
+   * history read for the first time (a fresh state directory reads back up
+   * to 500 wraps, and the operator is not sent eyes on last month's
+   * messages). Records the mark when it does; the caller saves it before
+   * anything is sent.
+   */
+  private claimReaction(rumor: { id: string; created_at: number }, now: number): boolean {
+    if (!this.deps.wrapReaction || this.stopped || this.state.reacted[rumor.id] !== undefined) return false
+    if (this.state.lastReadAt === null && rumor.created_at < now - REREAD_WINDOW_S) return false
+    this.state.reacted[rumor.id] = now
+    return true
+  }
+
+  /** Send the 👀 for these orders in the background, after their marks are saved. */
+  private react(facts: OperatorFacts, rumorIds: string[]): void {
+    const selfRelays = facts.mine.length ? facts.mine : facts.inbox
+    for (const id of rumorIds) {
+      const p = this.sendReaction(facts.operator, id, facts.inbox, selfRelays).catch((err) => {
+        this.deps.log(`👀 for ${id.slice(0, 8)}... failed: ${err instanceof Error ? err.message : String(err)}`)
+      })
+      this.sending.add(p)
+      void p.finally(() => this.sending.delete(p))
+    }
+  }
+
+  /** One reaction: to the operator's DM relays, retried once on failure, then the agent's own copy. Logs ids and relay words, never a message. */
+  private async sendReaction(operator: string, rumorId: string, inbox: string[], selfRelays: string[]): Promise<void> {
+    const wrapped = this.deps.wrapReaction!(operator, rumorId)
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      if (this.stopped) return
+      let why: string
+      try {
+        const sent = await this.deps.relays.publishMany(inbox, wrapped.toRecipient)
+        if (sent.ok) {
+          const mine = await this.deps.relays.publishMany(selfRelays, wrapped.toSelf)
+          this.deps.log(`👀 sent for ${rumorId.slice(0, 8)}... (accepted by ${sent.accepted.join(', ')}${mine.ok ? '' : `; own copy not stored: ${mine.reason}`})`)
+          return
+        }
+        why = Object.entries(sent.reasons).map(([u, r]) => `${u}: ${r}`).join('; ') || sent.reason
+      } catch (err) {
+        why = err instanceof Error ? err.message : String(err)
+      }
+      this.deps.log(`👀 for ${rumorId.slice(0, 8)}... not delivered (attempt ${attempt} of 2): ${why}`)
+      if (attempt === 1) await new Promise((r) => setTimeout(r, this.deps.reactionRetryMs ?? REACTION_RETRY_MS))
+    }
   }
 
   /** The private words of this session: the STRATEGY and the DMs read and sent, for the travel log's leak check. */
@@ -306,6 +459,7 @@ export class OperatorChannel {
     // From here to the save nothing is awaited, so a read that races this one sees these marks and hands out nothing twice.
     const following = facts.follows === true
     const orders: OperatorMessage[] = []
+    const reactTo: string[] = []
     let ignored = 0
     let waiting = 0
     for (const wrap of mergeAnswers(answers)) {
@@ -315,12 +469,15 @@ export class OperatorChannel {
       delete this.state.waiting[wrap.id]
       if (!opened.ok) { this.state.seen[wrap.id] = wrap.created_at; ignored++; continue }
       const { rumor } = opened
-      // The agent's own copies of what it sent: history, not orders and not strangers.
+      // The agent's own copies of what it sent (messages and its 👀): history, not orders and not strangers.
       if (rumor.pubkey === this.deps.pubkey) { this.state.seen[wrap.id] = wrap.created_at; continue }
       const toMe = rumor.tags.some((t) => t[0] === 'p' && t[1] === this.deps.pubkey)
       if (rumor.pubkey !== operator || !toMe) { this.state.seen[wrap.id] = wrap.created_at; ignored++; continue }
+      // The operator's reaction to one of the agent's messages: read, and never an order.
+      if (rumor.kind !== RUMOR_KIND) { this.state.seen[wrap.id] = wrap.created_at; continue }
       if (!following) { this.state.waiting[wrap.id] = wrap.created_at; if (!wasWaiting) waiting++; continue }
       this.state.seen[wrap.id] = wrap.created_at
+      if (this.claimReaction(rumor, now)) reactTo.push(rumor.id)
       orders.push({ id: rumor.id, at: rumor.created_at, text: rumor.content, strategy: isStrategy(rumor), continue: isContinue(rumor) })
     }
     // The same rumor can come in more than one wrap; it is one order.
@@ -339,6 +496,7 @@ export class OperatorChannel {
     this.state.lastReadAt = now
     this.prune()
     this.save()
+    this.react(facts, [...new Set(reactTo)])
     const renewed = renewing.length > 0 ? this.deps.renew!() : null
     for (const m of unique) this.remember(m.text)
 
@@ -400,10 +558,33 @@ export class OperatorChannel {
    * outside the model: it polls this, and starts a turn when orders wait.
    */
   async ordersWaiting(): Promise<ToolResult> {
+    this.requireOperator()
+    const c = await this.check()
+    if (c.facts.inbox.length === 0) return { text: this.noInboxWords(c.facts), data: { orders: 0, continue: false, noInbox: true } }
+    const orders = new Set(c.orders.values()).size
+    const text = orders > 0
+      ? `${orders} new message(s) from your operator wait${c.strategy ? ', including a STRATEGY' : ''}${c.keepGoing ? ', including a CONTINUE (KEEP GOING), which renews your session budget when inbox reads it' : ''}. Call inbox to read them.`
+      : c.held > 0 ? `${c.held} message(s) from your operator wait for their follow; none are orders yet.` : 'No new orders.'
+    return { text, data: { orders, strategy: c.strategy, continue: c.keepGoing, waitingForFollow: c.held } }
+  }
+
+  /** One check of the DM inbox at a time: the poll and orders_waiting share the one in flight. */
+  private check(): Promise<OrdersCheck> {
+    if (!this.checking) this.checking = this.doCheck().finally(() => { this.checking = null })
+    return this.checking
+  }
+
+  /**
+   * Count the operator's unread orders by inbox's rules, marking nothing
+   * read, and send the 👀 for each order seen for the first time. The
+   * reaction marks are saved before anything is sent.
+   */
+  private async doCheck(): Promise<OrdersCheck> {
     const operator = this.requireOperator()
     const facts = await this.cachedFacts()
     if (!facts) throw new Refusal('The operator channel is closed.')
-    if (facts.inbox.length === 0) return { text: this.noInboxWords(facts), data: { orders: 0, continue: false, noInbox: true } }
+    const empty: OrdersCheck = { orders: new Map(), strategy: false, keepGoing: false, held: 0, facts }
+    if (facts.inbox.length === 0) { this.lastCheck = empty; return empty }
     const filter: Filter = { kinds: [WRAP_KIND], '#p': [this.deps.pubkey] }
     const since = this.sinceForNextRead()
     if (since !== null) filter.since = since
@@ -412,25 +593,36 @@ export class OperatorChannel {
     if (!answers.some((a) => a.outcome === 'answered')) {
       throw new Refusal(`Could not read your DM inbox: ${answers.map((a) => `${a.url}: ${a.outcome === 'answered' ? 'answered' : a.reason}`).join('; ')}.`)
     }
-    const ids = new Set<string>()
+    // The operator may have changed, or stopped following, while the relays answered: the rules are read now.
+    const following = facts.follows === true && this.deps.operator() === operator
+    const found = new Map<string, string>()
     let strategy = false
     let keepGoing = false
+    const reactTo: string[] = []
+    const now = this.deps.now()
+    // From here to the save nothing is awaited, so inbox and this check never both claim one 👀.
     for (const wrap of mergeAnswers(answers)) {
       if (wrap.kind !== WRAP_KIND || this.state.seen[wrap.id] !== undefined) continue
       const opened = this.deps.unwrap(wrap)
       if (!opened.ok) continue
       const { rumor } = opened
-      if (rumor.pubkey !== operator || !rumor.tags.some((t) => t[0] === 'p' && t[1] === this.deps.pubkey)) continue
-      ids.add(rumor.id)
+      if (rumor.pubkey !== operator || rumor.kind !== RUMOR_KIND || !rumor.tags.some((t) => t[0] === 'p' && t[1] === this.deps.pubkey)) continue
+      found.set(wrap.id, rumor.id)
       if (isStrategy(rumor)) strategy = true
       if (isContinue(rumor) && this.state.renewals[rumor.id] === undefined) keepGoing = true
+      if (following && this.claimReaction(rumor, now)) reactTo.push(rumor.id)
     }
-    const orders = facts.follows === true ? ids.size : 0
-    const held = facts.follows === true ? 0 : ids.size
-    const text = orders > 0
-      ? `${orders} new message(s) from your operator wait${strategy ? ', including a STRATEGY' : ''}${keepGoing && facts.follows === true ? ', including a CONTINUE (KEEP GOING), which renews your session budget when inbox reads it' : ''}. Call inbox to read them.`
-      : held > 0 ? `${held} message(s) from your operator wait for their follow; none are orders yet.` : 'No new orders.'
-    return { text, data: { orders, strategy, continue: keepGoing && facts.follows === true, waitingForFollow: held } }
+    if (reactTo.length > 0) {
+      this.save()
+      this.react(facts, [...new Set(reactTo)])
+    }
+    const result: OrdersCheck = following
+      ? { orders: found, strategy, keepGoing, held: 0, facts }
+      : { orders: new Map(), strategy: false, keepGoing: false, held: new Set(found.values()).size, facts }
+    this.lastCheck = result
+    const unread = this.unreadOrders()
+    if (unread > 0) for (const fn of [...this.ordersListeners]) fn(unread)
+    return result
   }
 
   /** Forget the wraps that fall before the next read's window. */
@@ -442,6 +634,10 @@ export class OperatorChannel {
     // A read mark is kept while the next read can still return its wrap: from the same floor that read asks from.
     const floor = (this.sinceForNextRead() ?? 0) - 60
     for (const [id, at] of Object.entries(this.state.seen)) if (at < floor) delete this.state.seen[id]
+    // A 👀 mark outlives every read that could return its message.
+    const reactedFloor = this.deps.now() - REACTED_KEPT_S
+    const reacted = Object.entries(this.state.reacted).filter(([, at]) => at >= reactedFloor).sort((a, b) => b[1] - a[1]).slice(0, REACTED_MAX)
+    this.state.reacted = Object.fromEntries(reacted)
   }
 
   /** Where the next read of the inbox starts: the read window before the last read, or the oldest message still waiting. Null before the first read. */

@@ -142,8 +142,12 @@ describe('operator DMs', () => {
     const sent = await a.messageOperator({ text: 'At block 900000. Holding.' })
     expect(sent.data.accepted).toEqual([INBOX])
     const wraps = publishedOf(w.inbox, 1059)
-    const toOp = wraps.filter((e) => e.tags.some((t) => t[0] === 'p' && t[1] === op))
+    const toOpAll = wraps.filter((e) => e.tags.some((t) => t[0] === 'p' && t[1] === op))
     const toSelf = wraps.filter((e) => e.tags.some((t) => t[0] === 'p' && t[1] === me) && e.pubkey !== op)
+    // Besides the message: one 👀 per order the inbox read (arkinox, 2026-10-12), each a kind 7 rumor.
+    const opened = toOpAll.map((e) => ({ wrap: e, rumor: nip59.unwrapEvent(e as Parameters<typeof nip59.unwrapEvent>[0], opSk) }))
+    const toOp = opened.filter((o) => o.rumor.kind === 14).map((o) => o.wrap)
+    expect(opened.filter((o) => o.rumor.kind === 7)).toHaveLength(3)
     expect(toOp).toHaveLength(1)
     expect(toOp[0].tags).toEqual([['p', op]])
     const read = nip17.unwrapEvent(toOp[0] as Parameters<typeof nip17.unwrapEvent>[0], opSk)

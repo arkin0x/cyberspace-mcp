@@ -42,11 +42,11 @@ import { hintFits, hintTags, parseHint, hintCandidatesExponent, type HintHeights
 import { lookReport, type ChainFacts } from './look.js'
 import { bytesToHex, hexToBytes, nowSeconds, signEvent, tagValue, type EventTemplate, type NostrEvent } from './nostr/event.js'
 import { Outbox, type GuardVerdict } from './nostr/outbox.js'
-import { unwrapMessage, wrapMessage } from './nostr/dm.js'
+import { unwrapMessage, wrapMessage, wrapReaction } from './nostr/dm.js'
 import { mergeAnswers } from './nostr/relayOutcome.js'
 import { DEFAULT_RELAY, GENERAL_RELAYS, Relays, normalizeRelay, type PublishResult } from './nostr/relays.js'
 import { OperatorWatch, type OperatorMove } from './follow.js'
-import { OperatorChannel } from './operator.js'
+import { ORDERS_POLL_MS, OperatorChannel } from './operator.js'
 import { Presence, neighborhoodFilter, sectorsApart, type Person } from './presence.js'
 import { ROAM_MAX_MINUTES, ROAM_MIN_MINUTES, Roam, roamCandidates, searchRoam } from './roam.js'
 import { profileTemplate, type ProfileFields, MAX_PICTURE_URL, pictureUrl, publishedFields } from './profile.js'
@@ -118,6 +118,10 @@ export interface AgentConfig {
   chatWakeMinutes?: number
   /** Tests: threads an avatar is mined on. */
   avatarThreads?: number
+  /** How often the server checks for new operator orders on its own, in ms (default 15 s; 0 turns the poll off, for tests). */
+  ordersPollMs?: number
+  /** Tests: how long a failed 👀 waits before its one retry. */
+  reactionRetryMs?: number
 }
 
 /** The highest cube a key is derived for on request (hide, find, look): a key at h16 is about a second. */
@@ -251,6 +255,9 @@ export class Agent {
       sign: (t) => this.sign(t),
       wrap: (recipient, text) => wrapMessage({ senderSk: this.sk, recipient, text, now: nowSeconds() }),
       unwrap: (wrap) => unwrapMessage(wrap, this.sk),
+      // The 👀 on each order, the first time the server sees it (arkinox, 2026-10-12).
+      wrapReaction: (recipient, eventId) => wrapReaction({ senderSk: this.sk, recipient, eventId, now: nowSeconds() }),
+      reactionRetryMs: config.reactionRetryMs,
       now: nowSeconds, log: this.log, maxWaitMs: config.relayMaxWaitMs,
       // The operator's CONTINUE (KEEP GOING), and only it, renews the session budget (arkinox, 2026-10-11).
       renew: () => {
@@ -342,6 +349,8 @@ export class Agent {
         log(`WARNING: the canonical relay is ${agent.relays.canonical}, not the default ${DEFAULT_RELAY}. The chain's truth (which spawn is newest, where the head is) is read from there. A spawn signed because that relay shows no chain would end a chain this identity has on the default relay. Use this only for a relay that really holds this identity's chain.`)
       }
       await agent.boot()
+      // From here on the server notices the operator's orders by itself, mid-turn included (arkinox, 2026-10-12).
+      agent.operatorChannel.startPolling(config.ordersPollMs ?? ORDERS_POLL_MS)
       return agent
     } catch (err) {
       release()
@@ -1282,6 +1291,7 @@ export class Agent {
         clearTimeout(timer)
         this.presence.off('arrival', onArrival)
         this.chat.off('line', onLine)
+        offOrders()
         signal?.removeEventListener('abort', onAbort)
         resolve(r)
       }
@@ -1295,10 +1305,15 @@ export class Agent {
         finish({ text: `Heard ${l.addressed ? 'a line addressed to you' : 'a line'} from ${l.from.slice(0, 12)}... after ${nowSeconds() - startedAt} s (untrusted): "${l.text}" (id ${l.id.slice(0, 8)}...).`, data: { happened: 'chat', line: this.lineRow(l) } })
       }
       const onAbort = (): void => finish({ text: 'Canceled.', data: { happened: 'canceled' } })
+      // The operator's orders end any wait (arkinox, 2026-10-12): the background poll finds them within 15 s.
+      const onOrders = (count: number): void => finish({ text: `Stopped waiting after ${nowSeconds() - startedAt} s: ${count} message(s) from your operator wait. Call inbox now.`, data: { happened: 'orders', orders: count } })
+      const offOrders = this.operatorChannel.onOrders(onOrders)
       const timer = setTimeout(() => finish({ text: `Timed out after ${timeout} s: nothing happened.`, data: { happened: 'timeout', waitedSeconds: timeout } }), timeout * 1000)
       this.presence.on('arrival', onArrival)
       this.chat.on('line', onLine)
       signal?.addEventListener('abort', onAbort, { once: true })
+      const unread = this.operatorChannel.unreadOrders()
+      if (unread > 0) { onOrders(unread); return }
       // Then the neighborhood: someone already here counts as arrived, and a fresh look catches what the live subscription missed.
       void this.presence.enter(place.position).then(async () => {
         if (done) return
@@ -1861,6 +1876,22 @@ export class Agent {
     return this.keeper.place()
   }
 
+  /**
+   * What every tool result says on top of its own answer (arkinox,
+   * 2026-10-12): that the operator's orders wait unread, from the
+   * background poll, and that the operator tagged the agent in chat. A model
+   * deep in a long sweep sees it on its next tool call. Null when there is
+   * nothing to say. Counts only; never a message's words.
+   */
+  notices(): { lines: string[]; newOrders: number; operatorTaggedInChat: number } | null {
+    const newOrders = this.operatorChannel.unreadOrders()
+    const operatorTaggedInChat = this.chat.unreadSummary().addressedFromOperator
+    const lines: string[] = []
+    if (newOrders > 0) lines.push(`NEW ORDERS: ${newOrders} message(s) from your operator wait. Call inbox now, before continuing.`)
+    if (operatorTaggedInChat > 0) lines.push('Your operator tagged you in chat: call listen.')
+    return lines.length ? { lines, newOrders, operatorTaggedInChat } : null
+  }
+
   /** Stop listening, close the sockets, release the lock. */
   async stop(): Promise<void> {
     if (this.stopped) return
@@ -1871,6 +1902,8 @@ export class Agent {
     this.outbox.stop()
     this.follow.stop()
     this.operatorChannel.stop()
+    // A 👀 already on its way gets a moment to land before the sockets close.
+    await Promise.race([this.operatorChannel.reactionsSettled(), new Promise((r) => setTimeout(r, 3000).unref())])
     this.chat.stop()
     this.presence.stop()
     this.relays.close()

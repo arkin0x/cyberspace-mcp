@@ -10,7 +10,7 @@ import * as nip59 from 'nostr-tools/nip59'
 import { v2 as nip44 } from 'nostr-tools/nip44'
 import { finalizeEvent, generateSecretKey, getEventHash, getPublicKey, verifyEvent } from 'nostr-tools/pure'
 import {
-  MAX_BACKDATE_SECONDS, createRumor, dmRelaysOf, isStrategy, randomPast, sameRelaySet, sealRumor, unwrapMessage, wrapMessage, wrapSeal, type Rumor,
+  MAX_BACKDATE_SECONDS, createRumor, dmRelaysOf, isStrategy, randomPast, sameRelaySet, sealRumor, unwrapMessage, wrapMessage, wrapReaction, wrapSeal, type Rumor,
 } from '../src/nostr/dm.js'
 import type { NostrEvent } from '../src/nostr/event.js'
 
@@ -152,7 +152,7 @@ describe('what is dropped', () => {
     expect(unwrapMessage({ ...m.toRecipient, content: m.toRecipient.content.slice(1) }, meSk)).toEqual({ ok: false, reason: 'the gift wrap\'s signature is not valid' })
 
     const kind1 = { ...createRumor({ senderPubkey: op, recipient: me, text: 'x', createdAt: NOW }), kind: 1 }
-    expect(unwrapMessage(wrapSeal(sealRumor(kind1, opSk, me, NOW), me, NOW), meSk)).toEqual({ ok: false, reason: 'the rumor is not a kind 14 message' })
+    expect(unwrapMessage(wrapSeal(sealRumor(kind1, opSk, me, NOW), me, NOW), meSk)).toEqual({ ok: false, reason: 'the rumor is not a kind 14 message or a kind 7 reaction' })
 
     const lying = { ...createRumor({ senderPubkey: op, recipient: me, text: 'x', createdAt: NOW }), content: 'changed after hashing' }
     expect(unwrapMessage(wrapSeal(sealRumor(lying, opSk, me, NOW), me, NOW), meSk)).toEqual({ ok: false, reason: 'the rumor\'s id is not its hash' })
@@ -175,5 +175,32 @@ describe('relay lists', () => {
     expect(sameRelaySet(['wss://a/', 'wss://b/'], ['wss://b/', 'wss://a/'])).toBe(true)
     expect(sameRelaySet(['wss://a/'], ['wss://a/', 'wss://b/'])).toBe(false)
     expect(sameRelaySet([], [])).toBe(true)
+  })
+})
+
+describe('the 👀 reaction (arkinox, 2026-10-12)', () => {
+  it('is a kind 7 rumor, content 👀, tags e then p and nothing else, sealed and wrapped like a message, to the author and to itself', () => {
+    const agentSk = generateSecretKey()
+    const agent = getPublicKey(agentSk)
+    const opSk = generateSecretKey()
+    const op = getPublicKey(opSk)
+    const target = 'b'.repeat(64)
+    const r = wrapReaction({ senderSk: agentSk, recipient: op, eventId: target, now: NOW })
+    expect(r.rumor).toEqual({ id: getEventHash({ pubkey: agent, created_at: NOW, kind: 7, tags: [['e', target], ['p', op]], content: '👀' }), pubkey: agent, created_at: NOW, kind: 7, tags: [['e', target], ['p', op]], content: '👀' })
+    for (const [wrap, sk, to] of [[r.toRecipient, opSk, op], [r.toSelf, agentSk, agent]] as const) {
+      expect(wrap.kind).toBe(1059)
+      expect(wrap.tags).toEqual([['p', to]])
+      expect(wrap.pubkey).not.toBe(agent)
+      const { seal, rumor } = open(wrap, sk)
+      expect(seal.kind).toBe(13)
+      expect(seal.tags).toEqual([])
+      expect(seal.pubkey).toBe(agent)
+      expect(verifyEvent(seal as Parameters<typeof verifyEvent>[0])).toBe(true)
+      expect(rumor).toEqual(r.rumor)
+      // nostr-tools reads it as any NIP-59 client would, and so does this server.
+      expect(nip59.unwrapEvent(wrap as Parameters<typeof nip59.unwrapEvent>[0], sk)).toMatchObject({ kind: 7, content: '👀', tags: [['e', target], ['p', op]] })
+      const opened = unwrapMessage(wrap, sk)
+      expect(opened.ok && opened.rumor.kind).toBe(7)
+    }
   })
 })
