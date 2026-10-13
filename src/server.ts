@@ -463,7 +463,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   server.registerTool('message_operator', {
     title: 'Message your operator',
-    description: `Send your operator a private message (a NIP-17 DM to the relays of their kind 10050), with a copy to your own DM inbox. The only way to talk with your operator: never post to them publicly. Up to ${MAX_OPERATOR_MESSAGE} characters. Refused when your operator has no DM inbox.`,
+    description: `Send your operator a private message (a NIP-17 DM to the relays of their kind 10050), with a copy to your own DM inbox. The only way to talk with your operator: never post to them publicly. Write it like a text from a friend: the answer first, one to three sentences, never a list of what you did not do, and no coordinates, ids or hashes unless asked. Up to ${MAX_OPERATOR_MESSAGE} characters. Refused when your operator has no DM inbox.`,
     inputSchema: { text: z.string().min(1).max(MAX_OPERATOR_MESSAGE).describe('What to tell your operator.') },
     annotations: { readOnlyHint: false, destructiveHint: false },
   }, async (args) => call(() => agent.messageOperator(args)))
