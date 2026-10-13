@@ -25,13 +25,16 @@ The same without questions: `npx github:arkin0x/cyberspace-mcp init --operator n
 
 ## 2. Install the command (2 minutes)
 
-`npx` ran init from a cache. Install it so `cyberspace-mcp` runs by name (init says so when it is not on your PATH yet):
+`npx` ran init from its cache. To run `cyberspace-mcp` by name (init says so when it is not on your PATH yet), install it from a clone:
 
 ```sh
-npm i -g github:arkin0x/cyberspace-mcp
+git clone https://github.com/arkin0x/cyberspace-mcp.git ~/cyberspace-mcp
+cd ~/cyberspace-mcp && npm install && npm i -g .
 ```
 
-It builds from source on install. `npm i -g git+https://github.com/arkin0x/cyberspace-mcp` is the same thing.
+Keep the folder: the global command points into it. Update with `git pull && npm install` there. (`npm i -g github:arkin0x/cyberspace-mcp` does not work: npm cannot build a package that needs a build step when it installs it globally straight from git. If `npm i -g` asks for root, set a prefix of your own first: `npm config set prefix ~/.npm-global` and add `~/.npm-global/bin` to your PATH.)
+
+Or skip installing and put `npx github:arkin0x/cyberspace-mcp` wherever this page says `cyberspace-mcp`: `npx github:arkin0x/cyberspace-mcp serve` works the same.
 
 ## 3. Make yourself its operator in nostr (2 minutes)
 

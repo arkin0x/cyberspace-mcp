@@ -26,20 +26,18 @@ And one fact that explains most of the rest: **one key, one mover.** Many things
 
 Requires Node 22.
 
-```sh
-npm i -g github:arkin0x/cyberspace-mcp
-```
+Without installing anything, `npx github:arkin0x/cyberspace-mcp <command>` runs any command (`init`, `serve`, `doctor`) from npm's cache, building it the first time.
 
-That installs the `cyberspace-mcp` command from GitHub, building it on install (the package's `prepare` script); `npm i -g git+https://github.com/arkin0x/cyberspace-mcp` is the same. Without installing, `npx github:arkin0x/cyberspace-mcp <command>` runs any command from npm's cache; `init` says when the command is not on your PATH yet.
-
-From a clone, for development:
+To have the `cyberspace-mcp` command on your PATH, install it from a clone:
 
 ```sh
 git clone https://github.com/arkin0x/cyberspace-mcp.git
 cd cyberspace-mcp
-npm install
-npm run build
+npm install          # also builds dist/ (the prepare script)
+npm i -g .           # the global command points into this folder; keep it
 ```
+
+`npm i -g github:arkin0x/cyberspace-mcp` (or `git+https://...`) does not work: when npm installs a package globally straight from git, its nested install for the `prepare` build does not put the dependencies where the build looks, so the build fails (npm 10 and 11, checked 2026-10-13). `npx` from GitHub and a clone both build correctly.
 
 `cyberspace-core` and `sno-core` are installed from GitHub at the exact commits ONOSENDAI pins, so the events this server builds are the events ONOSENDAI builds. Both are pinned as `git+https` URLs; npm records hosted GitHub dependencies as `git+ssh` in the lockfile by design and clones over https first, so `npm ci` needs no SSH key (ONOSENDAI's lockfile reads the same way).
 

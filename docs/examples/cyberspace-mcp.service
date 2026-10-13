@@ -17,6 +17,8 @@ Wants=network-online.target
 # The command's full path (command -v cyberspace-mcp). The state directory is
 # ~/.cyberspace-mcp unless you add --state <dir>.
 ExecStart=%h/.npm-global/bin/cyberspace-mcp serve
+# Not installed, run through npx instead (it fetches the newest commit on each start):
+# ExecStart=/usr/bin/npx --yes github:arkin0x/cyberspace-mcp serve
 # systemd starts with a short PATH: name the directories of node and of your
 # model CLI (claude, hermes) here. init writes the CLI's full path into the
 # wake command, but the CLI itself may need node.

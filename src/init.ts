@@ -273,8 +273,11 @@ export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
   }
   print('')
   if (!which('cyberspace-mcp', env)) {
+    // `npm i -g github:...` cannot build this package (npm's nested prepare install), so the clone it is (arkinox, 2026-10-13).
     print('cyberspace-mcp is not on your PATH yet (npx runs it from a cache). Install it so serve and doctor run by name:')
-    print('  npm i -g github:arkin0x/cyberspace-mcp')
+    print('  git clone https://github.com/arkin0x/cyberspace-mcp.git ~/cyberspace-mcp')
+    print('  cd ~/cyberspace-mcp && npm install && npm i -g .')
+    print('Or put npx github:arkin0x/cyberspace-mcp wherever QUICKSTART.md says cyberspace-mcp.')
     print('')
   }
   print('Next:')
