@@ -163,10 +163,29 @@ async function run(log: (line: string) => void, fn: () => Promise<ToolResult> | 
   return withNotices(result, n)
 }
 
-export function createServer(agent: Agent, log: (line: string) => void = () => {}): McpServer {
+/**
+ * What `serve` hands the server besides the agent (arkinox, 2026-10-13):
+ * onActivity is told of every tool call, as it starts and as it ends, so the
+ * waker's watchdog knows a turn is working; wakeAgain, when a waker runs,
+ * adds the wake_again tool. The stdio mode passes neither.
+ */
+export interface ServerHooks {
+  onActivity?: () => void
+  wakeAgain?: () => string
+}
+
+export function createServer(agent: Agent, log: (line: string) => void = () => {}, hooks: ServerHooks = {}): McpServer {
   const server = new McpServer({ name: 'cyberspace-mcp', version: '0.0.1' })
+  const activity = (): void => { try { hooks.onActivity?.() } catch { /* the watchdog's bookkeeping never fails a tool */ } }
   // Every tool's answer ends with the notices: unread orders and an operator's tag in chat.
-  const call = (fn: () => Promise<ToolResult> | ToolResult): Promise<CallToolResult> => run(log, fn, () => agent.notices())
+  const call = async (fn: () => Promise<ToolResult> | ToolResult): Promise<CallToolResult> => {
+    activity()
+    try {
+      return await run(log, fn, () => agent.notices())
+    } finally {
+      activity()
+    }
+  }
 
   server.registerTool('identity', {
     title: 'Identity',
@@ -458,6 +477,15 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   }, async (args) => call(() => agent.logTravel(args)))
+
+  if (hooks.wakeAgain) {
+    const again = hooks.wakeAgain
+    server.registerTool('wake_again', {
+      title: 'Wake again',
+      description: 'Ask your waker for one more turn right after this one ends, for work under way that needs another turn (a long build, a sweep you must come back to). The next turn starts about half a minute after this one ends and begins with inbox, as every turn does. At most a dozen in a row; after that the waker waits for a new event. Not needed for a ride: the waker wakes you when a ride is ready or stops. Only present when this server runs a waker.',
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    }, async () => call(() => ({ text: again(), data: { wakeAgain: true } })))
+  }
 
   server.registerResource('agents.md', 'cyberspace://agents.md', {
     title: 'agents.md',

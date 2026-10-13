@@ -11,7 +11,9 @@
   "files": [
     "dist",
     "docs/agents.md",
+    "docs/examples",
     "README.md",
+    "QUICKSTART.md",
     "LICENSE"
   ],
   "engines": {

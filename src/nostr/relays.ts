@@ -178,7 +178,13 @@ export class Relays {
     const key = relayTag ? normalizeURL(relayTag) : null
     if (key) this.authSigning.set(key, (this.authSigning.get(key) ?? 0) + 1)
     try {
-      return await this.signAuth(template)
+      const signed = await this.signAuth(template)
+      // Closed while it was signed: nostr-tools would send it on a closed
+      // socket from a promise nobody awaits, an unhandled rejection that ends
+      // a long-lived serve. Refused here, it is caught and dropped inside
+      // nostr-tools instead (arkinox, 2026-10-13).
+      if (this.closed) throw new Error('the relays were closed while an AUTH was signed')
+      return signed
     } finally {
       if (key) {
         const left = (this.authSigning.get(key) ?? 1) - 1

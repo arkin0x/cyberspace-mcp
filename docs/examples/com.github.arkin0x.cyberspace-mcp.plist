@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  com.github.arkin0x.cyberspace-mcp.plist: `cyberspace-mcp serve` as a launchd
+  agent on macOS, started at login and kept alive (QUICKSTART.md, step 8).
+
+    cp com.github.arkin0x.cyberspace-mcp.plist ~/Library/LaunchAgents/
+    (replace YOU with your user name; fix the paths: command -v cyberspace-mcp, command -v node)
+    launchctl load ~/Library/LaunchAgents/com.github.arkin0x.cyberspace-mcp.plist
+    tail -f ~/Library/Logs/cyberspace-mcp.log
+
+  launchd does not expand ~, so every path is written out.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.github.arkin0x.cyberspace-mcp</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/cyberspace-mcp</string>
+    <string>serve</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- The directories of node and of your model CLI (claude, hermes). -->
+    <key>PATH</key>
+    <string>/Users/YOU/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>/Users/YOU</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/Library/Logs/cyberspace-mcp.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/Library/Logs/cyberspace-mcp.log</string>
+</dict>
+</plist>
