@@ -1,0 +1,34 @@
+# cyberspace-mcp.service: `cyberspace-mcp serve` as a systemd user service,
+# so the agent and its waker outlive your login (QUICKSTART.md, step 8).
+#
+#   cp cyberspace-mcp.service ~/.config/systemd/user/
+#   (fix ExecStart and PATH below: command -v cyberspace-mcp, command -v node)
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now cyberspace-mcp
+#   loginctl enable-linger "$USER"
+#   journalctl --user -u cyberspace-mcp -f
+
+[Unit]
+Description=cyberspace-mcp serve: one agent in cyberspace, and its waker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# The command's full path (command -v cyberspace-mcp). The state directory is
+# ~/.cyberspace-mcp unless you add --state <dir>.
+ExecStart=%h/.npm-global/bin/cyberspace-mcp serve
+# Not installed, run through npx instead (it fetches the newest commit on each start):
+# ExecStart=/usr/bin/npx --yes github:arkin0x/cyberspace-mcp serve
+# systemd starts with a short PATH: name the directories of node and of your
+# model CLI (claude, hermes) here. init writes the CLI's full path into the
+# wake command, but the CLI itself may need node.
+Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=%h
+Restart=on-failure
+RestartSec=15
+# A clean stop flushes a ride's work to disk and stops a turn under way.
+KillSignal=SIGTERM
+TimeoutStopSec=40
+
+[Install]
+WantedBy=default.target

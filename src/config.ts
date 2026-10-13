@@ -72,7 +72,13 @@ export interface ParsedArgs {
 
 export const USAGE = `cyberspace-mcp: a local MCP server that gives an AI agent a body in cyberspace.
 
-Usage: cyberspace-mcp --state <dir> [options]
+Usage: cyberspace-mcp init                     Set up an agent once: key, operator, waker (init --help).
+       cyberspace-mcp serve [options]           One long-lived agent over HTTP at http://127.0.0.1:7777/mcp,
+                                                with its waker (serve --help).
+       cyberspace-mcp doctor                    Check what is missing, and how to fix it.
+       cyberspace-mcp wake pause|resume|status  Pause or resume the waker.
+       cyberspace-mcp [stdio] --state <dir> [options]
+                                                The stdio MCP server, for a client that starts it itself.
 
   --state <dir>                 The state directory (required): the key, the chain, the outbox.
   --relay <url>                 A relay; repeatable. The first is the canonical relay. Default ${DEFAULT_RELAY}
