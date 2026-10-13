@@ -11,6 +11,7 @@ import { DEFAULT_RELAY } from './nostr/relays.js'
 import { parseNwc, Secret } from './nwc.js'
 import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS } from './wallet.js'
 import { DEFAULT_TRAVEL_PER_DAY, type TravelLogSettings } from './travel.js'
+import { DEFAULT_PUBLISH_PER_DAY } from './publicObject.js'
 
 export interface Settings {
   stateDir: string
@@ -36,6 +37,8 @@ export interface Settings {
   travelLog: TravelLogSettings
   /** Least minutes between two wakes for strangers' chat lines that address the agent (arkinox, 2026-10-11). */
   chatWakeMinutes: number
+  /** The most public objects publish_object may publish in any 24 hours (arkinox, 2026-10-13). */
+  publishMaxPerDay: number
 }
 
 const DEFAULTS = {
@@ -48,6 +51,7 @@ const DEFAULTS = {
   maxPaymentSats: DEFAULT_MAX_PAYMENT_SATS,
   maxDailySats: DEFAULT_MAX_DAILY_SATS,
   chatWakeMinutes: DEFAULT_CHAT_WAKE_MINUTES,
+  publishMaxPerDay: DEFAULT_PUBLISH_PER_DAY,
 } as const
 
 export interface ParsedArgs {
@@ -67,6 +71,7 @@ export interface ParsedArgs {
   travelLog?: boolean
   travelLogMaxPerDay?: number
   chatWakeMinutes?: number
+  publishMaxPerDay?: number
   help?: boolean
 }
 
@@ -103,11 +108,13 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
   --chat-wake-minutes <n>       A stranger's chat line that addresses the agent is reported for
                                 waking at most once per this many minutes, in total and per
                                 speaker; the operator's always. Default ${DEFAULTS.chatWakeMinutes}
+  --publish-max-per-day <n>     The most public objects publish_object may publish in any 24 hours.
+                                Default ${DEFAULTS.publishMaxPerDay}
   --help                        This text.
 
 The same keys may live in <state>/config.json: relays, operator, name, about,
 capCallSeconds, capSessionSeconds, maxSidestepHeight, allowRespawn, hosakaUrl,
-nwc, maxPaymentSats, maxDailySats, chatWakeMinutes, and travelLog: { "enabled": true,
+nwc, maxPaymentSats, maxDailySats, chatWakeMinutes, publishMaxPerDay, and travelLog: { "enabled": true,
 "maxPerDay": 6, "tagOperator": false }. The wallet string may also be the "nwc" key
 of <state>/wallet.json, which the server only reads.`
 
@@ -169,6 +176,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case '--travel-log': out.travelLog = true; break
       case '--travel-log-max-per-day': out.travelLogMaxPerDay = Math.max(1, Math.floor(num(a, next()))); break
       case '--chat-wake-minutes': out.chatWakeMinutes = num(a, next()); break
+      case '--publish-max-per-day': out.publishMaxPerDay = Math.max(1, Math.floor(num(a, next()))); break
       case '--help': case '-h': out.help = true; break
       // An argument that looks like a wallet string is never echoed, even into an error (arkinox, 2026-10-11).
       default: throw new Error(`unknown argument ${/walletconnect|secret=/i.test(a) ? '(it looks like a wallet connection string, so it is not repeated here; use --nwc <uri>)' : JSON.stringify(a)}; try --help`)
@@ -192,6 +200,7 @@ interface FileConfig {
   maxDailySats?: unknown
   travelLog?: unknown
   chatWakeMinutes?: unknown
+  publishMaxPerDay?: unknown
 }
 
 /** <state>/wallet.json, which the human writes and the server only reads: {"nwc": "nostr+walletconnect://..."}. */
@@ -249,6 +258,7 @@ export function settingsFrom(args: ParsedArgs, file: FileConfig, walletFile: Wal
     maxDailySats: args.maxDailySats ?? (file.maxDailySats !== undefined ? sats('config.json maxDailySats', file.maxDailySats) : DEFAULTS.maxDailySats),
     travelLog: travelLogSettings(args, file.travelLog),
     chatWakeMinutes: args.chatWakeMinutes ?? posNum(file.chatWakeMinutes) ?? DEFAULTS.chatWakeMinutes,
+    publishMaxPerDay: args.publishMaxPerDay ?? (posNum(file.publishMaxPerDay) !== undefined ? Math.max(1, Math.floor(posNum(file.publishMaxPerDay)!)) : DEFAULTS.publishMaxPerDay),
   }
 }
 
