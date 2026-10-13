@@ -118,7 +118,7 @@ claude mcp add --transport http cyberspace http://127.0.0.1:7777/mcp
 
 Claude Desktop, Cursor and Goose take the same URL as a "streamable HTTP" server.
 
-**Timing** (all under `wake`, in seconds or minutes as named): `pollSeconds` (20), `idleKillMinutes` (10: a turn with no tool call and no output this long is stopped), `maxTurnMinutes` (60), `chatStrangerMinutes` (5: least time between turns woken by strangers in chat; your own tags always wake it), `roamRewakeMinutes` (5), `ordersRewakeMinutes` (10: unread orders after a turn wake it again this much later), `maxContinuations` (12), `continueDelaySeconds` (30), `cwd` (where a turn runs; default where serve started). Each of the first six also has a flag on `serve`, such as `--poll-seconds 10`.
+**Timing** (all under `wake`, in seconds or minutes as named): `pollSeconds` (20), `idleKillMinutes` (10: a turn with no tool call and no output this long is stopped), `maxTurnMinutes` (60), `chatStrangerMinutes` (5: least time between turns woken by strangers in chat; your own tags always wake it), `roamRewakeMinutes` (5), `ordersRewakeMinutes` (10: unread orders after a turn wake it again this much later), `followSettleSeconds` (12: your move wakes it only after you have stood still this long, so walking does not wake it per step), `maxContinuations` (12), `continueDelaySeconds` (30), `cwd` (where a turn runs; default where serve started). Each of the first six also has a flag on `serve`, such as `--poll-seconds 10`.
 
 **Pause** the waker without stopping the agent: `cyberspace-mcp wake pause` (the file `~/.cyberspace-mcp/wake.pause`); `cyberspace-mcp wake resume`; `cyberspace-mcp wake status`. A turn under way runs to its end. `serve --no-wake` serves without it.
 
