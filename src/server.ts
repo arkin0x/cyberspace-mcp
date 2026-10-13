@@ -382,6 +382,18 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     },
   }, async (args, extra) => call(() => agent.setAvatar(args, extra.signal)))
 
+  server.registerTool('publish_object', {
+    title: 'Publish an object to the feed',
+    description: 'Publish an SNO object to the feed as a public kind 33331 (DECK-0003 3.1), as ONOSENDAI\'s PUBLISH does, so it shows in the Shard Feed and anyone can copy it or place it by its address. This publishes the object to the feed; it does not place it in the world. Placing public shards (33332) waits for a price. Validated as place validates; render it first. Leave d out for a new object (a fresh id is chosen and returned); give the d it returned to replace that object with a new version. Returns the event id, the address "33331:<pubkey>:<d>" and its naddr: place hides it at a coordinate by that address, and your operator can open it from the address. At most 20 in any 24 hours by default (your human sets publishMaxPerDay); a refused or unanswered publish does not count.',
+    inputSchema: {
+      object: z.unknown().describe('An SNO payload (DECK-0003 section 1), as you would give place or render.'),
+      d: z.string().optional().describe('The object\'s identifier: leave it out for a new object; give the d an earlier publish_object returned to replace that one.'),
+      name: z.string().optional().describe('The object\'s name, replacing the payload\'s.'),
+      description: z.string().optional().describe('One sentence for a client that cannot draw it (the alt tag, NIP-31), at most 280 characters.'),
+    },
+    annotations: { readOnlyHint: false, idempotentHint: false },
+  }, async (args) => call(() => agent.publishObject(args)))
+
   server.registerTool('validate_object', {
     title: 'Validate an object',
     description: 'Check an SNO payload against DECK-0003 section 1.9 with sno-core. Returns valid with its size, or the errors in plain words.',

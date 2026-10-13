@@ -55,6 +55,7 @@ import { ROAM_MAX_MINUTES, ROAM_MIN_MINUTES, Roam, roamCandidates, searchRoam } 
 import { profileTemplate, type ProfileFields, MAX_PICTURE_URL, pictureUrl, publishedFields } from './profile.js'
 import { objectHandle, renderShard, type NamedView } from './render.js'
 import { validateSnoPayload } from './sno.js'
+import { DEFAULT_PUBLISH_PER_DAY, MAX_ALT_LENGTH, MAX_NAME_LENGTH, dProblem, newObjectId, objectPointers, publicObjectTemplate } from './publicObject.js'
 import { hopCeiling, loadOrMeasure, projectCantorMs, type Calibration } from './space/calibration.js'
 import { describePlace, distanceBetween, distanceWords, parseCoordinate, placeFromHex, placeOf, spawnPlace, type CoordinateInput, type Place } from './space/coords.js'
 import { apartOnBestAxis, nearestClear, overlapping, spacingFor, type Body } from './space/personalSpace.js'
@@ -121,11 +122,18 @@ export interface AgentConfig {
   chatWakeMinutes?: number
   /** Tests: threads an avatar is mined on. */
   avatarThreads?: number
+  /** The most public objects publish_object may publish in any 24 hours (default 20). */
+  publishMaxPerDay?: number
   /** How often the server checks for new operator orders on its own, in ms (default 15 s; 0 turns the poll off, for tests). */
   ordersPollMs?: number
   /** Tests: how long a failed 👀 waits before its one retry. */
   reactionRetryMs?: number
 }
+
+/** Where publish_object counts what it published, so the daily limit survives a restart. */
+const PUBLISHED_FILE = 'published.json'
+interface PublishedFile { posts: number[] }
+const DAY_SECONDS = 24 * 60 * 60
 
 /** The highest cube a key is derived for on request (hide, find, look): a key at h16 is about a second. */
 export const MAX_KEY_HEIGHT = 16
@@ -2163,6 +2171,75 @@ export class Agent {
       data: { eventId: event.id, name: shard.name, source, bits: mined!.bits, tries: mined!.tries, seconds: mined!.seconds, estimateSeconds: mined!.estimate, accepted: entry.accepted, refused: entry.refused ?? {}, vertices: r.vertices, faces: r.faces, pngBytes: r.png.length },
     }
   }
+
+  // ---- publish_object (publicObject.ts) -------------------------------------
+
+  /**
+   * Publish an SNO object to the feed, a public kind 33331 (DECK-0003 3.1),
+   * as ONOSENDAI's PUBLISH does (arkinox, 2026-10-13, amending D11: agents
+   * may publish objects; placing public shards, kind 33332, waits for a
+   * price). Validated as place validates, signed, and sent through the
+   * outbox. The same `d` again replaces the object in place. At most
+   * publishMaxPerDay in any 24 hours, counted on disk so a restart does not
+   * reset it, so an agent in a loop cannot flood the feed.
+   */
+  async publishObject(input: { object?: unknown; d?: string; name?: string; description?: string }): Promise<ToolResult> {
+    if (input.object === undefined) throw new Refusal('Give object, the SNO payload to publish (render it first).')
+    let raw = input.object
+    if (typeof raw === 'string') {
+      try { raw = JSON.parse(raw) } catch { throw new Refusal('object is a string that is not JSON; give the SNO payload as an object.') }
+    }
+    if (input.name !== undefined && raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      const name = String(input.name).trim().replace(/\s+/g, ' ')
+      if (!name) throw new Refusal('name, when given, must not be empty.')
+      if (name.length > MAX_NAME_LENGTH) throw new Refusal(`name must be at most ${MAX_NAME_LENGTH} characters.`)
+      raw = { ...(raw as Record<string, unknown>), name }
+    }
+    const v = validateSnoPayload(raw)
+    if (!v.ok) throw new Refusal(`Not published: the payload is not valid SNO. ${v.errors.join(' ')}`)
+    const replacing = input.d !== undefined
+    const d = replacing ? String(input.d) : newObjectId()
+    const bad = dProblem(d)
+    if (bad) throw new Refusal(`Not published: ${bad}`)
+    let alt: string | undefined
+    if (input.description !== undefined) {
+      alt = String(input.description).trim().replace(/\s+/g, ' ')
+      if (!alt) alt = undefined
+      else if (alt.length > MAX_ALT_LENGTH) throw new Refusal(`description must be at most ${MAX_ALT_LENGTH} characters.`)
+    }
+    const now = nowSeconds()
+    const limit = this.config.publishMaxPerDay ?? DEFAULT_PUBLISH_PER_DAY
+    const log = this.dir.readJson<PublishedFile>(PUBLISHED_FILE, { posts: [] })
+    const recent = (Array.isArray(log.posts) ? log.posts : []).filter((t) => typeof t === 'number' && t > now - DAY_SECONDS)
+    if (recent.length >= limit) {
+      const next = Math.min(...recent) + DAY_SECONDS
+      throw new Refusal(`You have published ${recent.length} objects in the last 24 hours, the most your human allows (publishMaxPerDay). The next may go after ${new Date(next * 1000).toISOString()}. Nothing was published.`)
+    }
+    // An edit replaces by created_at (NIP-01): never sign two versions of one d in the same second.
+    const createdAt = Math.max(now, (this.lastPublishedAt.get(d) ?? 0) + 1)
+    const event = this.sign(publicObjectTemplate(v.shard, d, createdAt, alt))
+    const entry = this.outbox.add(event)
+    const result = await this.outbox.send(entry)
+    const { address, naddr } = objectPointers(this.pubkey, d, this.relays.urls)
+    const refusedWords = entry.refused ? ` Refused by ${Object.entries(entry.refused).map(([u, r]) => `${u}: ${r}`).join('; ')}.` : ''
+    if (!entry.accepted.length) {
+      // Kept in the outbox, which retries it; it counts against the day only once a relay takes it.
+      return {
+        text: `Signed "${v.shard.name}" as kind 33331 ${event.id.slice(0, 8)}..., but no relay accepted it yet${result.ok ? '' : `: ${result.reason}`}.${refusedWords} The outbox retries it. Address ${address}.`,
+        data: { eventId: event.id, address, naddr, d, name: v.shard.name, replaced: replacing, accepted: [], refused: entry.refused ?? {}, publishedToday: recent.length, maxPerDay: limit },
+      }
+    }
+    this.lastPublishedAt.set(d, createdAt)
+    this.dir.writeJson(PUBLISHED_FILE, { posts: [...recent, now] } satisfies PublishedFile)
+    const left = Math.max(0, limit - recent.length - 1)
+    return {
+      text: `Published "${v.shard.name}" to the feed${replacing ? ` under d "${d}" (it replaces any earlier version there)` : ''}: kind 33331 ${event.id.slice(0, 8)}..., ${v.vertices} vertices, ${v.faces} faces, ${v.bytes} bytes. Accepted by ${entry.accepted.join(', ')}.${refusedWords} Address ${address} (naddr ${naddr}). This publishes the object; it does not place it in the world. To hide it at a place, call place with this address. To change it later, publish again with d "${d}". ${left} more today.`,
+      data: { eventId: event.id, address, naddr, d, name: v.shard.name, replaced: replacing, accepted: entry.accepted, refused: entry.refused ?? {}, publishedToday: recent.length + 1, maxPerDay: limit },
+    }
+  }
+
+  /** The created_at last signed per d this run, so two edits in one second still order. */
+  private readonly lastPublishedAt = new Map<string, number>()
 
   // ---- validate_object, budget, outbox -------------------------------------
 
