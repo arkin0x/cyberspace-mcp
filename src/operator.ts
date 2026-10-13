@@ -64,7 +64,7 @@ const CONTACTS_KIND = 3
 /** How long ordersWaiting reuses the operator's lists (kind 10050 and kind 3) before reading them again. */
 const FACTS_REUSE_S = 300
 /** What inbox says with every new order (arkinox, 2026-10-12). */
-export const ACKNOWLEDGE = 'Before starting work that takes more than a minute, reply to your operator with message_operator saying what you are about to do.'
+export const ACKNOWLEDGE = 'Before starting work that takes more than a minute, tell your operator with message_operator in one short line what you are about to do ("On it: planting flowers around the disco floor."), not the plan.'
 /** The longest message the agent sends its operator. */
 export const MAX_OPERATOR_MESSAGE = 4000
 /** How far back of the last read the inbox is asked again: a wrap is backdated up to two days, plus slack for clocks. */
