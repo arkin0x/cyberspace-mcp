@@ -32,7 +32,7 @@
 import { EventEmitter } from 'node:events'
 import { nip19 } from 'nostr-tools'
 import type { Filter } from 'nostr-tools/filter'
-import { CHAT_BAG_KIND, MAX_CHAT_LENGTH, bagTemplate, chatInnerTemplate, chatInners } from './hidden/bags.js'
+import { CHAT_BAG_KIND, MAX_CHAT_LENGTH, bagTemplate, chatInnerTemplate, chatInners, chatRumor } from './hidden/bags.js'
 import { hexToBytes, nowSeconds, type EventTemplate, type NostrEvent } from './nostr/event.js'
 import type { Relays } from './nostr/relays.js'
 import { AXIS_LIMIT, type Place, type Position } from './space/coords.js'
@@ -269,7 +269,8 @@ export class Chat extends EventEmitter {
     const why = this.refusal(text, replyTo, now)
     if (why) return { refused: why }
     const key = this.current!
-    const inner = this.me.sign(chatInnerTemplate(text, place.position, place.plane, now, key.lookupId))
+    // The line is a rumor, never signed: only the envelope is (chatRumor).
+    const inner = chatRumor(chatInnerTemplate(text, place.position, place.plane, now, key.lookupId), this.me.pubkey)
     const outer = this.me.sign(await bagTemplate([inner], hexToBytes(key.keyHex), key.lookupId, key.height, now, CHAT_BAG_KIND))
     const result = await this.relays.publish(outer)
     if (!result.ok) return { refused: `Not sent: ${result.reason}` }

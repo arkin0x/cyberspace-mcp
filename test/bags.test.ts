@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { newShard } from 'sno-core/shards'
 import {
-  CHAT_BAG_KIND, CHAT_KIND, HIDDEN_KIND, KEY_KIND, bagEntries, bagTemplate, chatInnerTemplate, chatInners, chestInnerTemplate, chestItemOf, ciphertextOf,
+  CHAT_BAG_KIND, CHAT_KIND, HIDDEN_KIND, KEY_KIND, bagEntries, bagTemplate, chatInnerTemplate, chatInners, chatRumor, chestInnerTemplate, chestItemOf, ciphertextOf,
   keyInnerTemplate, keyItemOf, messageInnerTemplate, objectTemplate, readItem, referenceTo, unbag, entryKey,
 } from '../src/hidden/bags.js'
 import { forgeKey, openWithSecret, openerFor, readContents, sealEntries } from '../src/hidden/chests.js'
@@ -18,7 +18,7 @@ const at = { x: 1n << 40n, y: 5n, z: 9n }
 const lookup = 'aa'.repeat(32)
 
 async function said(text: string, sk = generateSecretKey()) {
-  const inner = signEvent(chatInnerTemplate(text, at, 0, 1_700_000_000, lookup), sk)
+  const inner = chatRumor(chatInnerTemplate(text, at, 0, 1_700_000_000, lookup), getPublicKey(sk))
   const outer = signEvent(await bagTemplate([inner], key, lookup, 12, 1_700_000_000, CHAT_BAG_KIND), sk)
   return { inner, outer, sk }
 }
@@ -40,7 +40,7 @@ describe('the ephemeral envelope', () => {
     expect(ciphertextOf(outer)).not.toBeNull()
   })
 
-  it('opens with the region key and gives back the signed line', async () => {
+  it('opens with the region key and gives back the line', async () => {
     const { inner, outer } = await said('is anyone here')
     const lines = await chatInners(outer, key)
     expect(lines).toHaveLength(1)
@@ -56,7 +56,7 @@ describe('the ephemeral envelope', () => {
   it('refuses a line wrapped by someone who did not sign it', async () => {
     const speaker = generateSecretKey()
     const wrapper = generateSecretKey()
-    const inner = signEvent(chatInnerTemplate('not mine to carry', at, 0, 1, lookup), speaker)
+    const inner = chatRumor(chatInnerTemplate('not mine to carry', at, 0, 1, lookup), getPublicKey(speaker))
     const outer = signEvent(await bagTemplate([inner], key, lookup, 12, 1, CHAT_BAG_KIND), wrapper)
     expect(getPublicKey(speaker)).not.toBe(outer.pubkey)
     expect(await chatInners(outer, key)).toHaveLength(0)
@@ -64,6 +64,35 @@ describe('the ephemeral envelope', () => {
 
   it('caps a line at the chat length', () => {
     expect(chatInnerTemplate('x'.repeat(2000), at, 0, 1, lookup).content).toHaveLength(500)
+  })
+
+  it('seals the line as a rumor: an id, no signature (arkinox, 2026-10-13)', async () => {
+    const { inner } = await said('no proof of me')
+    expect('sig' in inner).toBe(false)
+    expect(inner.id).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  it('refuses a rumor whose id is not its own hash', async () => {
+    const sk = generateSecretKey()
+    const inner = { ...chatRumor(chatInnerTemplate('forged id', at, 0, 1, lookup), getPublicKey(sk)), id: 'ff'.repeat(32) }
+    const outer = signEvent(await bagTemplate([inner], key, lookup, 12, 1, CHAT_BAG_KIND), sk)
+    expect(await chatInners(outer, key)).toHaveLength(0)
+  })
+
+  it('still reads a signed line from an older client, when its signature holds', async () => {
+    const sk = generateSecretKey()
+    const inner = signEvent(chatInnerTemplate('from before', at, 0, 1, lookup), sk)
+    const outer = signEvent(await bagTemplate([inner], key, lookup, 12, 1, CHAT_BAG_KIND), sk)
+    const lines = await chatInners(outer, key)
+    expect(lines).toHaveLength(1)
+    expect(lines[0].id).toBe(inner.id)
+  })
+
+  it('refuses a signed line whose signature does not hold', async () => {
+    const sk = generateSecretKey()
+    const inner = { ...signEvent(chatInnerTemplate('tampered', at, 0, 1, lookup), sk), sig: '00'.repeat(64) }
+    const outer = signEvent(await bagTemplate([inner], key, lookup, 12, 1, CHAT_BAG_KIND), sk)
+    expect(await chatInners(outer, key)).toHaveLength(0)
   })
 })
 
