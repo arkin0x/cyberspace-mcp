@@ -65,8 +65,9 @@ export const RIDE_PROMPTS: Record<string, (to: string) => string> = {
 export const MOVE_PROMPT = (m: { action: string; to: string; distance: string }): string =>
   `Wake-up from your waker: your operator moved (${m.action} to ${m.to}, ${m.distance} from you). Call inbox first (new orders override the plan), `
   + 'reread your STRATEGY, then call follow_operator. If your STRATEGY says to follow them or meet them and the plan is within your caps, hop toward '
-  + 'the gibson it names beside them (never onto their own gibson). If it needs a ride or is over your caps, tell your operator with message_operator '
-  + 'what it would take. Do not wait for further prompts in this turn.' + BRIEF + TOOLS
+  + 'the gibson it names beside them (never onto their own gibson). Following is silent: do not call message_operator to say you moved, followed, '
+  + 'arrived or are nearby; your operator can see you. Message them only when you cannot follow at all (it needs a ride or is over your caps), once, '
+  + 'saying what it would take. Do not wait for further prompts in this turn.' + BRIEF + TOOLS
 
 /** A roam step is due. */
 export const ROAM_PROMPT = 'Wake-up from your waker: a roam step is due. Call inbox first (new orders override the plan), reread your STRATEGY, then call roam '
@@ -92,7 +93,7 @@ export interface WakeData {
   orders?: number | null
   strategy?: unknown
   ride?: { state?: string | null; to?: number | string | null } | null
-  operatorMoved?: { eventId?: string; action?: string; to?: string; distance?: string } | null
+  operatorMoved?: { eventId?: string; action?: string; to?: string; distance?: string; at?: number } | null
   roamDue?: boolean
   chatHeard?: { wake?: 'operator' | 'stranger' | null; addressed?: number } | null
 }
@@ -252,6 +253,12 @@ export class Waker {
     const moved = data.operatorMoved ?? {}
     const rideKey = ride.state ? `${ride.state}:${ride.to}` : null
     const reply = s.replyCommand ?? s.command
+    // A move wakes the agent only once the operator has stood still a while
+    // (arkinox, 2026-10-13: "I dont want XOR to message me EVERY time I
+    // move"). WALK sends a step per press, and a wake per step was a turn,
+    // and often a DM, per step. Until it settles the move is left unseen, so
+    // the newest one wakes the agent once the walking stops.
+    const movedSettled = typeof moved.at !== 'number' || now - moved.at * 1000 >= s.followSettleSeconds * 1000
     if (orders > 0 && (orders > this.lastCount || now - this.lastWake >= s.ordersRewakeMinutes * 60_000)) {
       this.continuations = 0
       await this.turn(`${orders} order(s) waiting`, ORDERS_PROMPT(orders, !!data.strategy), reply)
@@ -272,7 +279,7 @@ export class Waker {
       if (wake === 'stranger') this.lastStrangerChatWake = now
       await this.turn(`chat: ${wake} (${addressed} addressed)`, CHAT_PROMPTS[wake](addressed), reply)
       this.lastWake = this.now()
-    } else if (moved.eventId && moved.eventId !== this.lastMoved) {
+    } else if (moved.eventId && moved.eventId !== this.lastMoved && movedSettled) {
       const fields = { action: moved.action ?? '?', to: moved.to ?? '?', distance: moved.distance ?? '?' }
       await this.turn(`operator moved: ${fields.action} ${moved.eventId.slice(0, 8)}`, MOVE_PROMPT(fields), reply)
       this.lastWake = this.now()
@@ -284,7 +291,7 @@ export class Waker {
     } else {
       if (orders === 0) this.lastCount = 0
       this.lastRide = rideKey
-      this.lastMoved = moved.eventId ?? this.lastMoved
+      if (movedSettled) this.lastMoved = moved.eventId ?? this.lastMoved
     }
   }
 

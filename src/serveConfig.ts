@@ -45,6 +45,8 @@ export interface WakeSettings {
   chatStrangerMinutes: number
   /** Least minutes between two roam wakes while a roam step stays due. wake.py: 5. */
   roamRewakeMinutes: number
+  /** Seconds the operator must stand still after a move before it wakes the agent (WALK sends a move per step). */
+  followSettleSeconds: number
   /** Orders still unread after a turn wake the agent again no sooner than this. wake.py: 10. */
   ordersRewakeMinutes: number
   /** Continuations (wake_again) in a row before the waker waits for a new event. wake.py: 12. */
@@ -62,6 +64,7 @@ export const WAKE_DEFAULTS = {
   chatStrangerMinutes: 5,
   roamRewakeMinutes: 5,
   ordersRewakeMinutes: 10,
+  followSettleSeconds: 12,
   maxContinuations: 12,
   continueDelaySeconds: 30,
 } as const
@@ -224,6 +227,7 @@ export function serveSettingsFrom(args: ServeArgs, file: ServeFileConfig): Serve
       chatStrangerMinutes: args.chatStrangerMinutes ?? posNum(w.chatStrangerMinutes) ?? WAKE_DEFAULTS.chatStrangerMinutes,
       roamRewakeMinutes: args.roamRewakeMinutes ?? posNum(w.roamRewakeMinutes) ?? WAKE_DEFAULTS.roamRewakeMinutes,
       ordersRewakeMinutes: posNum(w.ordersRewakeMinutes) ?? WAKE_DEFAULTS.ordersRewakeMinutes,
+      followSettleSeconds: posNum(w.followSettleSeconds) ?? WAKE_DEFAULTS.followSettleSeconds,
       maxContinuations: posNum(w.maxContinuations) !== undefined ? Math.floor(posNum(w.maxContinuations)!) : WAKE_DEFAULTS.maxContinuations,
       continueDelaySeconds: posNum(w.continueDelaySeconds) ?? WAKE_DEFAULTS.continueDelaySeconds,
       cwd: typeof w.cwd === 'string' && w.cwd.trim() ? w.cwd : null,

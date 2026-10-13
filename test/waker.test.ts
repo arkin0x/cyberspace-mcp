@@ -25,7 +25,7 @@ function setup(mode: string, overrides: Partial<WakeSettings> = {}, replyMode?: 
     command: [process.execPath, FAKE, mode, log, '{prompt}'],
     replyCommand: replyMode ? [process.execPath, FAKE, replyMode, log, '{prompt}'] : null,
     pollSeconds: 3600, idleKillMinutes: 10, maxTurnMinutes: 60, chatStrangerMinutes: 5, roamRewakeMinutes: 5,
-    ordersRewakeMinutes: 10, maxContinuations: 12, continueDelaySeconds: 0.01, cwd: dir,
+    ordersRewakeMinutes: 10, maxContinuations: 12, continueDelaySeconds: 0.01, followSettleSeconds: 12, cwd: dir,
     ...overrides,
   }
   let data: WakeData = { orders: 0 }
@@ -158,6 +158,27 @@ describe('the waker', () => {
     t.advance(5 * 60_000)
     await t.waker.tick()
     expect(t.turns()).toHaveLength(3)
+    t.cleanup()
+  })
+
+  it('waits for the operator to stand still before a move wakes the agent, then wakes once for the newest move', async () => {
+    const t = setup('log')
+    // clock starts at 1_000_000 ms, so "now" in seconds is 1000.
+    t.set({ operatorMoved: { eventId: 'a'.repeat(64), action: 'hop', to: 'ab'.repeat(32), distance: '1 gibson', at: 1000 } })
+    await t.waker.tick()
+    t.advance(5_000)
+    t.set({ operatorMoved: { eventId: 'b'.repeat(64), action: 'hop', to: 'cd'.repeat(32), distance: '2 gibsons', at: 1005 } })
+    await t.waker.tick()
+    expect(t.turns()).toHaveLength(0)
+    t.advance(11_000)
+    await t.waker.tick()
+    expect(t.turns()).toHaveLength(0)
+    t.advance(1_000)
+    await t.waker.tick()
+    await t.waker.tick()
+    expect(t.turns()).toHaveLength(1)
+    expect(t.turns()[0].args[0]).toContain('hop to ' + 'cd'.repeat(32))
+    expect(t.turns()[0].args[0]).toContain('Following is silent')
     t.cleanup()
   })
 

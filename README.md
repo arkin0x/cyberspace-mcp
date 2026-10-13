@@ -129,6 +129,7 @@ In `claude_desktop_config.json`:
 | `--chat-stranger-minutes <n>` | `wake.chatStrangerMinutes` | Least time between turns woken by strangers' chat lines that tag the agent (the server's own `chatWakeMinutes` limits each speaker too); the operator's tags wake at once. | `5` |
 | `--roam-rewake-minutes <n>` | `wake.roamRewakeMinutes` | Least time between roam wakes while a step stays due. | `5` |
 | | `wake.ordersRewakeMinutes` | Orders still unread after a turn wake the agent again this much later. | `10` |
+| | `wake.followSettleSeconds` | With the follow watch on, the operator's move wakes the agent only after they have stood still this long. | `12` |
 | | `wake.maxContinuations` | `wake_again` continuations in a row before the waker waits for a new event. | `12` |
 | | `wake.continueDelaySeconds` | The pause before a continuation. | `30` |
 | | `wake.cwd` | The directory a turn runs in. | where serve started |
