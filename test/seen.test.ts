@@ -189,7 +189,11 @@ describe('the 👀 on each order (arkinox, 2026-10-12)', () => {
     const me = getPublicKey(agentSk)
     w.general.seed(sign(opSk, 10050, [['relay', INBOX]]), sign(opSk, 3, [['p', me]]))
     const logs: string[] = []
-    const a = await start(w, dirWithKey(agentSk), op, { ordersPollMs: 0, reactionRetryMs: 300, log: (l) => logs.push(l) })
+    // The retry waits RETRY_MS. Long enough that a loaded machine answers
+    // orders_waiting well inside it; the proof that it did not wait is that
+    // the retried 👀 has not been delivered when it answers (below).
+    const RETRY_MS = 2_000
+    const a = await start(w, dirWithKey(agentSk), op, { ordersPollMs: 0, reactionRetryMs: RETRY_MS, log: (l) => logs.push(l) })
     await a.identity({})
     await a.operatorChannel.sync()
 
@@ -198,10 +202,12 @@ describe('the 👀 on each order (arkinox, 2026-10-12)', () => {
     const before = w.inbox.policy.refuse
     w.inbox.policy.refuse = (ev) => (ev.kind === 1059 && ev.tags.some((t) => t[1] === op) && refusals-- > 0 ? 'error: try again later' : before(ev))
     w.inbox.seed(nip17.wrapEvent(opSk, { publicKey: me }, 'first') as NostrEvent)
-    const t0 = Date.now()
     expect((await a.ordersWaiting()).data.orders).toBe(1)
-    // Answered without waiting out the retry.
-    expect(Date.now() - t0).toBeLessThan(300)
+    // Answered without waiting out the retry: the first send was refused, so
+    // a 👀 already delivered here could only mean it waited for the second.
+    // Structural, not a wall-clock bound: a 300 ms bound against a 300 ms
+    // retry failed under parallel load (419 ms).
+    expect(rumorsFor(w.inbox, opSk).filter((r) => r.kind === 7)).toHaveLength(0)
     await a.operatorChannel.reactionsSettled()
     expect(rumorsFor(w.inbox, opSk).filter((r) => r.kind === 7)).toHaveLength(1)
     expect(logs.some((l) => /not delivered \(attempt 1 of 2\): .*try again later/.test(l))).toBe(true)
