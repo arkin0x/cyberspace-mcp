@@ -25,7 +25,7 @@ import { hopTemplate, spawnTemplate } from '../src/chain/builder.js'
 import { bytesToHex, nowSeconds, signEvent, type NostrEvent } from '../src/nostr/event.js'
 import { validateSnoPayload } from '../src/sno.js'
 import type { Calibration } from '../src/space/calibration.js'
-import { placeFromHex, placeOf, type Place } from '../src/space/coords.js'
+import { distanceBetween, placeFromHex, placeOf, type Place } from '../src/space/coords.js'
 import { DEFAULT_AVATAR_RADIUS, avatarRadius, clearOf, nearestClear, spacingFor } from '../src/space/personalSpace.js'
 import { KEY_GENERATED_BY, StateDir } from '../src/state/dir.js'
 import { FakeNetwork, type FakeRelay } from './fakeRelay.js'
@@ -268,9 +268,20 @@ describe('the agent near people, by their avatars', () => {
       expect(r.text).toContain('The human star')
       const fixed = r.data.fixedPoint as { sharedWith: string[]; stepOff: string; stepOffGibsons: string; stepOffSeconds: number }
       expect(fixed.sharedWith).toEqual([big.pubkey])
-      // Just outside the box: four gibsons from the star on some axis, which is three or five from the stop.
-      expect(clearOf(placeFromHex(fixed.stepOff), { place: bigAt, radius: BIG_RADIUS }, DEFAULT_AVATAR_RADIUS)).toBe(true)
-      expect(['3', '5']).toContain(fixed.stepOffGibsons)
+      // Just outside the box: four gibsons from the star on one axis. On x
+      // that is three or five from the stop; on y or z, four. nearestClear
+      // takes the cheapest of these, the lowest wall from the stop first,
+      // and the walls depend on where this run's random key put home, so
+      // which one wins is not fixed (it was asserted as x only, 2026-10-14).
+      const off = placeFromHex(fixed.stepOff)
+      expect(clearOf(off, { place: bigAt, radius: BIG_RADIUS }, DEFAULT_AVATAR_RADIUS)).toBe(true)
+      const stopAt = placeFromHex(stop)
+      expect(distanceBetween(stopAt, off).chebyshev.toString()).toBe(fixed.stepOffGibsons)
+      const need = BigInt(spacingFor(DEFAULT_AVATAR_RADIUS, BIG_RADIUS))
+      const candidates = (['x', 'y', 'z'] as const).flatMap((axis) => [need, -need].map((d) => placeOf({ ...stopAt.position, [axis]: bigAt.position[axis] + d }, stopAt.plane)))
+      expect(candidates.map((c) => c.hex)).toContain(off.hex)
+      const lowest = Math.min(...candidates.map((c) => distanceBetween(stopAt, c).maxLca))
+      expect(distanceBetween(stopAt, off).maxLca).toBe(lowest)
       expect(r.text).toContain(`Step off by ${fixed.stepOffGibsons} gibsons now, to ${fixed.stepOff} (one hop`)
       expect(typeof fixed.stepOffSeconds).toBe('number')
     } finally {
