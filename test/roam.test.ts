@@ -217,12 +217,21 @@ describe('roam', () => {
   }, 30_000)
 
   it('never suggests a person\'s gibson: the operator\'s is passed over', async () => {
-    const there = east(home, 1n << 14n)
+    // Both inside the agent's own aligned 256-gibson cube, so the hop to
+    // either crosses a wall of h8 at most. They used to sit 2^14 east of a
+    // random home, where the carry could reach a wall above the hop ceiling
+    // and roam (rightly) skipped the candidate as not one hop away
+    // (flaky under load, 2026-10-14).
+    const here = a.here()
+    const cube = here.position.x - (here.position.x % 256n)
+    const offset = here.position.x % 256n
+    const at = (dx: bigint): Place => placeOf({ ...here.position, x: cube + ((offset + dx) % 256n) }, here.plane)
+    const there = at(64n)
     const { spawn, head } = chainTo(opSk, there)
     w.canonical.seed(spawn, head)
     await a.followOperator({ on: true })
     expect(a.follow.latest()?.coordHex).toBe(there.hex)
-    const beside = east(home, (1n << 14n) + 7n)
+    const beside = at(71n)
     await a.stop()
     running.splice(running.indexOf(a), 1)
     a = await start(w, dir, op, { roamClock: () => clock, roamCandidates: () => [there, beside] })

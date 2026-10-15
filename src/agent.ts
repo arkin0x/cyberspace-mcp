@@ -704,8 +704,9 @@ export class Agent {
    * The exception, said where it applies: a point the protocol fixes (a ride
    * exits exactly at its stop; a game's single entry gibson) may be shared,
    * and when the agent's avatar there overlaps a person's it is told to step
-   * off afterward, by enough gibsons to clear their avatar, to the clear
-   * coordinate nearest the stop, with that step's price.
+   * off afterward, by enough gibsons to clear their avatar, to the cheapest
+   * clear coordinate beside the stop (nearestClear: the lowest wall first,
+   * then the fewest gibsons), with that step's price.
    */
   fixedPointNote(at: Place, why: string): { text: string; data: { why: string; sharedWith: string[]; stepOff: string | null; stepOffGibsons: string | null; stepOffSeconds: number | null } } {
     const mine = this.myRadius()
