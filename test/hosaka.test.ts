@@ -64,6 +64,17 @@ async function stopAgent(a: Agent): Promise<void> {
   running.splice(running.indexOf(a), 1)
 }
 
+/**
+ * Forget what setup work (a hop, a station sync) spent. The budget is spent
+ * in real wall time, which grows with machine load: under a parallel suite a
+ * hop and a sync alone overshot SESSION_CAP, so boarding (which costs
+ * nothing) was refused and every later test in the file failed with it. The
+ * cap is here to keep rides off the local prover, not to price the setup.
+ */
+function setupSpendForgotten(a: Agent): void {
+  a.budget.spentSeconds = 0
+}
+
 async function refusal(p: Promise<unknown>): Promise<string> {
   try { await p } catch (err) { if (err instanceof Refusal) return err.message; throw err }
   throw new Error('expected a refusal')
@@ -104,6 +115,7 @@ describe('a ride bought from HOSAKA, paid by the operator, followed in the backg
     await a.identity({ name: 'courier' })
     await a.hop({ target: { dx: 5, dy: 0, dz: 0 } })
     await a.station({ sync: true, budget_seconds: 30 })
+    setupSpendForgotten(a)
     await a.board()
     expect(await refusal(a.ride({ to: S + RIDE_LENGTH }))).toMatch(/session has .* left[\s\S]*prover: "hosaka"/)
     const words = await refusal(a.ride({ to: S + RIDE_LENGTH, prover: 'hosaka' }))
@@ -223,6 +235,7 @@ describe('a ride bought from HOSAKA, paid by the operator, followed in the backg
     expect((await a.ordersWaiting()).data.ride).toMatchObject({ state: 'ready', prover: 'hosaka' })
     expect(await refusal(a.ride({ to }))).toMatch(/cannot be checked[\s\S]*station with sync: true[\s\S]*proof is kept/)
     await a.station({ sync: true, budget_seconds: 30 })
+    setupSpendForgotten(a)
     await until(() => hosakaState(a) === 'ready', 'checked in the background once the line holds the blocks')
     expect((a.rideStatus().data.ride as { verification: { ok: boolean } }).verification.ok).toBe(true)
     const r = await a.ride({ to })

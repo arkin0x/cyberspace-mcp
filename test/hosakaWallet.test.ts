@@ -130,6 +130,10 @@ describe('HOSAKA rides paid by the server from the human\'s wallet, within the h
     await call(s, 'identity', { name: 'courier' })
     await call(s, 'hop', { target: { dx: 5, dy: 0, dz: 0 } })
     await call(s, 'station', { sync: true, budget_seconds: 30 })
+    // Setup spends real wall time against the 0.05 s cap, which grows with
+    // machine load; under a parallel suite it overshot and boarding was
+    // refused. The cap keeps rides off the local prover, not the setup.
+    s.agent.budget.spentSeconds = 0
     await call(s, 'board')
     const to = S + 3
     const r = await call(s, 'ride', { to, prover: 'hosaka' })
@@ -158,7 +162,10 @@ describe('HOSAKA rides paid by the server from the human\'s wallet, within the h
     expect(signed.text).toMatch(/paid by the server from your operator's wallet/)
     expect(tagValue(canonical.all().find((e) => e.id === signed.data.eventId)!, 'B')).toBe(String(to))
     expect((await call(s, 'wallet')).data).toMatchObject({ spentLast24hSats: RIDE_SATS + 1, balanceSats: 100_000 })
-  })
+  // Real work, not a race: a hop, a line sync that verifies the fixture and
+  // a ride. 2 s alone, 10 to 27 s under a parallel suite (measured
+  // 2026-10-15), against the 30 s default.
+  }, 90_000)
 
   it('paid, and HOSAKA\'s node has not seen it yet; a restart in the middle pays nothing again and the job starts once HOSAKA hears', async () => {
     const to = S + 1

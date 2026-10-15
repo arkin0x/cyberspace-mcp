@@ -252,7 +252,11 @@ describe('an agent on a fresh key', () => {
     const pubB = getPublicKey(skB)
     const spawnB = signEvent(spawnTemplate(pubB, 1_700_000_000), skB)
     const here = a.here()
-    const beside = { x: here.position.x + 1n, y: here.position.y, z: here.position.z }
+    // One gibson away and in the same cube at every height from h1 up, as a
+    // later test needs (a bag hidden in A's h5 cube must be in B's scan). x + 1
+    // crossed into the next cube whenever A's random x ended an h5 cube, one
+    // run in 32.
+    const beside = { x: here.position.x ^ 1n, y: here.position.y, z: here.position.z }
     const hopB = signEvent(hopTemplate({ createdAt: Math.floor(Date.now() / 1000), genesisId: spawnB.id, previousId: spawnB.id, prevCoordHex: pubB, to: beside, plane: here.plane, proofHash: 'ef'.repeat(32) }), skB)
     canonical.seed(spawnB)
     canonical.inject(hopB)
