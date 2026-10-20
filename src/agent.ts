@@ -34,8 +34,8 @@ import { AVATAR_KIND, MAX_AVATAR_BYTES, avatarPrice, avatarSeconds, avatarTempla
 import { avatarThreads, mineAvatar } from './avatarMine.js'
 import { Chat, type ChatLine } from './chat.js'
 import {
-  HIDDEN_KIND, MAX_ABOUT, MAX_ITEM_NAME, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, REFERENCE_THRESHOLD_BYTES, bagEntries, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
-  keyInnerTemplate, messageInnerTemplate, messagePreview, objectTemplate, referenceCount, referenceTo, shardInnerTemplate, unbag, wantsReference, entryKey,
+  HIDDEN_KIND, MAX_ABOUT, MAX_ITEM_NAME, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, REFERENCE_THRESHOLD_BYTES, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
+  itemLineage, keyInnerTemplate, messageInnerTemplate, messagePreview, objectTemplate, referenceCount, referenceTo, shardInnerTemplate, unbag, wantsReference, entryKey,
   type BagEntry, type Hidden, type HiddenType, type KeyItem, type Reference,
 } from './hidden/bags.js'
 import { MAX_COMMENT_LENGTH, itemKind, sealedComment, type CommentParent, type CommentSubject } from './hidden/comments.js'
@@ -67,6 +67,7 @@ import { Refusal, type ToolResult } from './tool.js'
 import { Transit } from './transit.js'
 import type { Secret } from './nwc.js'
 import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS, Wallet } from './wallet.js'
+import { Placements } from './placed.js'
 import { DEFAULT_TRAVEL_PER_DAY, TravelLog, repeatsPrivate, type TravelLogSettings } from './travel.js'
 
 export { Refusal, type ToolResult } from './tool.js'
@@ -205,6 +206,8 @@ export class Agent {
   readonly wallet: Wallet
   /** The public travel log, off unless the human turned it on (travel.ts). */
   readonly travel: TravelLog
+  /** What the agent placed: listing it, taking it down, moving it (placed.ts). */
+  readonly placements: Placements
   calibration: Calibration
   private readonly dir: StateDir
   private readonly sk: Uint8Array
@@ -241,6 +244,13 @@ export class Agent {
         if (this.keeper.events.some((e) => e.id === event.id)) {
           this.keeper.markPublished(event.id, 'ok')
           this.holders.note(accepted)
+        }
+        // A deletion of one of the agent's bags that the canonical relay took on a retry counts as done from then on (placed.ts).
+        if (event.kind === 5 && accepted.includes(normalizeURL(this.relays.canonical))) {
+          for (const t of event.tags) {
+            const m = t[0] === 'a' ? /^33330:([0-9a-f]{64}):(.+)$/.exec(t[1] ?? '') : null
+            if (m && m[1] === this.pubkey) this.keys.noteOwnDeletion(m[2], event.created_at, true)
+          }
         }
       },
       guard: (event) => this.guardChainEvent(event),
@@ -306,6 +316,19 @@ export class Agent {
       place: () => ({ place: this.keeper.place(), onChain: this.keeper.head() !== null }),
       privateTexts: () => this.operatorChannel.privateTexts(),
       sign: (t) => this.sign(t), now: nowSeconds, log: this.log, maxWaitMs: config.relayMaxWaitMs,
+    })
+    this.placements = new Placements({
+      pubkey: this.pubkey, relays: this.relays, outbox: this.outbox, keys: this.keys,
+      sign: (t) => this.sign(t), resolveReference: (ref) => this.resolveReference(ref),
+      keyFor: (at, height) => {
+        const priced = this.keysRefusal([height])
+        if (priced) throw new Refusal(priced)
+        const { result: key, ms } = this.deriveKeys([height], () => this.keys.keyAt(at, height, 'hide'))
+        return { key, ms }
+      },
+      summarize: (h, lookupId) => this.summarize(h, lookupId),
+      here: () => this.keeper.place(),
+      maxHeight: MAX_KEY_HEIGHT, minHeight: SCAN_MIN_HEIGHT, log: this.log,
     })
   }
 
@@ -1380,6 +1403,7 @@ export class Agent {
       type: h.type, eventId: h.eventId, author: h.inner.pubkey, at: { x: h.at.x.toString(), y: h.at.y.toString(), z: h.at.z.toString() }, plane: h.plane, createdAt: h.createdAt, label,
       ...(h.type === 'message' && CASHU_TOKEN.test(h.text ?? '') ? { coin: true } : {}),
       ...(h.ref ? { byReference: true } : {}),
+      ...(!h.ref && itemLineage(h.inner) !== h.eventId ? { lineage: itemLineage(h.inner)! } : {}),
       ...(h.shard ? { shard: { unit: h.shard.unit, vertices: h.shard.vertices.length, faces: h.shard.faces.length, extent: h.shard.extent, mode: h.shard.mode } } : {}),
     }
     if (h.shard) this.rememberObject(objectHandle(h.eventId), h.shard)
@@ -1567,11 +1591,6 @@ export class Agent {
 
   // ---- hide and place -------------------------------------------------------
 
-  private async currentBag(lookupId: string): Promise<NostrEvent | null> {
-    const got = await this.relays.query({ kinds: [HIDDEN_KIND], authors: [this.pubkey], '#d': [lookupId] })
-    return got.sort((a, b) => b.created_at - a.created_at)[0] ?? null
-  }
-
   private shardFrom(payload: unknown): ShardModel {
     const v = validateSnoPayload(payload)
     if (!v.ok) throw new Refusal(`The object payload is not valid SNO: ${v.errors.join(' ')}`)
@@ -1656,30 +1675,22 @@ export class Agent {
     throw new Refusal('contents must be one of: { message }, { object }, { key: { name } }, { chest: { name, lock, entries } }.')
   }
 
-  /** The agent's bag in the cube of `height` at `at`, read before it is written, with the key priced and spent. */
-  private async bagAt(at: Place, height: number): Promise<{ key: HeldKey; keyMs: number; regionKey: Uint8Array; current: NostrEvent | null; carried: BagEntry[] }> {
+  /** The key for the cube of `height` at `at`, priced against the caps and spent. */
+  private regionAt(at: Place, height: number): { key: HeldKey; keyMs: number; regionKey: Uint8Array } {
     if (!Number.isInteger(height) || height < SCAN_MIN_HEIGHT || height > MAX_KEY_HEIGHT) throw new Refusal(`height must be an integer from ${SCAN_MIN_HEIGHT} to ${MAX_KEY_HEIGHT} (h0 is the one gibson, as ONOSENDAI hides and scans; above h${MAX_KEY_HEIGHT} a key costs more than a second).`)
     const priced = this.keysRefusal([height])
     if (priced) throw new Refusal(priced)
     const { result: key, ms: keyMs } = this.deriveKeys([height], () => this.keys.keyAt(at.position, height, 'hide'))
-    const regionKey = hexToBytes(key.keyHex)
-    // One bag per author per region: read before write, never replace.
-    const current = await this.currentBag(key.lookupId)
-    let carried: BagEntry[] = []
-    if (current) {
-      carried = await bagEntries(current, regionKey)
-      if (carried.length === 0 && (await referenceCount(current, regionKey)) === 0) {
-        const opens = (await unbag(current, regionKey, undefined, undefined, height)).length > 0
-        if (!opens) throw new Refusal(`You already have a bag in that cube (${current.id.slice(0, 8)}...) and it does not open with the key derived now, so replacing it would destroy what is there. Nothing was published.`)
-      }
-    }
-    return { key, keyMs, regionKey, current, carried }
+    return { key, keyMs, regionKey: hexToBytes(key.keyHex) }
   }
 
   async hide(input: { contents: Contents; coordinate: CoordinateInput; height: number; hint_heights?: [number, number, number]; riddle?: string }): Promise<ToolResult> {
     const here = this.keeper.place()
     const at = this.target(input.coordinate, here)
-    const { key, keyMs, regionKey, current, carried } = await this.bagAt(at, input.height)
+    const { key, keyMs, regionKey } = this.regionAt(at, input.height)
+    // One bag per author per region: read before write, never replace; one change to a bag at a time (placed.ts).
+    return this.placements.withBags([key.lookupId], async () => {
+    const { current, entries: carried } = await this.placements.ownBag(key.lookupId, regionKey)
     const height = input.height
     const now = nowSeconds()
     // The hint is checked before anything is signed or forged, so a refusal leaves no item held that was never hidden.
@@ -1690,11 +1701,14 @@ export class Agent {
     const have = new Set(carried.map(entryKey))
     const merged = [...carried, ...entries.filter((e) => !have.has(entryKey(e)))]
     const riddle = (input.riddle ?? currentSettings?.riddle ?? '').slice(0, MAX_RIDDLE_LENGTH)
-    const createdAt = Math.max(now, (current?.created_at ?? 0) + 1)
-    const template = await bagTemplate(merged, regionKey, key.lookupId, height, createdAt, HIDDEN_KIND, { heightTag: true, hint, riddle }, { at: at.position, plane: at.plane })
+    const createdAt = Math.max(now, (current?.created_at ?? 0) + 1, this.placements.floor(key.lookupId))
+    const template = await bagTemplate(merged, regionKey, key.lookupId, height, createdAt, HIDDEN_KIND, { heightTag: currentSettings?.heightTag ?? true, hint, riddle, contents: currentSettings?.contents, money: currentSettings?.money }, { at: at.position, plane: at.plane })
     const bag = this.sign(template)
+    // Recorded whole before it is sent, so no later rewrite builds on an older copy, whichever relays take it.
+    this.keys.noteOwnBag(key, createdAt, { bagId: bag.id, event: bag })
     const entry = this.outbox.add(bag)
     const result = await this.outbox.send(entry)
+    if (entries[0]) this.keys.notePlaced(key.lookupId, entryKey(entries[0]), createdAt)
     const opened = await unbag(bag, regionKey, (ref) => this.resolveReference(ref), { at: at.position, plane: at.plane }, height)
     const refs = merged.filter(isReference).length
     const summary: OpenedBag = {
@@ -1709,8 +1723,10 @@ export class Agent {
       accepted.length ? `Accepted by ${accepted.join(', ')}.` : `No relay accepted the bag${result.ok ? '' : `: ${result.reason}`}. It waits in the outbox.`,
       Object.keys(refused).length ? `Refused by ${Object.entries(refused).map(([u, r]) => `${u}: ${r}`).join('; ')} (verbatim; a refusal is not retried).` : '',
       hint ? `Hinted at heights ${hint.join(',')}${riddle ? `, riddle "${riddle}"` : ''}.` : 'No hint: only someone who derives this cube\'s key will find it.',
+      `Its id is ${handle(objectEvent ? objectEvent.id : !isReference(entries[0]) ? (entries[0] as NostrEvent).id : objectHandle(`${key.lookupId}/${entryKey(entries[0])}`))}: placed lists it, remove_placed takes it down, move_placed moves it.`,
     ].filter(Boolean).join('\n')
     return { text, data: { bagId: bag.id, lookupId: key.lookupId, cube: { height, base: key.base, plane: at.plane }, entries: merged.length, carried: carried.length, keyMs: Math.round(keyMs), accepted, refused, hint, riddle, objectEventId: objectEvent?.id ?? null, ...(item ? { item } : {}), ...(chest ? { chest } : {}) } }
+    })
   }
 
   async place(input: { object?: unknown; address?: string; id?: string; coordinate: CoordinateInput; height: number }): Promise<ToolResult> {
@@ -1758,19 +1774,42 @@ export class Agent {
 
   /** Hide a reference entry in the agent's bag at a cube: the same read-before-write as hide. */
   private async hideReference(ref: Reference, at: Place, height: number, what: string): Promise<ToolResult> {
-    const { key, keyMs, regionKey, current, carried } = await this.bagAt(at, height)
+    const { key, keyMs, regionKey } = this.regionAt(at, height)
+    return this.placements.withBags([key.lookupId], async () => {
+    const { current, entries: carried } = await this.placements.ownBag(key.lookupId, regionKey)
     const now = nowSeconds()
     const have = new Set(carried.map(entryKey))
     const merged = have.has(entryKey(ref)) ? carried : [...carried, ref]
     const settings = current ? bagSettingsOf(current, height) : { heightTag: true, hint: null, riddle: '' }
-    const createdAt = Math.max(now, (current?.created_at ?? 0) + 1)
-    const bag = this.sign(await bagTemplate(merged, regionKey, key.lookupId, height, createdAt, HIDDEN_KIND, { heightTag: true, hint: settings.hint, riddle: settings.riddle }, { at: at.position, plane: at.plane }))
+    const createdAt = Math.max(now, (current?.created_at ?? 0) + 1, this.placements.floor(key.lookupId))
+    const bag = this.sign(await bagTemplate(merged, regionKey, key.lookupId, height, createdAt, HIDDEN_KIND, settings, { at: at.position, plane: at.plane }))
+    // Recorded whole before it is sent, so no later rewrite builds on an older copy, whichever relays take it.
+    this.keys.noteOwnBag(key, createdAt, { bagId: bag.id, event: bag })
     const entry = this.outbox.add(bag)
     const result = await this.outbox.send(entry)
+    this.keys.notePlaced(key.lookupId, entryKey(ref), createdAt)
     const opened = await unbag(bag, regionKey, (r) => this.resolveReference(r), { at: at.position, plane: at.plane }, height)
     this.keys.noteBag({ lookupId: key.lookupId, bagId: bag.id, author: this.pubkey, createdAt, height, base: key.base, entries: opened.map((h) => this.summarize(h, key.lookupId)), missing: merged.filter(isReference).length - opened.filter((h) => h.ref).length, riddle: settings.riddle, hint: settings.hint, at: now })
     const text = `Placed ${what} in the h${height} cube at base x ${key.base.x} y ${key.base.y} z ${key.base.z}; bag ${bag.id.slice(0, 8)}... holds ${merged.length} entr${merged.length === 1 ? 'y' : 'ies'}. Key cost ${keyMs.toFixed(0)} ms. ${entry.accepted.length ? `Accepted by ${entry.accepted.join(', ')}.` : `No relay accepted it${result.ok ? '' : `: ${result.reason}`}.`}${entry.refused ? ` Refused by ${Object.entries(entry.refused).map(([u, r]) => `${u}: ${r}`).join('; ')}.` : ''}`
     return { text, data: { bagId: bag.id, lookupId: key.lookupId, cube: { height, base: key.base, plane: at.plane }, entries: merged.length, keyMs: Math.round(keyMs), accepted: entry.accepted, refused: entry.refused ?? {} } }
+    })
+  }
+
+  // ---- what the agent placed ---------------------------------------------------
+
+  /** placed: the agent's bags and everything in them (placed.ts). */
+  placed(input: { match?: string } = {}): Promise<ToolResult> {
+    return this.placements.list(input)
+  }
+
+  /** remove_placed: take one placed thing down, or a whole bag (placed.ts). */
+  removePlaced(input: { target?: string; type?: string; bag?: string; whole_bag?: boolean }): Promise<ToolResult> {
+    return this.placements.remove(input)
+  }
+
+  /** move_placed: move one placed thing by an offset or to a coordinate, keeping its lineage (placed.ts). */
+  movePlaced(input: { target?: string; type?: string; by?: { dx?: string | number; dy?: string | number; dz?: string | number }; to?: CoordinateInput; height?: number }): Promise<ToolResult> {
+    return this.placements.move(input)
   }
 
   // ---- items and chests --------------------------------------------------------
@@ -1946,10 +1985,10 @@ export class Agent {
   private commentTarget(given: string): { subject: CommentSubject; parent: CommentParent; key: Uint8Array; what: string } {
     const want = String(given ?? '').trim().toLowerCase()
     if (!/^[0-9a-f]{8,64}$/.test(want)) throw new Refusal('target must be at least 8 hex characters of an id find, open_chest or items listed: an item in a bag, a chest, or a thing inside an opened chest.')
-    type Hit = { id: string; type: HiddenType; author: string; lookupId: string; height: number; base: { x: string; y: string; z: string }; byReference?: boolean; label: string }
+    type Hit = { id: string; lineage?: string; type: HiddenType; author: string; lookupId: string; height: number; base: { x: string; y: string; z: string }; byReference?: boolean; label: string }
     const hits = new Map<string, Hit>()
     for (const bag of this.keys.bags.values()) {
-      for (const e of bag.entries) if (e.eventId.startsWith(want)) hits.set(e.eventId, { id: e.eventId, type: e.type, author: bag.author, lookupId: bag.lookupId, height: bag.height, base: bag.base, byReference: e.byReference, label: e.label })
+      for (const e of bag.entries) if (e.eventId.startsWith(want) || e.lineage?.startsWith(want)) hits.set(e.eventId, { id: e.eventId, lineage: e.lineage, type: e.type, author: bag.author, lookupId: bag.lookupId, height: bag.height, base: bag.base, byReference: e.byReference, label: e.label })
     }
     for (const c of this.keys.chests.values()) {
       for (const x of c.contents ?? []) {
@@ -1964,7 +2003,8 @@ export class Agent {
     if (key.lookupId !== hit.lookupId) throw new Refusal('The key for the bag that holds it could not be derived again; call find there first.')
     return {
       subject: { author: hit.author, lookupId: hit.lookupId },
-      parent: { id: hit.id, kind: itemKind(hit.type), pubkey: hit.author },
+      // A moved item is answered by its first version's id, so its comments follow it (ONOSENDAI #369, SecretModal: item.lineage ?? item.key).
+      parent: { id: hit.lineage ?? hit.id, kind: itemKind(hit.type), pubkey: hit.author },
       key: hexToBytes(key.keyHex),
       what: `${hit.type} "${hit.label}" in the bag of ${hit.author === this.pubkey ? 'yours' : `${hit.author.slice(0, 8)}...`} (h${hit.height})`,
     }
