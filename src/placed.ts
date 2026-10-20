@@ -629,14 +629,14 @@ export class Placements {
         const settings = bagSettingsOf(current, key.height)
         const { event, entry } = await this.publishBag(left, key, settings, { position: { x: BigInt(key.base.x), y: BigInt(key.base.y), z: BigInt(key.base.z) }, plane: row.plane }, current)
         await this.noteOpened(event, key, settings)
-        const retract = entry.accepted.length > 0 ? await this.retractIfUnnamed(row, reading, new Set([`${row.bag.lookupId}/${row.key}`])) : ''
+        const retract = entry.accepted.includes(this.canonical) ? await this.retractIfUnnamed(row, reading, new Set([`${row.bag.lookupId}/${row.key}`])) : ''
         return {
           text: `Removed ${what}. The bag was rewritten without it (${event.id.slice(0, 8)}...), keeping the other ${left.length} thing(s): ${relayWords(entry)}.${retract}`,
           data: { removed: Placements.publicRow(row), bagId: event.id, lookupId: key.lookupId, left: left.length, deletedBag: false, accepted: entry.accepted, refused: entry.refused ?? {} },
         }
       }
       const { event, entry } = await this.deleteBag(key.lookupId, current.id, current.created_at, key)
-      const retract = entry.accepted.length > 0 ? await this.retractIfUnnamed(row, reading, new Set([`${row.bag.lookupId}/${row.key}`])) : ''
+      const retract = entry.accepted.includes(this.canonical) ? await this.retractIfUnnamed(row, reading, new Set([`${row.bag.lookupId}/${row.key}`])) : ''
       return {
         text: `Removed ${what}. It was the last thing in the bag, so the bag itself was deleted (NIP-09 kind 5 ${event.id.slice(0, 8)}...): ${relayWords(entry)}.${retract}`,
         data: { removed: Placements.publicRow(row), deletionId: event.id, lookupId: key.lookupId, left: 0, deletedBag: true, accepted: entry.accepted, refused: entry.refused ?? {} },
@@ -655,7 +655,7 @@ export class Placements {
       const { event, entry } = await this.deleteBag(bag.lookupId, current.id, Math.max(current.created_at, this.floor(bag.lookupId) - 1), key)
       const gone = new Set(bag.rows.map((r) => `${bag.lookupId}/${r.key}`))
       const notes: string[] = []
-      if (entry.accepted.length > 0) {
+      if (entry.accepted.includes(this.canonical)) {
         for (const r of bag.rows) {
           const n = await this.retractIfUnnamed(r, reading, gone)
           if (n) notes.push(n.trim())
