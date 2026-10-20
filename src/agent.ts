@@ -35,15 +35,15 @@ import { avatarThreads, mineAvatar } from './avatarMine.js'
 import { Chat, type ChatLine } from './chat.js'
 import {
   HIDDEN_KIND, MAX_ABOUT, MAX_ITEM_NAME, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, REFERENCE_THRESHOLD_BYTES, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
-  itemLineage, keyInnerTemplate, messageInnerTemplate, messagePreview, objectTemplate, referenceCount, referenceTo, shardInnerTemplate, unbag, wantsReference, entryKey,
-  type BagEntry, type Hidden, type HiddenType, type KeyItem, type Reference,
+  itemLineage, keyInnerTemplate, messageInnerTemplate, messagePreview, objectTemplate, referenceCount, referenceTo, rumorOf, shardInnerTemplate, unbag, wantsReference, entryKey,
+  type BagEntry, type Hidden, type HiddenType, type KeyItem, type Reference, type Rumor,
 } from './hidden/bags.js'
 import { MAX_COMMENT_LENGTH, itemKind, sealedComment, type CommentParent, type CommentSubject } from './hidden/comments.js'
 import { forgeKey, openWithSecret, openerFor, readContents, requiresLabel, sealEntries, type ChestEntry } from './hidden/chests.js'
 import { CASHU_TOKEN, chestStatus, contentLine, contentRow, handle, itemRow, placeWords, purposeOf, takenRow, type ContentRow } from './items.js'
 import { hintFits, hintTags, parseHint, hintCandidatesExponent, type HintHeights } from './hidden/hint.js'
 import { lookReport, type ChainFacts } from './look.js'
-import { bytesToHex, hexToBytes, nowSeconds, signEvent, tagValue, type EventTemplate, type NostrEvent } from './nostr/event.js'
+import { attributed, bytesToHex, hexToBytes, nowSeconds, signEvent, tagValue, type EventTemplate, type NostrEvent } from './nostr/event.js'
 import { Outbox, type GuardVerdict } from './nostr/outbox.js'
 import { unwrapMessage, wrapMessage, wrapReaction } from './nostr/dm.js'
 import { mergeAnswers } from './nostr/relayOutcome.js'
@@ -467,6 +467,15 @@ export class Agent {
 
   private sign(template: EventTemplate): NostrEvent {
     return signEvent(template, this.sk)
+  }
+
+  /**
+   * A template as a rumor by this agent (bags.ts rumorOf), with the client
+   * tag every signed event carries: a hidden message is never signed
+   * (arkinox, 2026-10-20), and the bag or chest that holds it vouches for it.
+   */
+  private rumor(template: EventTemplate): Rumor {
+    return rumorOf(attributed(template), this.pubkey)
   }
 
   /** Stand where the chain says: scan the cubes there, listen for chat, watch the neighborhood. */
@@ -1424,7 +1433,8 @@ export class Agent {
       } else {
         try {
           const secret = opener.by === 'key' ? opener.key.secretHex : bytesToHex(this.sk)
-          const contents = readContents(openWithSecret(h.chest, secret))
+          // Found in a bag, the chest was checked against the bag's signer: it vouches for its rumors.
+          const contents = readContents(openWithSecret(h.chest, secret), h.inner.pubkey)
           summary.chest = {
             lock: h.chest.lockPubkey, requires: requiresLabel(h.chest), opened: true, openedWith: opener.by === 'key' ? 'held item' : 'own key',
             contents: contents.map((c) => ({
@@ -1460,7 +1470,7 @@ export class Agent {
         })
       }
       if (c.body.chest) {
-        this.keys.noteChest({ id: c.id, name: c.body.chest.name, lockPubkey: c.body.chest.lockPubkey, senderPubkey: c.body.chest.senderPubkey, requires: c.body.chest.requires, payload: c.body.chest.payload, author: c.event.pubkey, bagAuthor: chest.bagAuthor ?? chest.author, place: chest.place, inChest: chest.id, seenAt: nowSeconds() })
+        this.keys.noteChest({ id: c.id, name: c.body.chest.name, lockPubkey: c.body.chest.lockPubkey, senderPubkey: c.body.chest.senderPubkey, requires: c.body.chest.requires, payload: c.body.chest.payload, author: c.event.pubkey, ...(c.verified ? {} : { claim: true as const }), bagAuthor: chest.bagAuthor ?? chest.author, place: chest.place, inChest: chest.id, seenAt: nowSeconds() })
       }
     }
   }
@@ -1604,7 +1614,7 @@ export class Agent {
       const text = String(contents.message)
       if (!text.trim()) throw new Refusal('The message is empty.')
       if (text.length > MAX_MESSAGE_LENGTH) throw new Refusal(`The message is ${text.length} characters; at most ${MAX_MESSAGE_LENGTH}.`)
-      return { entries: [this.sign(messageInnerTemplate(text, at.position, at.plane, now))], what: /\bcashu[AB][A-Za-z0-9_-]+/.test(text) ? 'a message holding a Cashu token' : 'a message' }
+      return { entries: [this.rumor(messageInnerTemplate(text, at.position, at.plane, now))], what: /\bcashu[AB][A-Za-z0-9_-]+/.test(text) ? 'a message holding a Cashu token' : 'a message' }
     }
     if ('object' in contents) {
       const shard = this.shardFrom(contents.object)
@@ -1630,14 +1640,15 @@ export class Agent {
       const name = String(contents.chest.name ?? '').trim().slice(0, MAX_ITEM_NAME)
       if (!name) throw new Refusal('A chest needs a name: what a finder sees before it opens.')
       const lock = this.resolveLock(String(contents.chest.lock ?? ''))
-      const inner: NostrEvent[] = []
+      const inner: Rumor[] = []
       const forged: Array<{ key: KeyItem; event: NostrEvent }> = []
       for (const e of contents.chest.entries ?? []) {
         if ('message' in e) {
           const text = String(e.message)
           if (!text.trim()) throw new Refusal('A message in the chest is empty.')
           if (text.length > MAX_MESSAGE_LENGTH) throw new Refusal(`A message in the chest is ${text.length} characters; at most ${MAX_MESSAGE_LENGTH}.`)
-          inner.push(this.sign(messageInnerTemplate(text, at.position, at.plane, now)))
+          // A rumor in a chest as in a bag: the chest's signature vouches for it.
+          inner.push(this.rumor(messageInnerTemplate(text, at.position, at.plane, now)))
         } else if ('object' in e) {
           inner.push(this.sign(shardInnerTemplate(this.shardFrom(e.object), at.position, at.plane, now)))
         } else if ('key' in e) {
@@ -1872,7 +1883,7 @@ export class Agent {
     if (!opener) throw new Refusal(`The chest "${c.name}" (${handle(c.id)}) does not open for you: ${chestStatus(c, this.keys, this.pubkey).words}. A chest opens only with the item whose public key it is locked to (${c.lockPubkey}), or for the person it was sealed to. Find that item (find, or a chest you can open), and open_chest works.`)
     let contents: ChestEntry[]
     try {
-      contents = readContents(openWithSecret(c, opener.by === 'key' ? opener.key.secretHex : bytesToHex(this.sk)))
+      contents = readContents(openWithSecret(c, opener.by === 'key' ? opener.key.secretHex : bytesToHex(this.sk)), c.claim ? undefined : c.author)
     } catch (err) {
       throw new Refusal(`The chest "${c.name}" (${handle(c.id)}) did not open: ${err instanceof Error ? err.message : String(err)}`)
     }

@@ -146,6 +146,13 @@ export interface SeenChest {
   place: ItemPlace
   /** Set when it was found inside another chest. */
   inChest?: string
+  /**
+   * Set when it was found inside another chest and its author is a claim
+   * (unsigned, not vouched for: hidden/chests.ts readContents). Such a chest
+   * vouches for nothing inside it. Chests are always signed by the clients
+   * that write them, so one remembered before this field existed is a fact.
+   */
+  claim?: true
   /** The author of the bag it is in (for a chest inside a chest, the outer bag's): whom a comment on it, or on what it holds, answers. */
   bagAuthor?: string
   /** What it held when opened, by id and type only (never the contents), so a comment can answer one of them. */

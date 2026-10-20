@@ -186,7 +186,7 @@ describe('key and chest items (Keys and Chests B1, as ONOSENDAI writes them at f
     const sealed = sealEntries([inner], lockPub)
     const chest = { name: 'strongbox', lockPubkey: lockPub, senderPubkey: sealed.senderPubkey, requires: 'r'.repeat(100), payload: sealed.payload }
     const t = chestInnerTemplate(chest, at, 1, 1)
-    expect(t.tags.map((x) => x[0])).toEqual(['C', 'title', 'lock', 'requires'])
+    expect(t.tags.map((x) => x[0])).toEqual(['C', 'title', 'lock', 'requires', '-'])
     const read = chestItemOf(t)!
     expect(read.name).toBe('strongbox')
     expect(read.requires).toHaveLength(64)

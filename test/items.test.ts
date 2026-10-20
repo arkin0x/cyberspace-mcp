@@ -72,7 +72,9 @@ describe('the wire, against ONOSENDAI (b615675)', () => {
     const key: KeyItem = { name: 'Fixed', about: 'A fixed sentence.', itemPubkey: fx.expect.key.itemPubkey, secretHex: brassSecret }
     const t = fx.templates.key
     expect(keyInnerTemplate(key, at, fx.at.plane, t.created_at)).toEqual(t)
-    expect(chestInnerTemplate(fx.templates.chestInput, at, fx.at.plane, fx.templates.chest.created_at)).toEqual(fx.templates.chest)
+    // b615675's chest, plus NIP-70's `-`, which every item carries since 2026-10-20 (ONOSENDAI #409);
+    // fixtures/onosendai-protected.json checks the new templates against ONOSENDAI tag for tag.
+    expect(chestInnerTemplate(fx.templates.chestInput, at, fx.at.plane, fx.templates.chest.created_at)).toEqual({ ...fx.templates.chest, tags: [...fx.templates.chest.tags, ['-']] })
     // The secret rides in its own tag and never in the content (#256), with title, item and the NIP-70 "-".
     expect(t.tags.map((x) => x[0])).toEqual(['C', 'title', 'item', 'secret', '-'])
     expect(t.content).not.toContain(brassSecret)
@@ -279,10 +281,17 @@ describe('the agent and ONOSENDAI\'s items and chests', () => {
     // ONOSENDAI's tags in ONOSENDAI's order; the signer then adds its client tag last, as ONOSENDAI's attributed() adds its own.
     expect(glass.inner.tags.map((t) => t[0])).toEqual(['C', 'title', 'item', 'secret', '-', 'client'])
     const cache = inside.find((h) => h.type === 'chest' && h.eventId === chest.id)!
-    expect(cache.inner.tags.map((t) => t[0])).toEqual(['C', 'title', 'lock', 'requires', 'client'])
+    expect(cache.inner.tags.map((t) => t[0])).toEqual(['C', 'title', 'lock', 'requires', '-', 'client'])
     expect(cache.inner.tags.find((t) => t[0] === 'title')![1]).toBe('Cache')
-    const cacheContents = readContents(openWithSecret(cache.chest!, a.keys.items.get(item.itemPubkey)!.secretHex))
+    const raw = openWithSecret(cache.chest!, a.keys.items.get(item.itemPubkey)!.secretHex)
+    const cacheContents = readContents(raw, cache.inner.pubkey)
     expect(cacheContents.map((c) => c.body.type)).toEqual(['message', 'key', 'key'])
+    // The message went in as a rumor with `-` (2026-10-20), vouched for by the chest; the keys are signed.
+    const sealedMessage = raw[0] as Record<string, unknown> & { tags: string[][] }
+    expect('sig' in sealedMessage).toBe(false)
+    expect(sealedMessage.tags.map((t) => t[0])).toEqual(['C', '-', 'client'])
+    expect(cacheContents.map((c) => c.verified)).toEqual([true, true, true])
+    expect(readContents(raw)[0].verified).toBe(false)
     // The copy of the Brass Key is the same keypair: whoever finds it opens the Vault.
     expect(cacheContents[2].body.key!.itemPubkey).toBe(fx.expect.key.itemPubkey)
 
