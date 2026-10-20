@@ -1694,12 +1694,13 @@ export class Agent {
     const have = new Set(carried.map(entryKey))
     const merged = [...carried, ...entries.filter((e) => !have.has(entryKey(e)))]
     const riddle = (input.riddle ?? currentSettings?.riddle ?? '').slice(0, MAX_RIDDLE_LENGTH)
-    const createdAt = Math.max(now, (current?.created_at ?? 0) + 1, this.keys.ownBagFloor(key.lookupId))
+    const createdAt = Math.max(now, (current?.created_at ?? 0) + 1, this.placements.floor(key.lookupId))
     const template = await bagTemplate(merged, regionKey, key.lookupId, height, createdAt, HIDDEN_KIND, { heightTag: currentSettings?.heightTag ?? true, hint, riddle, contents: currentSettings?.contents, money: currentSettings?.money }, { at: at.position, plane: at.plane })
     const bag = this.sign(template)
+    // Recorded whole before it is sent, so no later rewrite builds on an older copy, whichever relays take it.
+    this.keys.noteOwnBag(key, createdAt, { bagId: bag.id, event: bag })
     const entry = this.outbox.add(bag)
     const result = await this.outbox.send(entry)
-    this.keys.noteOwnBag(key, createdAt, { bagId: bag.id })
     if (entries[0]) this.keys.notePlaced(key.lookupId, entryKey(entries[0]), createdAt)
     const opened = await unbag(bag, regionKey, (ref) => this.resolveReference(ref), { at: at.position, plane: at.plane }, height)
     const refs = merged.filter(isReference).length
@@ -1773,11 +1774,12 @@ export class Agent {
     const have = new Set(carried.map(entryKey))
     const merged = have.has(entryKey(ref)) ? carried : [...carried, ref]
     const settings = current ? bagSettingsOf(current, height) : { heightTag: true, hint: null, riddle: '' }
-    const createdAt = Math.max(now, (current?.created_at ?? 0) + 1, this.keys.ownBagFloor(key.lookupId))
+    const createdAt = Math.max(now, (current?.created_at ?? 0) + 1, this.placements.floor(key.lookupId))
     const bag = this.sign(await bagTemplate(merged, regionKey, key.lookupId, height, createdAt, HIDDEN_KIND, settings, { at: at.position, plane: at.plane }))
+    // Recorded whole before it is sent, so no later rewrite builds on an older copy, whichever relays take it.
+    this.keys.noteOwnBag(key, createdAt, { bagId: bag.id, event: bag })
     const entry = this.outbox.add(bag)
     const result = await this.outbox.send(entry)
-    this.keys.noteOwnBag(key, createdAt, { bagId: bag.id })
     this.keys.notePlaced(key.lookupId, entryKey(ref), createdAt)
     const opened = await unbag(bag, regionKey, (r) => this.resolveReference(r), { at: at.position, plane: at.plane }, height)
     this.keys.noteBag({ lookupId: key.lookupId, bagId: bag.id, author: this.pubkey, createdAt, height, base: key.base, entries: opened.map((h) => this.summarize(h, key.lookupId)), missing: merged.filter(isReference).length - opened.filter((h) => h.ref).length, riddle: settings.riddle, hint: settings.hint, at: now })
@@ -1794,12 +1796,12 @@ export class Agent {
   }
 
   /** remove_placed: take one placed thing down, or a whole bag (placed.ts). */
-  removePlaced(input: { target?: string; bag?: string; whole_bag?: boolean }): Promise<ToolResult> {
+  removePlaced(input: { target?: string; type?: string; bag?: string; whole_bag?: boolean }): Promise<ToolResult> {
     return this.placements.remove(input)
   }
 
   /** move_placed: move one placed thing by an offset or to a coordinate, keeping its lineage (placed.ts). */
-  movePlaced(input: { target?: string; by?: { dx?: string | number; dy?: string | number; dz?: string | number }; to?: CoordinateInput; height?: number }): Promise<ToolResult> {
+  movePlaced(input: { target?: string; type?: string; by?: { dx?: string | number; dy?: string | number; dz?: string | number }; to?: CoordinateInput; height?: number }): Promise<ToolResult> {
     return this.placements.move(input)
   }
 

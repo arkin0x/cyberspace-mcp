@@ -42,6 +42,7 @@ import { hintFits } from './hidden/hint.js'
 import { hexToBytes, nowSeconds, type EventTemplate, type NostrEvent } from './nostr/event.js'
 import type { Outbox, OutboxEntry } from './nostr/outbox.js'
 import { mergeAnswers, type RelayAnswer } from './nostr/relayOutcome.js'
+import { normalizeURL } from 'nostr-tools/utils'
 import type { Relays } from './nostr/relays.js'
 import { objectHandle } from './render.js'
 import { parseCoordinate, placeOf, type CoordinateInput, type Place, type Position } from './space/coords.js'
@@ -50,8 +51,10 @@ import { Refusal, type ToolResult } from './tool.js'
 
 /** The words an agent may use for "the thing I placed most recently". */
 const LAST_WORDS = new Set(['last', 'latest', 'newest', 'recent', 'most recent', 'the last one', 'it', 'this', 'that'])
-/** The most of the agent's bags one listing reads. */
-const MAX_OWN_BAGS = 1000
+/** The most of the agent's bags one listing asks a relay for: what strfry gives at most by default; a full answer is read as possibly cut short. */
+const MAX_OWN_BAGS = 500
+/** The kinds a target's type names, for "the shard", "the message". */
+const TYPE_WORDS: Record<string, HiddenType> = { shard: 'shard', object: 'shard', message: 'message', note: 'message', key: 'key', item: 'key', chest: 'chest' }
 /** How long a put-back waits between its tries, in ms. */
 const PUT_BACK_RETRY_MS = [500, 1500]
 
@@ -83,8 +86,8 @@ export interface PlacedBag {
   entries: PlacedEntry[]
   /** No key held for it: it can only be removed whole. */
   keyHeld: boolean
-  /** This server signed a newer version than any relay that answered holds: changed only once that one is seen. */
-  stale: boolean
+  /** Only this server's own record holds this version: no relay that answered has it (yet). */
+  onlyHere: boolean
 }
 
 /** One thing in a bag, with what an operation on it needs. */
@@ -106,7 +109,7 @@ interface Reading {
   bags: OpenBag[]
   /** Bags that did not open, by lookup id: references in them could not be checked. */
   unopened: string[]
-  /** Relays that did not answer, with why. */
+  /** Relays that did not answer, with why, and answers that may have been cut short. */
   silent: string[]
 }
 
@@ -193,6 +196,32 @@ export class Placements {
       const key = host.keys.byLookupId(b.lookupId)
       if (key) host.keys.noteOwnBag(key, b.createdAt, { bagId: b.bagId })
     }
+    // A move the server stopped in the middle of: its new bag recorded means it finished, and the rollback is not needed; else the old object goes back.
+    for (const p of [...host.keys.putBacks]) {
+      if (host.keys.mine.get(p.newLookupId)?.lastBagId !== p.newBagId) {
+        host.outbox.add(p.rollback)
+        host.log(`placed: a move stopped midway; its shard's old object ${p.rollback.id.slice(0, 8)}... goes back out through the outbox`)
+      }
+      host.keys.settlePutBack(p.rollback.id)
+    }
+  }
+
+  /** The canonical relay, as relays name themselves in answers and outbox entries. */
+  private get canonical(): string {
+    return normalizeURL(this.host.relays.canonical)
+  }
+
+  /** Whether a deletion in the outbox counts: some relay took it, or it may still be taken (not dropped, not refused by every relay). */
+  private liveDeletion(o: OutboxEntry): boolean {
+    if (o.dropped) return false
+    return o.accepted.length > 0 || Object.keys(o.refused ?? {}).length < this.host.relays.urls.length
+  }
+
+  /** The least created_at the next version of an own bag may carry: newer than every version this server signed and every deletion of it it sent. */
+  floor(lookupId: string): number {
+    const address = `${HIDDEN_KIND}:${this.host.pubkey}:${lookupId}`
+    const deletions = this.host.outbox.entries.filter((o) => o.event.kind === 5 && o.event.pubkey === this.host.pubkey && o.event.tags.some((t) => t[0] === 'a' && t[1] === address)).map((o) => o.event.created_at + 1)
+    return Math.max(this.host.keys.ownBagFloor(lookupId), ...deletions)
   }
 
   // ---- one bag at a time ------------------------------------------------------
@@ -222,29 +251,28 @@ export class Placements {
 
   // ---- reading the agent's own bags ------------------------------------------
 
-  /** The newest version of one of the agent's bags among these events and the outbox, or null when there is none or it was deleted since. */
+  /**
+   * The newest version of one of the agent's bags among these events, the
+   * outbox, and the newest version this server signed (kept whole in
+   * keys/mine.json), or null when there is none or it was deleted since. So
+   * a rewrite never builds on an older copy than one this server wrote.
+   */
   private newestOwn(lookupId: string, fromRelays: NostrEvent[]): NostrEvent | null {
     const me = this.host.pubkey
     const mineHere = (e: NostrEvent): boolean => e.kind === HIDDEN_KIND && e.pubkey === me && dOf(e) === lookupId
     let best: NostrEvent | null = null
     for (const e of fromRelays) if (mineHere(e) && newer(e, best)) best = e
     for (const o of this.host.outbox.entries) if (!o.dropped && mineHere(o.event) && newer(o.event, best)) best = o.event
+    const kept = this.host.keys.mine.get(lookupId)?.lastEvent
+    if (kept && mineHere(kept) && newer(kept, best)) best = kept
     if (!best) return null
-    // Taken down since: by this server's own record, or by a deletion it still has in its outbox.
+    // Taken down since: a deletion a relay took (the record), or one in the outbox that a relay took or may still take.
     const address = `${HIDDEN_KIND}:${me}:${lookupId}`
     const deletedAt = Math.max(
       this.host.keys.mine.get(lookupId)?.deletedAt ?? 0,
-      ...this.host.outbox.entries.filter((o) => !o.dropped && o.event.kind === 5 && o.event.pubkey === me && o.event.tags.some((t) => t[0] === 'a' && t[1] === address)).map((o) => o.event.created_at),
+      ...this.host.outbox.entries.filter((o) => o.event.kind === 5 && o.event.pubkey === me && o.event.tags.some((t) => t[0] === 'a' && t[1] === address) && this.liveDeletion(o)).map((o) => o.event.created_at),
     )
     return deletedAt >= best.created_at ? null : best
-  }
-
-  /** Whether this server signed a newer version of the bag than `seen` (or the bag at all, when nothing was seen) and did not delete it since. */
-  private staleAgainst(lookupId: string, seen: NostrEvent | null): boolean {
-    const rec = this.host.keys.mine.get(lookupId)
-    if (!rec || !rec.lastBagId) return false
-    if ((rec.deletedAt ?? 0) >= rec.lastAt) return false
-    return rec.lastAt > (seen?.created_at ?? 0)
   }
 
   private static answered(answers: RelayAnswer[]): RelayAnswer[] {
@@ -257,23 +285,24 @@ export class Placements {
 
   /**
    * One of the agent's bags as it stands now, read before it is written:
-   * the newest version any relay that answered holds or the outbox still
-   * carries, and its entries, every one of them, whether or not this server
-   * reads it. Refuses rather than read a partial picture.
+   * the newest version the relays that answered hold, the outbox carries, or
+   * this server signed last, and its entries, every one of them, whether or
+   * not this server reads it. The canonical relay must answer, since it is
+   * where every reader looks and where a rewrite lands (review of #32: a
+   * rewrite from a lesser relay's older copy dropped what only the canonical
+   * relay held).
    */
-  async ownBag(lookupId: string, regionKey: Uint8Array): Promise<{ current: NostrEvent | null; entries: BagEntry[] }> {
+  async ownBag(lookupId: string, regionKey: Uint8Array): Promise<{ current: NostrEvent | null; entries: BagEntry[]; silent: string[] }> {
     const answers = await this.host.relays.queryEach({ kinds: [HIDDEN_KIND], authors: [this.host.pubkey], '#d': [lookupId] })
-    if (Placements.answered(answers).length === 0) {
-      throw new Refusal(`No relay answered when asked for your bag in that cube (${Placements.silentWords(answers).join('; ')}). Nothing was changed: writing the bag without reading it first could drop what it holds. Try again shortly.`)
+    const silent = Placements.silentWords(answers)
+    if (!answers.some((a) => a.outcome === 'answered' && normalizeURL(a.url) === this.canonical)) {
+      throw new Refusal(`The canonical relay did not answer when asked for your bag in that cube (${silent.join('; ') || 'no answer'}). Nothing was changed: writing the bag without reading it there first could drop what it holds. Try again shortly.`)
     }
     const current = this.newestOwn(lookupId, mergeAnswers(answers))
-    if (this.staleAgainst(lookupId, current)) {
-      throw new Refusal(`The relays that answered do not have the newest version of your bag in that cube (this server signed a newer one: ${this.host.keys.mine.get(lookupId)?.lastBagId?.slice(0, 8)}...). Nothing was changed, so that version's contents are not lost. Try again once the relays have it (outbox shows what is still owed).`)
-    }
-    if (!current) return { current: null, entries: [] }
+    if (!current) return { current: null, entries: [], silent }
     const entries = await openEntries(current, regionKey)
     if (entries === null) throw new Refusal(`Your bag in that cube (${current.id.slice(0, 8)}...) does not open with the key derived for it, so rewriting it would destroy what is there. Nothing was published.`)
-    return { current, entries }
+    return { current, entries, silent }
   }
 
   /** Every bag of the agent's on the relays (and in its outbox), opened where a key is held, each thing in it as a row. */
@@ -283,9 +312,12 @@ export class Placements {
       throw new Refusal(`No relay answered when asked for your bags (${Placements.silentWords(answers).join('; ')}). Try again shortly.`)
     }
     const events = mergeAnswers(answers)
+    const silent = Placements.silentWords(answers)
+    for (const a of answers) if (a.outcome === 'answered' && a.events.length >= MAX_OWN_BAGS) silent.push(`${a.url}: returned ${a.events.length} bags, the most it gives at once, so some may be missing`)
     const ids = new Set<string>()
     for (const e of events) if (e.kind === HIDDEN_KIND && e.pubkey === this.host.pubkey) ids.add(dOf(e))
     for (const o of this.host.outbox.entries) if (!o.dropped && o.event.kind === HIDDEN_KIND && o.event.pubkey === this.host.pubkey) ids.add(dOf(o.event))
+    for (const b of this.host.keys.mine.values()) if (b.lastEvent) ids.add(b.lookupId)
     const bags: OpenBag[] = []
     const unopened: string[] = []
     for (const lookupId of ids) {
@@ -299,7 +331,7 @@ export class Placements {
       const settings = bagSettingsOf(ev, height ?? 0)
       const bag: OpenBag = {
         lookupId, bagId: ev.id, height: height ?? -1, base, createdAt: ev.created_at, riddle: settings.riddle, entries: [], keyHeld: !!keyHex,
-        stale: this.staleAgainst(lookupId, ev), event: ev, keyHex, rows: [],
+        onlyHere: !events.some((e) => e.id === ev.id), event: ev, keyHex, rows: [],
       }
       const raw = keyHex ? await openEntries(ev, hexToBytes(keyHex)) : null
       if (!raw || !keyHex || height === null || !base) {
@@ -315,7 +347,7 @@ export class Placements {
       bags.push(bag)
     }
     bags.sort((a, b) => b.createdAt - a.createdAt)
-    return { bags, unopened, silent: Placements.silentWords(answers) }
+    return { bags, unopened, silent }
   }
 
   private rowOf(e: BagEntry, opened: Hidden[], bag: OpenBag): Row {
@@ -362,19 +394,25 @@ export class Placements {
     return rows.reduce<Row | null>((best, r) => (!best || r.createdAt > best.createdAt || (r.createdAt === best.createdAt && r.bag.createdAt > best.bag.createdAt) ? r : best), null)
   }
 
-  /** The thing `target` names: "last", an id or lineage (at least 8 hex), an object address, or a name. */
-  private resolve(reading: Reading, target: string): Row {
-    const rows = Placements.rows(reading)
+  /**
+   * The thing `target` names, of `type` when given: "last" (the newest
+   * thing placed or moved, of that type), an id or lineage (at least 8 hex),
+   * an object address, or a name, exactly. Never a part of a name: "shard"
+   * must not take down a message that mentions a shard (review of #32).
+   * Several fits are refused with the candidates.
+   */
+  private resolve(reading: Reading, target: string | undefined, type?: string): Row {
+    const want = type === undefined ? undefined : TYPE_WORDS[String(type).trim().toLowerCase()]
+    if (type !== undefined && !want) throw new Refusal('type is one of: shard, message, key, chest.')
+    const rows = Placements.rows(reading).filter((r) => !want || r.type === want)
     const t = String(target ?? '').trim()
     const lower = t.toLowerCase()
-    if (rows.length === 0) throw new Refusal('You have nothing placed that this server can open: placed lists your bags.')
-    if (!t || LAST_WORDS.has(lower)) {
-      const last = this.last(rows)!
-      return last
-    }
+    if (!t) throw new Refusal('Say which thing (target): "last" for the newest thing you placed or moved, its name, or its id; placed lists them. Nothing was changed.')
+    if (rows.length === 0) throw new Refusal(`You have no${want ? ` ${want}` : 'thing'} placed that this server can open: placed lists your bags. Nothing was changed.`)
+    if (LAST_WORDS.has(lower)) return this.last(rows)!
     const many = (hits: Row[], how: string): never => {
       const list = hits.slice(0, 10).map((r) => `${r.type} "${r.label}" id ${r.id.slice(0, 12)} at ${words(r.at)} (h${r.bag.height})`).join('; ')
-      throw new Refusal(`${hits.length} things you placed ${how}: ${list}. Give the id (placed lists them), or "last" for the newest.`)
+      throw new Refusal(`${hits.length} things you placed ${how}: ${list}. Give the id (placed lists them). Nothing was changed.`)
     }
     if (/^[0-9a-f]{8,64}$/.test(lower)) {
       const hits = rows.filter((r) => r.id.startsWith(lower) || (r.lineage !== null && /^[0-9a-f]{64}$/.test(r.lineage) && r.lineage.startsWith(lower)))
@@ -388,10 +426,8 @@ export class Placements {
     const exact = rows.filter((r) => r.label.toLowerCase() === lower)
     if (exact.length === 1) return exact[0]
     if (exact.length > 1) many(exact, `are called "${t}"`)
-    const partial = rows.filter((r) => r.label.toLowerCase().includes(lower))
-    if (partial.length === 1) return partial[0]
-    if (partial.length > 1) many(partial, `match "${t}"`)
-    throw new Refusal(`Nothing you placed is called "${t}" or has an id starting ${lower}. placed lists what you placed, with ids.`)
+    const close = rows.filter((r) => r.label.toLowerCase().includes(lower)).slice(0, 5).map((r) => `${r.type} "${r.label}" id ${r.id.slice(0, 12)}`)
+    throw new Refusal(`Nothing you placed${want ? ` of type ${want}` : ''} is called exactly "${t}" or has an id starting ${lower}.${close.length ? ` Close: ${close.join('; ')}.` : ''} placed lists what you placed, with ids. Nothing was changed.`)
   }
 
   // ---- placed -----------------------------------------------------------------
@@ -408,7 +444,7 @@ export class Placements {
     if (last) out.push(`The newest thing you placed or moved ("last"): ${last.type} "${last.label}" id ${last.id.slice(0, 12)} at ${words(last.at)} (h${last.bag.height}).`)
     for (const b of bags) {
       const head = b.keyHeld
-        ? `h${b.height} cube at base ${b.base ? words(b.base) : '?'}: bag ${b.bagId.slice(0, 8)}..., lookup id ${b.lookupId.slice(0, 12)}..., ${b.rows.length} thing(s)${b.riddle ? `, riddle "${b.riddle}"` : ''}${b.stale ? ' (STALE: a newer version you signed is not on the relays yet; it cannot be changed until it is)' : ''}`
+        ? `h${b.height} cube at base ${b.base ? words(b.base) : '?'}: bag ${b.bagId.slice(0, 8)}..., lookup id ${b.lookupId.slice(0, 12)}..., ${b.rows.length} thing(s)${b.riddle ? `, riddle "${b.riddle}"` : ''}${b.onlyHere ? ' (this version is in your own record; no relay that answered has it yet)' : ''}`
         : `bag ${b.bagId.slice(0, 8)}..., lookup id ${b.lookupId.slice(0, 12)}...: this server holds no key for it, so what is inside cannot be read; remove_placed with bag ${b.lookupId.slice(0, 12)} and whole_bag takes it down`
       out.push(head)
       for (const r of b.rows) {
@@ -418,11 +454,11 @@ export class Placements {
       }
     }
     if (reading.silent.length) out.push(`Not answered: ${reading.silent.join('; ')}. A bag only those relays hold is not listed.`)
-    out.push('To take one down: remove_placed with its target (an id, its name, or "last"); whole_bag: true takes down the bag it is in. To move one: move_placed with its target and by: { dz: 12 } for 12 gibsons toward Z+ (dx, dy, dz in gibsons, negative for X-, Y-, Z-), or to: a coordinate.')
+    out.push('To take one down: remove_placed with its target (its id, its exact name, or "last" for the newest of any type; add type: "shard" for the newest shard); whole_bag: true takes down the bag it is in. To move one: move_placed with its target and by: { dz: 12 } for 12 gibsons toward Z+ (dx, dy, dz in gibsons, negative for X-, Y-, Z-), or to: a coordinate.')
     return {
       text: out.join('\n'),
       data: {
-        bags: bags.map((b) => ({ lookupId: b.lookupId, bagId: b.bagId, height: b.height, base: b.base, createdAt: b.createdAt, riddle: b.riddle, keyHeld: b.keyHeld, stale: b.stale, entries: b.rows.map(Placements.publicRow) })),
+        bags: bags.map((b) => ({ lookupId: b.lookupId, bagId: b.bagId, height: b.height, base: b.base, createdAt: b.createdAt, riddle: b.riddle, keyHeld: b.keyHeld, onlyHere: b.onlyHere, entries: b.rows.map(Placements.publicRow) })),
         last: last ? Placements.publicRow(last) : null,
         unanswered: reading.silent,
       },
@@ -431,14 +467,18 @@ export class Placements {
 
   // ---- publishing a bag change --------------------------------------------------
 
-  /** Sign a bag version, write it to the outbox, send it, and record it as the newest this server signed. */
-  private async publishBag(entries: BagEntry[], key: Pick<HeldKey, 'lookupId' | 'keyHex' | 'height' | 'base'>, settings: BagSettings, place: { position: Position; plane: Plane }, current: NostrEvent | null, record: 'always' | 'if accepted' = 'always'): Promise<{ event: NostrEvent; entry: OutboxEntry }> {
-    const createdAt = Math.max(nowSeconds(), (current?.created_at ?? 0) + 1, this.host.keys.ownBagFloor(key.lookupId))
-    // A hint that cannot contain this region is dropped rather than refused (ONOSENDAI resolveBagSettings).
-    const event = this.host.sign(await bagTemplate(entries, hexToBytes(key.keyHex), key.lookupId, key.height, createdAt, HIDDEN_KIND, settings, { at: place.position, plane: place.plane }))
+  /** Sign a bag version, newer than every version and deletion this server signed for it. */
+  private async signBag(entries: BagEntry[], key: Pick<HeldKey, 'lookupId' | 'keyHex' | 'height' | 'base'>, settings: BagSettings, place: { position: Position; plane: Plane }, current: NostrEvent | null): Promise<NostrEvent> {
+    const createdAt = Math.max(nowSeconds(), (current?.created_at ?? 0) + 1, this.floor(key.lookupId))
+    return this.host.sign(await bagTemplate(entries, hexToBytes(key.keyHex), key.lookupId, key.height, createdAt, HIDDEN_KIND, settings, { at: place.position, plane: place.plane }))
+  }
+
+  /** Sign a bag version, record it whole as the newest this server signed, write it to the outbox and send it. */
+  private async publishBag(entries: BagEntry[], key: Pick<HeldKey, 'lookupId' | 'keyHex' | 'height' | 'base'>, settings: BagSettings, place: { position: Position; plane: Plane }, current: NostrEvent | null): Promise<{ event: NostrEvent; entry: OutboxEntry }> {
+    const event = await this.signBag(entries, key, settings, place, current)
+    this.host.keys.noteOwnBag(key, event.created_at, { bagId: event.id, event })
     const entry = this.host.outbox.add(event)
     await this.host.outbox.send(entry)
-    if (record === 'always' || entry.accepted.length > 0) this.host.keys.noteOwnBag(key, createdAt, { bagId: event.id })
     return { event, entry }
   }
 
@@ -454,7 +494,8 @@ export class Placements {
     })
     const entry = this.host.outbox.add(event)
     await this.host.outbox.send(entry)
-    if (key) this.host.keys.noteOwnBag(key, at, { deleted: true })
+    // Recorded as done only once a relay took it: one every relay refused leaves the bag listed, so it can be removed again (review of #32).
+    if (key && entry.accepted.length > 0) this.host.keys.noteOwnBag(key, at, { deleted: true })
     const noted = this.host.keys.bags.get(lookupId)
     if (noted?.author === this.host.pubkey) this.host.keys.forgetBag(lookupId)
     return { event, entry }
@@ -511,7 +552,8 @@ export class Placements {
   /** Refuse while an earlier change to one of these bags (or this object) has reached no relay at all: building on top of it now could lose it or bring it back. */
   private unsentGuard(lookupIds: string[], objectD: string | null): void {
     const me = this.host.pubkey
-    const owed = this.host.outbox.entries.filter((o) => !o.dropped && o.accepted.length === 0 && o.event.pubkey === me && (
+    // Owed: no relay took it yet and some relay may still take it. One every relay refused is settled, and building on it loses nothing.
+    const owed = this.host.outbox.entries.filter((o) => !o.dropped && o.accepted.length === 0 && Object.keys(o.refused ?? {}).length < this.host.relays.urls.length && o.event.pubkey === me && (
       (o.event.kind === HIDDEN_KIND && lookupIds.includes(dOf(o.event))) ||
       (objectD !== null && o.event.kind === OBJECT_KIND && dOf(o.event) === objectD) ||
       (o.event.kind === 5 && o.event.tags.some((t) => t[0] === 'a' && lookupIds.some((l) => t[1] === `${HIDDEN_KIND}:${me}:${l}`)))
@@ -526,9 +568,10 @@ export class Placements {
 
   // ---- remove_placed -------------------------------------------------------------
 
-  async remove(input: { target?: string; bag?: string; whole_bag?: boolean }): Promise<ToolResult> {
-    const reading = await this.readAll()
+  async remove(input: { target?: string; type?: string; bag?: string; whole_bag?: boolean }): Promise<ToolResult> {
     if (input.bag !== undefined && input.target !== undefined) throw new Refusal('Give either target (one thing) or bag (a whole bag), not both.')
+    if (input.bag === undefined && (input.target === undefined || !String(input.target).trim())) throw new Refusal('Say what to remove: target ("last" for the newest thing you placed or moved, its exact name, or its id), or bag (a lookup id from placed). Nothing was changed.')
+    const reading = await this.readAll()
     if (input.bag !== undefined) {
       const want = String(input.bag).trim().toLowerCase()
       if (!/^[0-9a-f]{8,64}$/.test(want)) throw new Refusal('bag is at least 8 hex characters of a lookup id or bag id, as placed lists them.')
@@ -537,9 +580,8 @@ export class Placements {
       if (hits.length > 1) throw new Refusal(`${hits.length} of your bags start ${want}; give more of the id.`)
       return this.removeBag(hits[0], reading)
     }
-    const row = this.resolve(reading, input.target ?? '')
+    const row = this.resolve(reading, input.target, input.type)
     if (input.whole_bag) return this.removeBag(row.bag, reading)
-    if (row.bag.stale) throw new Refusal('That bag has a newer version you signed that the relays do not show yet; nothing was changed. Try again once outbox shows it accepted.')
     const key = this.keyOf(row.bag)
     return this.withBags([key.lookupId], async () => {
       this.unsentGuard([key.lookupId], null)
@@ -571,10 +613,10 @@ export class Placements {
       this.unsentGuard([bag.lookupId], null)
       // The newest version, read again, so the deletion names the id the relays hold now.
       const answers = await this.host.relays.queryEach({ kinds: [HIDDEN_KIND], authors: [this.host.pubkey], '#d': [bag.lookupId] })
-      if (Placements.answered(answers).length === 0) throw new Refusal(`No relay answered for that bag (${Placements.silentWords(answers).join('; ')}). Nothing was changed. Try again shortly.`)
+      if (!answers.some((a) => a.outcome === 'answered' && normalizeURL(a.url) === this.canonical)) throw new Refusal(`The canonical relay did not answer for that bag (${Placements.silentWords(answers).join('; ')}). Nothing was changed. Try again shortly.`)
       const current = this.newestOwn(bag.lookupId, mergeAnswers(answers)) ?? bag.event
       const key = bag.keyHex && bag.base && bag.height >= 0 ? { lookupId: bag.lookupId, keyHex: bag.keyHex, height: bag.height, base: bag.base } : null
-      const { event, entry } = await this.deleteBag(bag.lookupId, current.id, Math.max(current.created_at, this.host.keys.ownBagFloor(bag.lookupId) - 1), key)
+      const { event, entry } = await this.deleteBag(bag.lookupId, current.id, Math.max(current.created_at, this.floor(bag.lookupId) - 1), key)
       const gone = new Set(bag.rows.map((r) => `${bag.lookupId}/${r.key}`))
       const notes: string[] = []
       if (entry.accepted.length > 0) {
@@ -593,12 +635,14 @@ export class Placements {
 
   // ---- move_placed ---------------------------------------------------------------
 
-  async move(input: { target?: string; by?: { dx?: string | number; dy?: string | number; dz?: string | number }; to?: CoordinateInput; height?: number }): Promise<ToolResult> {
+  async move(input: { target?: string; type?: string; by?: { dx?: string | number; dy?: string | number; dz?: string | number }; to?: CoordinateInput; height?: number }): Promise<ToolResult> {
     if ((input.by === undefined) === (input.to === undefined)) throw new Refusal('Give exactly one of: by (an offset from where the thing is now, in gibsons: { dz: 12 } is 12 toward Z+), or to (a coordinate: 64 hex, { x, y, z, plane }, or { dx, dy, dz } from where you stand).')
+    if (input.target === undefined || !String(input.target).trim()) throw new Refusal('Say what to move: target ("last" for the newest thing you placed or moved, its exact name, or its id). Nothing was changed.')
     const reading = await this.readAll()
-    const row = this.resolve(reading, input.target ?? '')
+    const row = this.resolve(reading, input.target, input.type)
     if (row.type === 'unreadable') throw new Refusal(`That entry is one this server cannot read (${row.label}), so it cannot be moved; remove_placed can take it down.`)
-    if (row.bag.stale) throw new Refusal('That bag has a newer version you signed that the relays do not show yet; nothing was changed. Try again once outbox shows it accepted.')
+    // The things sealed in a chest keep the point they were sealed at, and ONOSENDAI shows them there (review of #32): a chest is not moved.
+    if (row.type === 'chest') throw new Refusal(`A chest cannot be moved: what is sealed inside it keeps the place it was sealed at, so it would show at the old place. To have it elsewhere, seal a new chest there with seal_chest and take this one down with remove_placed. Nothing was changed.`)
     const from = placeOf({ x: BigInt(row.at.x), y: BigInt(row.at.y), z: BigInt(row.at.z) }, row.plane)
     let dest: Place
     try {
@@ -646,87 +690,116 @@ export class Placements {
           const t = await resealedObject(old, hexToBytes(oldKey.keyHex), hexToBytes(newKey.keyHex), objectAt)
           if (!t) throw new Refusal('That shard\'s object does not open with its bag\'s key, so it cannot be sealed to the new place. Nothing was changed.')
           object = this.host.sign(t)
-          // The old version, signed again a second newer: what goes back if the new bag reaches no relay (ONOSENDAI rollback, review of #369).
+          // The old version, signed again a second newer: what goes back if the move does not land (ONOSENDAI rollback, review of #369).
           rollback = this.host.sign({ kind: old.kind, created_at: objectAt + 1, content: old.content, tags: old.tags })
         }
         moved = [ref[0], ref[1], ref[2] ?? '', dest.hex]
       }
 
-      // The new bag: the same bag with the old entry out and the new one in, or the destination's bag with it added.
-      const dst = sameBag ? src : await this.ownBag(newKey.lookupId, hexToBytes(newKey.keyHex))
-      const base = sameBag ? src.entries.filter((e) => entryKey(e) !== row.key) : dst.entries
-      const entries = mergeEntries(base, [moved])
+      // Inside one bag: one rewrite, which loses nothing whichever relays take it.
+      if (sameBag) {
+        const entries = mergeEntries(src.entries.filter((e) => entryKey(e) !== row.key), [moved])
+        const settings = bagSettingsOf(src.current, height)
+        const { event: newBag, entry } = await this.publishBag(entries, newKey, settings, dest, src.current)
+        await this.noteOpened(newBag, newKey, settings)
+        return this.moved(row, moved, null, from, dest, oldKey, newKey, height, keyMs, true, `Same bag, rewritten in one step (${newBag.id.slice(0, 8)}..., ${entries.length} thing(s)): ${relayWords(entry)}.`, newBag, entry.accepted, entry.refused ?? {})
+      }
+
+      // To another bag: the destination's bag with it added, signed before anything goes out.
+      const dst = await this.ownBag(newKey.lookupId, hexToBytes(newKey.keyHex))
+      const entries = mergeEntries(dst.entries, [moved])
       const settings0 = dst.current ? bagSettingsOf(dst.current, height) : { heightTag: true, hint: null, riddle: '', contents: false, money: false }
       const settings: BagSettings = { ...settings0, hint: settings0.hint && hintFits(settings0.hint, height) ? settings0.hint : null }
+      const newBag = await this.signBag(entries, newKey, settings, dest, dst.current)
+      const canonical = this.canonical
 
-      if (object) {
-        const sent = await this.host.relays.publish(object)
-        if (!sent.ok) throw new Refusal(`No relay took the shard's object sealed to its new place (${sent.reason}). Nothing was moved; it stays where it was.`)
-      }
-      // Recorded as the bag's newest only once a relay has it: a move no relay took is abandoned, and its bag dropped.
-      const { event: newBag, entry: newEntry } = await this.publishBag(entries, newKey, settings, dest, dst.current, 'if accepted')
-      if (newEntry.accepted.length === 0) {
-        // A move whose new bag no relay took has not happened: the new bag must never land later beside the old copy.
-        this.host.outbox.drop(newEntry, 'move abandoned: no relay took the new bag')
-        let putBack = ''
-        if (object && rollback) putBack = await this.putBack(rollback)
-        throw new Refusal(`No relay took the bag at the new place (${relayWords(newEntry)}). Nothing was moved; it stays where it was.${putBack}`)
-      }
-      await this.noteOpened(newBag, newKey, settings)
-
-      // Taken out of the old bag, as remove_placed would, except that a resealed object is the moved shard's now and stays.
-      let oldWords = ''
-      if (!sameBag) {
-        const left = src.entries.filter((e) => entryKey(e) !== row.key)
-        if (left.length > 0) {
-          const oldSettings = bagSettingsOf(src.current!, oldKey.height)
-          const { event, entry } = await this.publishBag(left, oldKey, oldSettings, from, src.current)
-          await this.noteOpened(event, oldKey, oldSettings)
-          oldWords = entry.accepted.length > 0
-            ? ` The old bag was rewritten without it (${event.id.slice(0, 8)}..., ${left.length} thing(s) left): ${relayWords(entry)}.`
-            : ` The old bag's rewrite reached no relay yet, so the old copy still shows until the outbox gets it through (${relayWords(entry)}).`
-        } else {
-          const { event, entry } = await this.deleteBag(oldKey.lookupId, src.current!.id, src.current!.created_at, oldKey)
-          oldWords = entry.accepted.length > 0
-            ? ` It was the last thing in its old bag, so that bag was deleted (kind 5 ${event.id.slice(0, 8)}...): ${relayWords(entry)}.`
-            : ` The old bag's deletion reached no relay yet, so the old copy still shows until the outbox gets it through (${relayWords(entry)}).`
+      if (object && rollback) {
+        // On disk before anything is published, so a server stopped mid-move puts the old object back at its next start.
+        this.host.keys.holdPutBack({ rollback, newLookupId: newKey.lookupId, newBagId: newBag.id })
+        const sent = await this.host.relays.publish(object).catch((err) => ({ ok: false as const, reason: err instanceof Error ? err.message : String(err), reasons: {} as Record<string, string> }))
+        if (!sent.ok || !sent.accepted.includes(canonical)) {
+          const back = await this.putBack(rollback)
+          throw new Refusal(`The canonical relay did not take the shard's object sealed to its new place (${sent.ok ? `only ${sent.accepted.join(', ')} did` : sent.reason}${Object.entries(sent.reasons).length ? `; ${Object.entries(sent.reasons).map(([u, r]) => `${u}: ${r}`).join('; ')}` : ''}). Nothing was moved; it stays where it was.${back}`)
         }
       }
-      const place: ItemPlace = { lookupId: newKey.lookupId, height, x: dest.position.x.toString(), y: dest.position.y.toString(), z: dest.position.z.toString(), plane: dest.plane }
-      this.host.keys.notePlaced(newKey.lookupId, entryKey(moved), nowSeconds())
-      if (!isReference(was) && !isReference(moved)) this.host.keys.movedItem((was as NostrEvent).id, (moved as NostrEvent).id, place)
-      const newId = isReference(moved) ? (object ? object.id : (sealedOwn ? row.id : objectHandle(`${newKey.lookupId}/${entryKey(moved)}`))) : (moved as NostrEvent).id
-      const lineage = isReference(moved) ? moved[1] : itemLineage(moved as NostrEvent)
-      const delta = (['x', 'y', 'z'] as const).map((a) => [a, dest.position[a] - from.position[a]] as const).filter(([, d]) => d !== 0n).map(([a, d]) => `${d > 0n ? '+' : ''}${d} ${a}`)
-      const text = [
-        `Moved ${row.type} "${row.label}" from ${words(row.at)} to ${words(place)}${delta.length ? ` (${delta.join(', ')} gibsons)` : ''}${height !== oldKey.height ? `, from the h${oldKey.height} cube to h${height}` : ''}. Its new id is ${newId.slice(0, 12)}; ${isReference(moved) ? 'its object keeps its address' : `it keeps its lineage ${String(lineage).slice(0, 12)}`}, so its reactions follow it.`,
-        sameBag
-          ? `Same bag, rewritten in one step (${newBag.id.slice(0, 8)}..., ${entries.length} thing(s)): ${relayWords(newEntry)}.`
-          : `New place: your h${height} bag at base ${words(newKey.base)} (${newBag.id.slice(0, 8)}..., ${entries.length} thing(s)): ${relayWords(newEntry)}. Key cost ${keyMs.toFixed(0)} ms.${oldWords} Comments are sealed to a bag, so comments left in the old cube stay there.`,
-      ].join('\n')
-      return {
-        text,
-        data: {
-          moved: { ...Placements.publicRow(row), id: newId, lineage, at: { x: place.x, y: place.y, z: place.z }, plane: dest.plane },
-          from: { ...row.at, plane: row.plane, height: oldKey.height, lookupId: oldKey.lookupId },
-          to: { x: place.x, y: place.y, z: place.z, plane: dest.plane, height, lookupId: newKey.lookupId },
-          sameBag, bagId: newBag.id, accepted: newEntry.accepted, refused: newEntry.refused ?? {}, keyMs: Math.round(keyMs), objectEventId: object?.id ?? null,
-        },
+      // The new bag goes to the relays directly, not through the outbox first, so no retry can send it after the move is given up.
+      const sent = await this.host.relays.publish(newBag).catch((err) => ({ ok: false as const, reason: err instanceof Error ? err.message : String(err), reasons: {} as Record<string, string> }))
+      const accepted = sent.ok ? sent.accepted : []
+      const said = Object.entries(sent.reasons).map(([u, r]) => `${u}: ${r}`).join('; ')
+      if (!accepted.includes(canonical)) {
+        const back = object && rollback ? await this.putBack(rollback) : ''
+        if (accepted.length > 0 && !object) {
+          // A lesser relay holds the new copy: it is recorded, so no later rewrite there drops it, and the old copy stays everywhere.
+          this.host.keys.noteOwnBag(newKey, newBag.created_at, { bagId: newBag.id, event: newBag })
+          const entry = this.host.outbox.add(newBag)
+          await this.host.outbox.send(entry)
+          throw new Refusal(`The canonical relay did not take the bag at the new place${said ? ` (${said})` : ''}; only ${accepted.join(', ')} did. The old copy stays where it was, so until the canonical relay takes the new bag (the outbox retries it unless it was refused) the thing shows in both places there; remove_placed takes down the one you do not want.`)
+        }
+        throw new Refusal(`The canonical relay did not take the bag at the new place${said ? ` (${said})` : sent.ok ? '' : ` (${sent.reason})`}. Nothing was moved; it stays where it was.${back}${sent.ok ? '' : ' A relay whose answer timed out may still have stored the new bag; placed shows what is there.'}`)
       }
+      this.host.keys.noteOwnBag(newKey, newBag.created_at, { bagId: newBag.id, event: newBag })
+      if (rollback) this.host.keys.settlePutBack(rollback.id)
+      const newEntry = this.host.outbox.add(newBag)
+      await this.host.outbox.send(newEntry)
+      await this.noteOpened(newBag, newKey, settings)
+
+      // Taken out of the old bag only now that the canonical relay has the new one, as remove_placed would, except that a resealed object is the moved shard's now and stays.
+      let oldWords: string
+      const left = src.entries.filter((e) => entryKey(e) !== row.key)
+      if (left.length > 0) {
+        const oldSettings = bagSettingsOf(src.current, oldKey.height)
+        const { event, entry } = await this.publishBag(left, oldKey, oldSettings, from, src.current)
+        await this.noteOpened(event, oldKey, oldSettings)
+        oldWords = entry.accepted.length > 0
+          ? ` The old bag was rewritten without it (${event.id.slice(0, 8)}..., ${left.length} thing(s) left): ${relayWords(entry)}.`
+          : ` The old bag's rewrite reached no relay yet, so the old copy still shows until the outbox gets it through (${relayWords(entry)}).`
+      } else {
+        const { event, entry } = await this.deleteBag(oldKey.lookupId, src.current.id, src.current.created_at, oldKey)
+        oldWords = entry.accepted.length > 0
+          ? ` It was the last thing in its old bag, so that bag was deleted (kind 5 ${event.id.slice(0, 8)}...): ${relayWords(entry)}.`
+          : ` The old bag's deletion reached no relay yet, so the old copy still shows until the outbox gets it through (${relayWords(entry)}).`
+      }
+      return this.moved(row, moved, object, from, dest, oldKey, newKey, height, keyMs, false, `New place: your h${height} bag at base ${words(newKey.base)} (${newBag.id.slice(0, 8)}..., ${entries.length} thing(s)): ${relayWords(newEntry)}. Key cost ${keyMs.toFixed(0)} ms.${oldWords} Comments are sealed to a bag, so comments left in the old cube stay there.`, newBag, newEntry.accepted, newEntry.refused ?? {})
     })
+  }
+
+  /** The answer to a move that happened, and the records that follow it. */
+  private moved(row: Row, moved: BagEntry, object: NostrEvent | null, from: Place, dest: Place, oldKey: Pick<HeldKey, 'height' | 'lookupId'>, newKey: Pick<HeldKey, 'lookupId' | 'base'>, height: number, keyMs: number, sameBag: boolean, bagWords: string, newBag: NostrEvent, accepted: string[], refused: Record<string, string>): ToolResult {
+    const place: ItemPlace = { lookupId: newKey.lookupId, height, x: dest.position.x.toString(), y: dest.position.y.toString(), z: dest.position.z.toString(), plane: dest.plane }
+    this.host.keys.notePlaced(newKey.lookupId, entryKey(moved), nowSeconds())
+    if (!isReference(row.entry) && !isReference(moved)) this.host.keys.movedItem((row.entry as NostrEvent).id, (moved as NostrEvent).id, place)
+    const newId = isReference(moved) ? (object ? object.id : (row.byReference === 'sealed' ? row.id : objectHandle(`${newKey.lookupId}/${entryKey(moved)}`))) : (moved as NostrEvent).id
+    const lineage = isReference(moved) ? moved[1] : itemLineage(moved as NostrEvent)
+    const delta = (['x', 'y', 'z'] as const).map((a) => [a, dest.position[a] - from.position[a]] as const).filter(([, d]) => d !== 0n).map(([a, d]) => `${d > 0n ? '+' : ''}${d} ${a}`)
+    const text = [
+      `Moved ${row.type} "${row.label}" from ${words(row.at)} to ${words(place)}${delta.length ? ` (${delta.join(', ')} gibsons)` : ''}${height !== oldKey.height ? `, from the h${oldKey.height} cube to h${height}` : ''}. Its new id is ${newId.slice(0, 12)}; ${isReference(moved) ? 'its object keeps its address' : `it keeps its lineage ${String(lineage).slice(0, 12)}`}, so its reactions follow it.`,
+      bagWords,
+    ].join('\n')
+    return {
+      text,
+      data: {
+        moved: { ...Placements.publicRow(row), id: newId, lineage, at: { x: place.x, y: place.y, z: place.z }, plane: dest.plane },
+        from: { ...row.at, plane: row.plane, height: oldKey.height, lookupId: oldKey.lookupId },
+        to: { x: place.x, y: place.y, z: place.z, plane: dest.plane, height, lookupId: newKey.lookupId },
+        sameBag, bagId: newBag.id, accepted, refused, keyMs: Math.round(keyMs), objectEventId: object?.id ?? null,
+      },
+    }
   }
 
   /** Publish a failed move's old object version, retried; if no relay takes it, the outbox keeps sending it. Returns words for the answer. */
   private async putBack(rollback: NostrEvent): Promise<string> {
     for (let i = 0; ; i++) {
       const r = await this.host.relays.publish(rollback).catch(() => ({ ok: false as const, reason: 'failed', reasons: {} }))
-      if (r.ok) return ' The shard\'s object was put back as it was.'
+      if (r.ok && r.accepted.includes(this.canonical)) {
+        this.host.keys.settlePutBack(rollback.id)
+        return ' The shard\'s object was put back as it was.'
+      }
       if (i >= PUT_BACK_RETRY_MS.length) break
       await new Promise((res) => setTimeout(res, PUT_BACK_RETRY_MS[i]))
     }
     const entry = this.host.outbox.add(rollback)
     await this.host.outbox.send(entry)
-    return ' Its object, already sealed to the new place, could not be put back yet; the outbox keeps sending the old version until a relay takes it, and until then the old copy may not open.'
+    this.host.keys.settlePutBack(rollback.id)
+    return ' Its object, already sealed to the new place, could not be put back on the canonical relay yet; the outbox keeps sending the old version, and until a relay takes it the old copy may not open there.'
   }
 }
-

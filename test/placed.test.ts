@@ -18,13 +18,13 @@ import { join } from 'node:path'
 import { afterAll, beforeEach, describe, expect, it } from 'vitest'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
-import { generateSecretKey, getPublicKey } from 'nostr-tools/pure'
+import { generateSecretKey } from 'nostr-tools/pure'
 import { Agent } from '../src/agent.js'
 import { bagTemplate, HIDDEN_KIND, messageInnerTemplate, unbag, type BagEntry } from '../src/hidden/bags.js'
 import { regionKeyAt } from '../src/hidden/crypto.js'
 import { readComment } from '../src/hidden/comments.js'
 import { decryptForRegion } from '../src/hidden/crypto.js'
-import { bytesToHex, signEvent, type NostrEvent } from '../src/nostr/event.js'
+import { bytesToHex, hexToBytes, nowSeconds, signEvent, type NostrEvent } from '../src/nostr/event.js'
 import { openEntries } from '../src/placed.js'
 import { createServer } from '../src/server.js'
 import type { Calibration } from '../src/space/calibration.js'
@@ -58,7 +58,9 @@ type Call = (name: string, args?: Record<string, unknown>) => Promise<{ text: st
 const agents: Agent[] = []
 afterAll(async () => { for (const a of agents) await a.stop() })
 
-async function setup(policy: { canonical?: Parameters<FakeNetwork['add']>[1] } = {}): Promise<{ a: Agent; call: Call; sk: Uint8Array; canonical: FakeRelay; mine: FakeRelay; network: FakeNetwork }> {
+interface World { a: Agent; call: Call; sk: Uint8Array; canonical: FakeRelay; mine: FakeRelay; network: FakeNetwork; dir: string }
+
+async function setup(policy: { canonical?: Parameters<FakeNetwork['add']>[1] } = {}): Promise<World> {
   const network = new FakeNetwork()
   const canonical = network.add(CANONICAL, policy.canonical)
   const mine = network.add(MINE)
@@ -66,6 +68,11 @@ async function setup(policy: { canonical?: Parameters<FakeNetwork['add']>[1] } =
   const dir = mkdtempSync(join(tmpdir(), 'cyberspace-mcp-placed-'))
   StateDir.open(dir)
   writeFileSync(join(dir, 'key'), JSON.stringify({ generatedBy: KEY_GENERATED_BY, secret: bytesToHex(sk), createdAt: 'test' }), { mode: 0o600 })
+  return { ...(await connect(network, dir)), sk, canonical, mine, network, dir }
+}
+
+/** Start an agent on a state directory and connect an MCP client to it. */
+async function connect(network: FakeNetwork, dir: string): Promise<{ a: Agent; call: Call }> {
   const a = await Agent.start({
     stateDir: dir, relays: [CANONICAL, MINE], capCallSeconds: 30, capSessionSeconds: 120, maxSidestepHeight: 24, allowRespawn: false,
     websocketImplementation: network.WebSocket, calibration: cal, relayMaxWaitMs: 1200, ordersPollMs: 0,
@@ -80,7 +87,15 @@ async function setup(policy: { canonical?: Parameters<FakeNetwork['add']>[1] } =
     const r = await client.callTool({ name, arguments: args })
     return { text: (r.content as Array<{ text: string }>).map((c) => c.text ?? '').join('\n'), data: (r.structuredContent ?? {}) as Record<string, unknown>, isError: !!r.isError }
   }
-  return { a, call, sk, canonical, mine, network }
+  return { a, call }
+}
+
+/** Stop the world's agent and start a new one on the same state directory, as a restart does. */
+async function restart(w: World, before: () => void = () => {}): Promise<World> {
+  await w.a.stop()
+  agents.splice(agents.indexOf(w.a), 1)
+  before()
+  return { ...w, ...(await connect(w.network, w.dir)) }
 }
 
 /** The agent's bags a relay holds now, by lookup id. */
@@ -277,23 +292,138 @@ describe('placed, remove_placed and move_placed', () => {
     expect(s.mine.published.length).toBe(published)
   }, 60_000)
 
-  it('refuses a newer version this server signed that the relays do not show, and changes nothing', async () => {
+  it('builds on the newest version this server signed when every relay lost it, so nothing in it is lost and the cube is never locked', async () => {
     await s.call('hide', { contents: { message: 'one' }, ...at(0n), height: 8 })
     await s.call('hide', { contents: { message: 'two' }, ...at(1n), height: 8 })
-    // The relays lose the newest version (a relay that rolled back); the outbox no longer carries it.
+    // The relays lose the newest version (a relay wiped, or one that never took it) and the outbox no longer carries it.
     const k = key(BASE, 8)
     for (const relay of [s.mine, s.canonical]) relay.events.delete(`33330:${s.a.pubkey}:${k.lookupId}`)
     const older = signEvent(await bagTemplate([signEvent(messageInnerTemplate('one', { x: BASE, y: BASE, z: BASE }, 0, 1), s.sk)], k.key, k.lookupId, 8, 2, HIDDEN_KIND), s.sk)
     s.mine.seed(older)
     s.a.outbox.entries.splice(0, s.a.outbox.entries.length)
-    const published = s.mine.published.length
     const r = await s.call('hide', { contents: { message: 'three' }, ...at(2n), height: 8 })
-    expect(r.isError).toBe(true)
-    expect(r.text).toContain('do not have the newest version')
+    expect(r.isError).toBe(false)
+    const bag = bagsOn(s.mine, s.a.pubkey).get(k.lookupId)!
+    expect((await unbag(bag, k.key, undefined, undefined, 8)).map((h) => h.text).sort()).toEqual(['one', 'three', 'two'])
+  }, 60_000)
+
+  it('needs a target, takes names exactly, and "last" with a type is the newest of that type', async () => {
+    await s.call('hide', { contents: { object: { ...tetra, name: 'Red Cube' } }, ...at(0n), height: 8 })
+    await s.call('hide', { contents: { message: 'I placed my first shard here!' }, ...at(1n), height: 8 })
+    const published = s.mine.published.length
+    for (const args of [{}, { whole_bag: true }, { target: '' }]) {
+      const r = await s.call('remove_placed', args)
+      expect(r.isError).toBe(true)
+      expect(r.text).toContain('Say what to remove')
+    }
+    // "shard" is part of the message, never a name: refused, with what was close.
+    const partial = await s.call('remove_placed', { target: 'shard' })
+    expect(partial.isError).toBe(true)
+    expect(partial.text).toContain('I placed my first shard here!')
     expect(s.mine.published.length).toBe(published)
+    // "the shard you placed": last of type shard, though the message is newer.
+    const r = await s.call('remove_placed', { target: 'last', type: 'shard' })
+    expect(r.isError).toBe(false)
+    expect((r.data.removed as Row).label).toBe('Red Cube')
+    expect(rowsOf(await s.call('placed')).map((x) => x.label)).toEqual(['I placed my first shard here!'])
+  }, 60_000)
+
+  it('does not move a chest', async () => {
+    await s.call('hide', { contents: { key: { name: 'Brass Key' } }, ...at(0n), height: 8 })
+    await s.call('hide', { contents: { chest: { name: 'Box', lock: 'Brass Key', entries: [{ message: 'inside' }] } }, ...at(1n), height: 8 })
+    const r = await s.call('move_placed', { target: 'Box', by: { dz: 12 } })
+    expect(r.isError).toBe(true)
+    expect(r.text).toContain('A chest cannot be moved')
+  }, 60_000)
+
+  it('runs calls on one bag one at a time: nothing is lost when they come together', async () => {
+    await s.call('hide', { contents: { message: 'gone soon' }, ...at(0n), height: 8 })
+    await Promise.all([
+      s.call('hide', { contents: { message: 'a' }, ...at(1n), height: 8 }),
+      s.call('hide', { contents: { message: 'b' }, ...at(2n), height: 8 }),
+      s.call('remove_placed', { target: 'gone soon' }),
+      s.call('hide', { contents: { message: 'c' }, ...at(3n), height: 8 }),
+    ])
+    const k = key(BASE, 8)
+    const bag = bagsOn(s.mine, s.a.pubkey).get(k.lookupId)!
+    expect((await unbag(bag, k.key, undefined, undefined, 8)).map((h) => h.text).sort()).toEqual(['a', 'b', 'c'])
+  }, 60_000)
+
+  it('leaves a sealed object up while another of your bags still names it', async () => {
+    await s.call('hide', { contents: { object: bigObject('big one') }, ...at(0n), height: 3 })
+    const k = key(BASE, 3)
+    const ref = (await entriesOf(bagsOn(s.mine, s.a.pubkey).get(k.lookupId)!, k.key))[0]
+    // A second bag of the agent's, in another cube it holds the key to, names the same object.
+    const other = s.a.keys.keyAt({ x: BASE, y: BASE, z: BASE + 64n }, 3, 'hide')
+    const otherBag = signEvent(await bagTemplate([ref], hexToBytes(other.keyHex), other.lookupId, 3, nowSeconds(), HIDDEN_KIND), s.sk)
+    s.mine.seed(otherBag)
+    s.canonical.seed(otherBag)
+    const r = await s.call('remove_placed', { target: 'big one' })
+    expect(r.isError).toBe(false)
+    expect(r.text).toContain('another of your placements names it')
+    expect(s.mine.all().some((e) => e.kind === 5 && e.tags.some((t) => t[0] === 'a' && t[1].startsWith('33331:')))).toBe(false)
   }, 60_000)
 })
 
+describe('when a relay refuses or is silent', () => {
+  it('a deletion every relay refused leaves the bag listed, so it can be removed again', async () => {
+    const s = await setup()
+    await s.call('hide', { contents: { message: 'only' }, ...at(0n), height: 8 })
+    for (const r of [s.mine, s.canonical]) r.policy.refuse = (ev) => (ev.kind === 5 ? 'blocked: no deletions today' : null)
+    const r = await s.call('remove_placed', { target: 'only' })
+    expect(r.text).toContain('blocked: no deletions today')
+    expect(rowsOf(await s.call('placed')).map((x) => x.label)).toEqual(['only'])
+    for (const rl of [s.mine, s.canonical]) rl.policy.refuse = () => null
+    const again = await s.call('remove_placed', { target: 'only' })
+    expect(again.isError).toBe(false)
+    expect(bagsOn(s.mine, s.a.pubkey).has(key(BASE, 8).lookupId)).toBe(false)
+  }, 60_000)
+
+  it('refuses to rewrite when the canonical relay is silent, though another relay answers', async () => {
+    const s = await setup()
+    await s.call('hide', { contents: { message: 'keep' }, ...at(0n), height: 8 })
+    await s.call('hide', { contents: { message: 'x' }, ...at(1n), height: 8 })
+    s.canonical.policy.silent = true
+    const published = s.mine.published.length
+    const r = await s.call('remove_placed', { target: 'x' })
+    expect(r.isError).toBe(true)
+    expect(r.text).toContain('canonical relay did not answer')
+    expect(s.mine.published.length).toBe(published)
+  }, 60_000)
+
+  it('a move the canonical relay does not take leaves the old copy there, never a hole', async () => {
+    const s = await setup()
+    await s.call('hide', { contents: { message: 'stays' }, ...at(1n), height: 3 })
+    await s.call('hide', { contents: { message: 'mover' }, ...at(0n), height: 3 })
+    const oldK = key(BASE, 3)
+    const newK = key(BASE + 12n, 3)
+    s.canonical.policy.refuse = (ev) => (ev.kind === HIDDEN_KIND && ev.tags.some((t) => t[0] === 'd' && t[1] === newK.lookupId) ? 'blocked: too big' : null)
+    const before = bagsOn(s.canonical, s.a.pubkey).get(oldK.lookupId)!
+    const r = await s.call('move_placed', { target: 'mover', by: { dz: 12 } })
+    expect(r.isError).toBe(true)
+    expect(r.text).toContain('canonical relay did not take the bag at the new place')
+    // On the canonical relay the old bag is untouched, so the thing is still there.
+    expect(bagsOn(s.canonical, s.a.pubkey).get(oldK.lookupId)!.id).toBe(before.id)
+    expect((await unbag(before, oldK.key, undefined, undefined, 3)).map((h) => h.text).sort()).toEqual(['mover', 'stays'])
+  }, 60_000)
+
+  it('a reseal the canonical relay does not take is put back, and nothing moves', async () => {
+    const s = await setup()
+    await s.call('hide', { contents: { object: bigObject('big one') }, ...at(0n), height: 3 })
+    const object = s.canonical.all().find((e) => e.kind === 33331)!
+    s.canonical.policy.refuse = (ev) => (ev.kind === 33331 && ev.created_at > object.created_at && ev.content === object.content && ev.tags.find((t) => t[0] === 'encrypted')![2] !== object.tags.find((t) => t[0] === 'encrypted')![2] ? 'blocked: not this one' : null)
+    const r = await s.call('move_placed', { target: 'big one', by: { dz: 12 } })
+    expect(r.isError).toBe(true)
+    expect(r.text).toContain('Nothing was moved')
+    // Wherever the resealed object landed, the newest version there opens with the old place's key.
+    for (const relay of [s.mine, s.canonical]) {
+      const now = relay.all().find((e) => e.kind === 33331)!
+      expect(await decryptForRegion(key(BASE, 3).key, now.tags.find((t) => t[0] === 'encrypted')![2])).not.toBeNull()
+    }
+    expect(s.a.keys.putBacks).toEqual([])
+    expect(bagsOn(s.mine, s.a.pubkey).has(key(BASE + 12n, 3).lookupId)).toBe(false)
+  }, 60_000)
+})
 describe('when no relay answers', () => {
   it('hide, remove_placed and move_placed refuse rather than write a bag blind', async () => {
     const s = await setup()
@@ -302,7 +432,7 @@ describe('when no relay answers', () => {
     const published = s.mine.published.length + s.canonical.published.length
     const h = await s.call('hide', { contents: { message: 'blind' }, ...at(1n), height: 8 })
     expect(h.isError).toBe(true)
-    expect(h.text).toContain('No relay answered')
+    expect(h.text).toContain('canonical relay did not answer')
     const p = await s.call('placed')
     expect(p.isError).toBe(true)
     expect((await s.call('remove_placed', { target: 'last' })).isError).toBe(true)
@@ -333,14 +463,20 @@ describe('a move that no relay takes', () => {
   }, 60_000)
 })
 
-describe('bags hidden before this record existed', () => {
-  it('are adopted from what find and hide noted, so a restart on an old state directory can still remove them', async () => {
-    const s = await setup()
+describe('a restart', () => {
+  it('adopts bags hidden before keys/mine.json existed, and puts back the object of a move it stopped in the middle of', async () => {
+    let s = await setup()
     await s.call('hide', { contents: { message: 'old placement' }, ...at(0n), height: 8 })
-    // As if keys/mine.json had never been written.
-    s.a.keys.mine.clear()
+    const rollback = signEvent({ kind: 33331, created_at: 5, content: 'x', tags: [['d', 'abc']] }, s.sk)
+    s.a.keys.holdPutBack({ rollback, newLookupId: 'never-written', newBagId: 'none' })
+    s = await restart(s, () => {
+      // As if mine.json had only the put-back: the bag record is gone, as on a state directory from before this change.
+      writeFileSync(join(s.dir, 'keys', 'mine.json'), JSON.stringify({ version: 1, bags: [], putBacks: [{ rollback, newLookupId: 'never-written', newBagId: 'none' }] }))
+    })
+    expect(s.a.keys.mine.has(key(BASE, 8).lookupId)).toBe(true)
+    expect(s.a.keys.putBacks).toEqual([])
+    expect(s.a.outbox.entries.some((e) => e.event.id === rollback.id)).toBe(true)
     const r = await s.call('remove_placed', { target: 'old placement' })
     expect(r.isError).toBe(false)
-    expect(getPublicKey(s.sk)).toBe(s.a.pubkey)
   }, 60_000)
 })

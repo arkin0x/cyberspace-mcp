@@ -21,7 +21,7 @@
 // by any tool.
 
 import type { Plane } from 'cyberspace-core'
-import { bytesToHex } from '../nostr/event.js'
+import { bytesToHex, type NostrEvent } from '../nostr/event.js'
 import type { StateDir } from '../state/dir.js'
 import { regionKeyAt } from '../hidden/crypto.js'
 import type { HiddenType } from '../hidden/bags.js'
@@ -175,10 +175,11 @@ export interface OpenedBag {
  * newest version this server wrote, kept in keys/mine.json and never
  * trimmed, so `placed` can list it, and `remove_placed` and `move_placed`
  * can rewrite or delete it, however many keys the scan has derived since.
- * `lastAt` and `lastBagId` are the newest bag this server signed for it, so a
- * rewrite never builds on an older copy a relay still serves; `deletedAt` is
- * when it was taken down (NIP-09), so a later hide there is newer than the
- * deletion.
+ * `lastEvent` is the newest version this server signed for it, kept whole,
+ * so a rewrite always builds on at least that version even when every relay
+ * lost it or never took it (review of #32: refusing instead locked the cube
+ * for good); `deletedAt` is when a deletion of it (NIP-09) was taken by a
+ * relay, so a later hide there is newer than the deletion.
  */
 export interface OwnBag {
   lookupId: string
@@ -187,11 +188,24 @@ export interface OwnBag {
   base: { x: string; y: string; z: string }
   lastAt: number
   lastBagId?: string
+  lastEvent?: NostrEvent
   deletedAt?: number
 }
 
+/**
+ * A reference shard's old object version, signed again a second newer, kept
+ * on disk before its move publishes anything (review of #32): published if
+ * the move fails or the server stops mid-move, unless the move's new bag
+ * (`newLookupId`, `newBagId`) is recorded as written.
+ */
+export interface PendingPutBack {
+  rollback: NostrEvent
+  newLookupId: string
+  newBagId: string
+}
+
 interface KeysFile { version: 1; keys: HeldKey[] }
-interface MineFile { version: 1; bags: OwnBag[]; last?: LastPlaced }
+interface MineFile { version: 1; bags: OwnBag[]; last?: LastPlaced; putBacks?: PendingPutBack[] }
 
 /** The thing the agent placed or moved most recently: what "last" and "this" name. */
 export interface LastPlaced { lookupId: string; entryKey: string; at: number }
@@ -227,11 +241,14 @@ export class KeyStore {
   readonly mine = new Map<string, OwnBag>()
   /** The thing placed or moved most recently, kept with the own bags. */
   lastPlaced: LastPlaced | null = null
+  /** Move rollbacks not yet settled. */
+  putBacks: PendingPutBack[] = []
 
   constructor(private readonly dir: StateDir) {
     const own = dir.readJson<MineFile | null>(MINE_FILE, null)
     if (own?.version === 1) for (const b of own.bags) this.mine.set(b.lookupId, b)
     this.lastPlaced = own?.last ?? null
+    this.putBacks = own?.putBacks ?? []
     const keys = dir.readJson<KeysFile | null>(KEYS_FILE, null)
     if (keys?.version === 1) for (const k of keys.keys) this.keys.set(k.lookupId, k)
     const bags = dir.readJson<BagsFile | null>(BAGS_FILE, null)
@@ -362,11 +379,16 @@ export class KeyStore {
    * taken down (`deleted`). `at` is its created_at. The newest stands, so a
    * record never moves backwards.
    */
-  noteOwnBag(key: Pick<HeldKey, 'lookupId' | 'keyHex' | 'height' | 'base'>, at: number, change: { bagId: string } | { deleted: true }): void {
+  noteOwnBag(key: Pick<HeldKey, 'lookupId' | 'keyHex' | 'height' | 'base'>, at: number, change: { bagId: string; event?: NostrEvent } | { deleted: true }): void {
     const was = this.mine.get(key.lookupId)
     const row: OwnBag = was ? { ...was } : { lookupId: key.lookupId, keyHex: key.keyHex, height: key.height, base: { ...key.base }, lastAt: 0 }
     if ('bagId' in change) {
-      if (at >= row.lastAt) { row.lastAt = at; row.lastBagId = change.bagId }
+      if (at >= row.lastAt) {
+        row.lastAt = at
+        row.lastBagId = change.bagId
+        if (change.event) row.lastEvent = change.event
+        else if (row.lastEvent && row.lastEvent.id !== change.bagId) delete row.lastEvent
+      }
     } else {
       row.deletedAt = Math.max(row.deletedAt ?? 0, at)
     }
@@ -375,7 +397,19 @@ export class KeyStore {
   }
 
   private saveMine(): void {
-    this.dir.writeJson(MINE_FILE, { version: 1, bags: [...this.mine.values()], ...(this.lastPlaced ? { last: this.lastPlaced } : {}) } satisfies MineFile)
+    this.dir.writeJson(MINE_FILE, { version: 1, bags: [...this.mine.values()], ...(this.lastPlaced ? { last: this.lastPlaced } : {}), ...(this.putBacks.length ? { putBacks: this.putBacks } : {}) } satisfies MineFile)
+  }
+
+  /** Keep a move's rollback on disk before the move publishes anything. */
+  holdPutBack(p: PendingPutBack): void {
+    this.putBacks = [...this.putBacks.filter((x) => x.rollback.id !== p.rollback.id), p]
+    this.saveMine()
+  }
+
+  /** The rollback is settled: put back, or no longer needed. */
+  settlePutBack(rollbackId: string): void {
+    this.putBacks = this.putBacks.filter((x) => x.rollback.id !== rollbackId)
+    this.saveMine()
   }
 
   /** Remember the thing just placed or moved, by its bag and its entry key. */
