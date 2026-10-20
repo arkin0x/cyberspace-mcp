@@ -1,5 +1,5 @@
 // Generates test/fixtures/onosendai-protected.json for cyberspace-mcp with
-// ONOSENDAI's own code (feat/protect-bag-items, ONOSENDAI #409:
+// ONOSENDAI's own code (ONOSENDAI #409, merged as 4a85a04:
 // src/lib/hidden.ts, chests.ts), for the rules of 2026-10-20: NIP-70 `-` on
 // every item sealed in a bag or a chest, and a hidden message written as an
 // unsigned rumor. It checks the reverse direction too: a bag and a chest
@@ -36,7 +36,8 @@ const at = spawn.position
 const plane = spawn.plane
 const region = mcpCrypto.regionKeyAt(at, HEIGHT, 20)
 const sign = (t: { kind: number; created_at: number; tags: string[][]; content: string }, sk = hiderSk) => finalizeEvent(attributed(t), sk)
-const rumor = (t: { kind: number; created_at: number; tags: string[][]; content: string }, pk = hider) => ono.rumorOf(attributed(t), pk)
+// As ONOSENDAI's deploy writes one (useShards: rumorOf(template, pubkey)), with no client tag; its signer adds one to what it signs.
+const rumor = (t: { kind: number; created_at: number; tags: string[][]; content: string }, pk = hider) => ono.rumorOf(t, pk)
 
 const payload = JSON.parse(readFileSync(`${MCP}/test/fixtures/xor-stella-octangula.json`, 'utf8'))
 const shard = fromPayload(payload, 'x'.repeat(64))!
@@ -119,8 +120,8 @@ const reverse = {
 if (onoRead.length !== 4 || onoChestRead.length !== 2 || !onoChestRead.every((c) => c.verified)) throw new Error('ONOSENDAI did not read the agent\'s bag as expected')
 
 writeFileSync(OUT, JSON.stringify({
-  note: 'Made with ONOSENDAI feat/protect-bag-items (#409: src/lib/hidden.ts, chests.ts, client.ts) by scripts/gen-onosendai-protected-fixture.ts run in an ONOSENDAI checkout, with test keys only. "templates" are ONOSENDAI\'s inner templates for fixed inputs, its rumor of the message, and two moves through its editedTemplate. "bag" is a kind 33330 ONOSENDAI sealed at the test agent\'s spawn, h6: a message as a rumor, a shard, a key item (Brass Key), a chest locked to it (a rumor message, a signed message from before 2026-10-20, the next key), and a signed message from before. "onosendaiRead" is what ONOSENDAI\'s unbag and readContents made of it. "mcpBag" was written by cyberspace-mcp\'s code at generation time (a rumor message, a key, a chest holding a rumor and a shard, and a legacy signed message moved as a rumor); "reverse" is what ONOSENDAI\'s readers made of it.',
-  onosendai: 'feat/protect-bag-items (#409)',
+  note: 'Made with ONOSENDAI #409 (merged as 4a85a04: src/lib/hidden.ts, chests.ts, client.ts) by scripts/gen-onosendai-protected-fixture.ts run in an ONOSENDAI checkout, with test keys only. "templates" are ONOSENDAI\'s inner templates for fixed inputs, its rumor of the message, and two moves through its editedTemplate. "bag" is a kind 33330 ONOSENDAI sealed at the test agent\'s spawn, h6: a message as a rumor (tags C and -, as ONOSENDAI writes it), a shard, a key item (Brass Key), a chest locked to it (a rumor message, a signed message from before 2026-10-20, the next key), and a signed message from before. "onosendaiRead" is what ONOSENDAI\'s unbag and readContents made of it. "mcpBag" was written by cyberspace-mcp\'s code at generation time (a rumor message, a key, a chest holding a rumor and a shard, and a legacy signed message moved as a rumor); "reverse" is what ONOSENDAI\'s readers made of it.',
+  onosendai: '4a85a04 (#409)',
   agentSecretHex: bytesToHex(agentSk), agent, hider,
   height: HEIGHT, lookupId: region.lookupId, regionKeyHex: bytesToHex(region.key), at: { x: at.x.toString(), y: at.y.toString(), z: at.z.toString(), plane },
   brassSecretHex: brass.secretHex, copperSecretHex: copper.secretHex,

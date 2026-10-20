@@ -18,9 +18,11 @@ import { join } from 'node:path'
 import { afterAll, beforeEach, describe, expect, it } from 'vitest'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
-import { generateSecretKey } from 'nostr-tools/pure'
+import { generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { Agent } from '../src/agent.js'
-import { bagTemplate, HIDDEN_KIND, messageInnerTemplate, unbag, type BagEntry } from '../src/hidden/bags.js'
+import { bagTemplate, chestInnerTemplate, HIDDEN_KIND, messageInnerTemplate, rumorOf, unbag, type BagEntry } from '../src/hidden/bags.js'
+import { sealEntries } from '../src/hidden/chests.js'
+import { spawnPlace } from '../src/space/coords.js'
 import { regionKeyAt } from '../src/hidden/crypto.js'
 import { readComment } from '../src/hidden/comments.js'
 import { decryptForRegion } from '../src/hidden/crypto.js'
@@ -582,6 +584,43 @@ describe('what the agent hides and moves follows the rules of 2026-10-20 (`-`, m
     }
     // Dumped for a cross-check with ONOSENDAI's own reader, when asked.
     if (process.env.PROTECT_INTEROP_DUMP) writeFileSync(process.env.PROTECT_INTEROP_DUMP, JSON.stringify({ bag: bagsOn(s.mine, s.a.pubkey).get(k.lookupId)!, keyHex: bytesToHex(k.key), height: 8 }))
+  }, 60_000)
+
+  it('a chest inside a chest vouches for its rumors only when its own author is a fact', async () => {
+    const lock = await s.call('forge_item', { name: 'Iron Key', height: 5 })
+    expect(lock.isError).toBe(false)
+    const lockPub = (lock.data.item as { itemPubkey: string }).itemPubkey
+    const other = generateSecretKey()
+    const otherPub = getPublicKey(other)
+    const here = spawnPlace(s.a.pubkey)
+    const T = nowSeconds()
+    const innerChest = (inner: BagEntry[], name: string, signedBy?: Uint8Array): BagEntry => {
+      const sealed = sealEntries(inner, lockPub)
+      const t = chestInnerTemplate({ name, lockPubkey: lockPub, senderPubkey: sealed.senderPubkey, requires: '', payload: sealed.payload }, here.position, here.plane, T)
+      return signedBy ? signEvent(t, signedBy) : rumorOf(t, otherPub)
+    }
+    // Another key's rumor, inside an UNSIGNED chest claiming that key: nobody vouches for it.
+    const forged = innerChest([rumorOf(messageInnerTemplate('I am someone else', here.position, here.plane, T), otherPub)], 'Forged Box')
+    // The same, inside a chest that key really signed: its signature vouches for it.
+    const real = innerChest([rumorOf(messageInnerTemplate('I really am', here.position, here.plane, T), otherPub)], 'Real Box', other)
+    const outerSealed = sealEntries([forged, real], lockPub)
+    const outer = signEvent(chestInnerTemplate({ name: 'Outer', lockPubkey: lockPub, senderPubkey: outerSealed.senderPubkey, requires: '', payload: outerSealed.payload }, here.position, here.plane, T), s.sk)
+    const k = regionKeyAt(here.position, 6, 20)
+    const bag = signEvent(await bagTemplate([outer], k.key, k.lookupId, 6, T, HIDDEN_KIND), s.sk)
+    s.mine.seed(bag)
+    s.canonical.seed(bag)
+    await s.call('find', {})
+    const o = await s.call('open_chest', { chest: outer.id.slice(0, 12) })
+    expect(o.isError, o.text).toBe(false)
+    const ids = new Map([...s.a.keys.chests.values()].filter((c) => c.inChest === outer.id).map((c) => [c.name, c]))
+    expect(ids.get('Forged Box')?.vouches).toBeUndefined()
+    expect(ids.get('Real Box')?.vouches).toBe(true)
+    const f = await s.call('open_chest', { chest: ids.get('Forged Box')!.id.slice(0, 12) })
+    expect(f.text).toContain('I am someone else')
+    expect(f.text).toContain('the author is a claim')
+    const r = await s.call('open_chest', { chest: ids.get('Real Box')!.id.slice(0, 12) })
+    expect(r.text).toContain('I really am')
+    expect(r.text).not.toContain('the author is a claim')
   }, 60_000)
 
   it('seal_chest writes its messages as rumors; open_chest and take say the chest vouches for them', async () => {

@@ -147,17 +147,29 @@ export interface SeenChest {
   /** Set when it was found inside another chest. */
   inChest?: string
   /**
-   * Set when it was found inside another chest and its author is a claim
-   * (unsigned, not vouched for: hidden/chests.ts readContents). Such a chest
-   * vouches for nothing inside it. Chests are always signed by the clients
-   * that write them, so one remembered before this field existed is a fact.
+   * Set when it was found inside another chest and its author is a fact
+   * (signed and verified, or vouched for: hidden/chests.ts readContents), so
+   * it vouches for the message rumors inside it (sealerOfSeen). A chest
+   * found inside another without it, a claim or one remembered before
+   * 2026-10-20, vouches for nothing. A chest found in a bag always does: the
+   * bag reader checked it against the bag's signer.
    */
-  claim?: true
+  vouches?: true
   /** The author of the bag it is in (for a chest inside a chest, the outer bag's): whom a comment on it, or on what it holds, answers. */
   bagAuthor?: string
   /** What it held when opened, by id and type only (never the contents), so a comment can answer one of them. */
   contents?: Array<{ id: string; type: HiddenType }>
   seenAt: number
+}
+
+/**
+ * Who vouches for the message rumors inside a chest this agent has seen
+ * (hidden/chests.ts readContents `sealer`): its author when that is a fact,
+ * that is, for a chest found in a bag (checked against the bag's signer), or
+ * one found inside another chest whose reading proved its author (`vouches`).
+ */
+export function sealerOfSeen(c: Pick<SeenChest, 'author' | 'inChest' | 'vouches'>): string | undefined {
+  return !c.inChest || c.vouches ? c.author : undefined
 }
 
 export interface OpenedBag {
@@ -289,9 +301,21 @@ export class KeyStore {
     return true
   }
 
-  /** Remember a chest seen, sealed. A chest seen again keeps where it was first seen. */
+  /**
+   * Remember a chest seen, sealed. A chest seen again keeps where it was
+   * first seen; it only gains `vouches` when a later sighting proves its
+   * author (a first sighting may have been an unsigned copy, whose id is the
+   * same hash).
+   */
   noteChest(chest: SeenChest): void {
-    if (this.chests.has(chest.id)) return
+    const seen = this.chests.get(chest.id)
+    if (seen) {
+      if (chest.vouches && !seen.vouches && seen.inChest) {
+        seen.vouches = true
+        this.dir.writeJson(CHESTS_FILE, { version: 1, chests: [...this.chests.values()] } satisfies ChestsFile)
+      }
+      return
+    }
     this.chests.set(chest.id, chest)
     if (this.chests.size > CHESTS_KEPT) {
       const oldest = [...this.chests.values()].sort((a, b) => a.seenAt - b.seenAt).slice(0, this.chests.size - CHESTS_KEPT)

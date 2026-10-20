@@ -61,7 +61,7 @@ import { describePlace, distanceBetween, distanceWords, parseCoordinate, placeFr
 import { apartOnBestAxis, nearestClear, overlapping, spacingFor, type Body } from './space/personalSpace.js'
 import { AvatarSizes } from './avatarSizes.js'
 import { planSummary, priceNextStep, type Ceilings, type PricedStep } from './space/plan.js'
-import { KeyStore, MAX_COMPUTE_HEIGHT, SCAN_MAX_HEIGHT, SCAN_MIN_HEIGHT, type EntrySummary, type HeldItem, type HeldKey, type ItemPlace, type OpenedBag, type SeenChest } from './space/regionKeys.js'
+import { KeyStore, MAX_COMPUTE_HEIGHT, SCAN_MAX_HEIGHT, SCAN_MIN_HEIGHT, sealerOfSeen, type EntrySummary, type HeldItem, type HeldKey, type ItemPlace, type OpenedBag, type SeenChest } from './space/regionKeys.js'
 import { StateDir } from './state/dir.js'
 import { Refusal, type ToolResult } from './tool.js'
 import { Transit } from './transit.js'
@@ -1257,7 +1257,7 @@ export class Agent {
     const place = describePlace(at)
     const text = [
       `Left your note for ${forOperator ? 'your operator ' : ''}${npub} in the h${SCAN_MAX_HEIGHT} cube around ${place.hex} (${place.planeName}, sector ${place.sector}; cube base x ${cube.base.x} y ${cube.base.y} z ${cube.base.z}). ${whereWords}`,
-      `How they find it: standing anywhere in that h${SCAN_MAX_HEIGHT} cube, a client opens it with the keys it derives for free (ONOSENDAI's scan, or find), so it shows on their next look there; if they have moved on, it waits in that cube. It is signed by your key (${this.npub}), whose profile says bot: true.`,
+      `How they find it: standing anywhere in that h${SCAN_MAX_HEIGHT} cube, a client opens it with the keys it derives for free (ONOSENDAI's scan, or find), so it shows on their next look there; if they have moved on, it waits in that cube. It is yours: it lies in the bag your key (${this.npub}) signs, whose profile says bot: true, written unsigned as a message is, so a copy proves nothing.`,
       accepted.length ? `Bag ${(hidden.data.bagId as string).slice(0, 8)}... accepted by ${accepted.join(', ')}.` : 'No relay accepted the bag yet; it waits in the outbox.',
       forOperator ? 'Tell your operator with message_operator that something is waiting for them, if your STRATEGY allows.' : 'You did not move.',
     ].join('\n')
@@ -1425,7 +1425,7 @@ export class Agent {
       summary.key = { itemPubkey: h.key.itemPubkey, about: h.key.about }
     }
     if (h.chest) {
-      const seen: SeenChest = { id: h.eventId, name: h.chest.name, lockPubkey: h.chest.lockPubkey, senderPubkey: h.chest.senderPubkey, requires: h.chest.requires, payload: h.chest.payload, author: h.inner.pubkey, bagAuthor: h.author, place, seenAt: nowSeconds() }
+      const seen: SeenChest = { id: h.eventId, name: h.chest.name, lockPubkey: h.chest.lockPubkey, senderPubkey: h.chest.senderPubkey, requires: h.chest.requires, payload: h.chest.payload, author: h.inner.pubkey, vouches: true, bagAuthor: h.author, place, seenAt: nowSeconds() }
       this.keys.noteChest(seen)
       const opener = openerFor(h.chest, this.keys.heldItems(), this.pubkey)
       if (!opener) {
@@ -1470,7 +1470,7 @@ export class Agent {
         })
       }
       if (c.body.chest) {
-        this.keys.noteChest({ id: c.id, name: c.body.chest.name, lockPubkey: c.body.chest.lockPubkey, senderPubkey: c.body.chest.senderPubkey, requires: c.body.chest.requires, payload: c.body.chest.payload, author: c.event.pubkey, ...(c.verified ? {} : { claim: true as const }), bagAuthor: chest.bagAuthor ?? chest.author, place: chest.place, inChest: chest.id, seenAt: nowSeconds() })
+        this.keys.noteChest({ id: c.id, name: c.body.chest.name, lockPubkey: c.body.chest.lockPubkey, senderPubkey: c.body.chest.senderPubkey, requires: c.body.chest.requires, payload: c.body.chest.payload, author: c.event.pubkey, ...(c.verified ? { vouches: true as const } : {}), bagAuthor: chest.bagAuthor ?? chest.author, place: chest.place, inChest: chest.id, seenAt: nowSeconds() })
       }
     }
   }
@@ -1883,7 +1883,7 @@ export class Agent {
     if (!opener) throw new Refusal(`The chest "${c.name}" (${handle(c.id)}) does not open for you: ${chestStatus(c, this.keys, this.pubkey).words}. A chest opens only with the item whose public key it is locked to (${c.lockPubkey}), or for the person it was sealed to. Find that item (find, or a chest you can open), and open_chest works.`)
     let contents: ChestEntry[]
     try {
-      contents = readContents(openWithSecret(c, opener.by === 'key' ? opener.key.secretHex : bytesToHex(this.sk)), c.claim ? undefined : c.author)
+      contents = readContents(openWithSecret(c, opener.by === 'key' ? opener.key.secretHex : bytesToHex(this.sk)), sealerOfSeen(c))
     } catch (err) {
       throw new Refusal(`The chest "${c.name}" (${handle(c.id)}) did not open: ${err instanceof Error ? err.message : String(err)}`)
     }
