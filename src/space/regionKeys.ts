@@ -418,6 +418,23 @@ export class KeyStore {
     this.saveMine()
   }
 
+  /**
+   * A deletion of an own bag was signed at `at`: the version kept whole is
+   * forgotten when it is not newer, whatever the relays said (review of #32,
+   * round 2: kept, it brought a deleted bag back once the outbox trimmed the
+   * deletion). A relay that still holds the bag answers the read anyway, so
+   * nothing is lost. `taken`: a relay took it, so it also counts as done.
+   */
+  noteOwnDeletion(lookupId: string, at: number, taken: boolean): void {
+    const row = this.mine.get(lookupId)
+    if (!row) return
+    const next: OwnBag = { ...row }
+    if (next.lastEvent && next.lastEvent.created_at <= at) delete next.lastEvent
+    if (taken) next.deletedAt = Math.max(next.deletedAt ?? 0, at)
+    this.mine.set(lookupId, next)
+    this.saveMine()
+  }
+
   /** The least created_at the next version of an own bag may carry: newer than every version and deletion this server signed. */
   ownBagFloor(lookupId: string): number {
     const b = this.mine.get(lookupId)

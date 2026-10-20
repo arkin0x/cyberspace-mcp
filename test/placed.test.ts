@@ -463,6 +463,41 @@ describe('a move that no relay takes', () => {
   }, 60_000)
 })
 
+describe('a deleted bag stays deleted', () => {
+  it('after a deletion that only a retry delivered, once the outbox no longer carries it', async () => {
+    const s = await setup()
+    await s.call('hide', { contents: { message: 'removed for good' }, ...at(0n), height: 8 })
+    // The first send of the deletion fails for a reason that is not a refusal, so the outbox retries it.
+    for (const r of [s.mine, s.canonical]) r.policy.refuse = (ev) => (ev.kind === 5 ? 'connection hiccup' : null)
+    await s.call('remove_placed', { target: 'removed for good' })
+    for (const r of [s.mine, s.canonical]) r.policy.refuse = () => null
+    await s.a.outbox.retry()
+    const k = key(BASE, 8)
+    expect(bagsOn(s.canonical, s.a.pubkey).has(k.lookupId)).toBe(false)
+    // The outbox trims its history; only the record is left.
+    s.a.outbox.entries.splice(0, s.a.outbox.entries.length)
+    expect(rowsOf(await s.call('placed'))).toEqual([])
+    await s.call('hide', { contents: { message: 'fresh' }, ...at(1n), height: 8 })
+    const bag = bagsOn(s.canonical, s.a.pubkey).get(k.lookupId)!
+    expect((await unbag(bag, k.key, undefined, undefined, 8)).map((h) => h.text)).toEqual(['fresh'])
+  }, 60_000)
+
+  it('when another session of the same key deleted it, which this server never sent', async () => {
+    const s = await setup()
+    await s.call('hide', { contents: { message: 'theirs to delete' }, ...at(0n), height: 8 })
+    const k = key(BASE, 8)
+    const bag = bagsOn(s.canonical, s.a.pubkey).get(k.lookupId)!
+    const del = signEvent({ kind: 5, created_at: bag.created_at + 1, content: '', tags: [['a', `33330:${s.a.pubkey}:${k.lookupId}`], ['e', bag.id], ['k', '33330']] }, s.sk)
+    s.canonical.seed(del)
+    s.mine.seed(del)
+    s.a.outbox.entries.splice(0, s.a.outbox.entries.length)
+    expect(rowsOf(await s.call('placed'))).toEqual([])
+    await s.call('hide', { contents: { message: 'fresh' }, ...at(1n), height: 8 })
+    const after = bagsOn(s.canonical, s.a.pubkey).get(k.lookupId)!
+    expect((await unbag(after, k.key, undefined, undefined, 8)).map((h) => h.text)).toEqual(['fresh'])
+  }, 60_000)
+})
+
 describe('a restart', () => {
   it('adopts bags hidden before keys/mine.json existed, and puts back the object of a move it stopped in the middle of', async () => {
     let s = await setup()
@@ -478,5 +513,17 @@ describe('a restart', () => {
     expect(s.a.outbox.entries.some((e) => e.event.id === rollback.id)).toBe(true)
     const r = await s.call('remove_placed', { target: 'old placement' })
     expect(r.isError).toBe(false)
+  }, 60_000)
+
+  it('does not put back the object of a move that finished before the stop', async () => {
+    let s = await setup()
+    await s.call('hide', { contents: { message: 'here' }, ...at(0n), height: 8 })
+    const k = key(BASE, 8)
+    const rec = s.a.keys.mine.get(k.lookupId)!
+    const rollback = signEvent({ kind: 33331, created_at: 5, content: 'x', tags: [['d', 'abc']] }, s.sk)
+    s.a.keys.holdPutBack({ rollback, newLookupId: k.lookupId, newBagId: rec.lastBagId! })
+    s = await restart(s)
+    expect(s.a.keys.putBacks).toEqual([])
+    expect(s.a.outbox.entries.some((e) => e.event.id === rollback.id)).toBe(false)
   }, 60_000)
 })

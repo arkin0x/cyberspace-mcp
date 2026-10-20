@@ -275,6 +275,36 @@ export class Placements {
     return deletedAt >= best.created_at ? null : best
   }
 
+  /**
+   * Which of these versions, held only by this server, a deletion on the
+   * relays took down: a kind 5 by the agent naming the bag's address or the
+   * version's id, at least as new (review of #32, round 2: another session's
+   * deletion, or one the outbox no longer carries). By lookup id. Each one
+   * found is recorded, so the next version is newer than the deletion and no
+   * relay takes it down with the old one.
+   */
+  private async deletedElsewhere(versions: NostrEvent[]): Promise<Set<string>> {
+    const out = new Set<string>()
+    if (versions.length === 0) return out
+    const me = this.host.pubkey
+    const byAddress = new Map(versions.map((v) => [`${HIDDEN_KIND}:${me}:${dOf(v)}`, v]))
+    const byId = new Map(versions.map((v) => [v.id, v]))
+    const answers = await Promise.all([
+      this.host.relays.queryEach({ kinds: [5], authors: [me], '#a': [...byAddress.keys()] }),
+      this.host.relays.queryEach({ kinds: [5], authors: [me], '#e': [...byId.keys()] }),
+    ])
+    for (const del of mergeAnswers(answers.flat())) {
+      for (const t of del.tags) {
+        const v = t[0] === 'a' ? byAddress.get(t[1]) : t[0] === 'e' ? byId.get(t[1]) : undefined
+        if (v && (t[0] === 'e' || del.created_at >= v.created_at)) {
+          out.add(dOf(v))
+          this.host.keys.noteOwnDeletion(dOf(v), Math.max(del.created_at, v.created_at), true)
+        }
+      }
+    }
+    return out
+  }
+
   private static answered(answers: RelayAnswer[]): RelayAnswer[] {
     return answers.filter((a) => a.outcome === 'answered')
   }
@@ -298,7 +328,9 @@ export class Placements {
     if (!answers.some((a) => a.outcome === 'answered' && normalizeURL(a.url) === this.canonical)) {
       throw new Refusal(`The canonical relay did not answer when asked for your bag in that cube (${silent.join('; ') || 'no answer'}). Nothing was changed: writing the bag without reading it there first could drop what it holds. Try again shortly.`)
     }
-    const current = this.newestOwn(lookupId, mergeAnswers(answers))
+    const events = mergeAnswers(answers)
+    let current = this.newestOwn(lookupId, events)
+    if (current && !events.some((e) => e.id === current!.id) && (await this.deletedElsewhere([current])).has(lookupId)) current = null
     if (!current) return { current: null, entries: [], silent }
     const entries = await openEntries(current, regionKey)
     if (entries === null) throw new Refusal(`Your bag in that cube (${current.id.slice(0, 8)}...) does not open with the key derived for it, so rewriting it would destroy what is there. Nothing was published.`)
@@ -318,11 +350,14 @@ export class Placements {
     for (const e of events) if (e.kind === HIDDEN_KIND && e.pubkey === this.host.pubkey) ids.add(dOf(e))
     for (const o of this.host.outbox.entries) if (!o.dropped && o.event.kind === HIDDEN_KIND && o.event.pubkey === this.host.pubkey) ids.add(dOf(o.event))
     for (const b of this.host.keys.mine.values()) if (b.lastEvent) ids.add(b.lookupId)
+    // A version only this server holds, that a deletion on the relays (another session's, or one the outbox no longer carries) took down, is gone.
+    const onlyHere = [...ids].map((d) => this.newestOwn(d, events)).filter((e): e is NostrEvent => !!e && !events.some((x) => x.id === e.id))
+    const deleted = await this.deletedElsewhere(onlyHere)
     const bags: OpenBag[] = []
     const unopened: string[] = []
     for (const lookupId of ids) {
       const ev = this.newestOwn(lookupId, events)
-      if (!ev) continue
+      if (!ev || deleted.has(lookupId)) continue
       const own = this.host.keys.mine.get(lookupId)
       const held = this.host.keys.byLookupId(lookupId)
       const keyHex = own?.keyHex ?? held?.keyHex ?? null
@@ -492,6 +527,8 @@ export class Placements {
       // kind 33330 is addressable, so the address is what a relay replaces and what NIP-09 asks for; the event id goes too, for relays that only match that.
       tags: [['a', `${HIDDEN_KIND}:${this.host.pubkey}:${lookupId}`], ...(bagId ? [['e', bagId]] : []), ['k', String(HIDDEN_KIND)]],
     })
+    // The version kept whole goes now, before anything is sent: it must never bring the bag back (review of #32, round 2).
+    this.host.keys.noteOwnDeletion(lookupId, at, false)
     const entry = this.host.outbox.add(event)
     await this.host.outbox.send(entry)
     // Recorded as done only once a relay took it: one every relay refused leaves the bag listed, so it can be removed again (review of #32).
@@ -733,9 +770,9 @@ export class Placements {
           this.host.keys.noteOwnBag(newKey, newBag.created_at, { bagId: newBag.id, event: newBag })
           const entry = this.host.outbox.add(newBag)
           await this.host.outbox.send(entry)
-          throw new Refusal(`The canonical relay did not take the bag at the new place${said ? ` (${said})` : ''}; only ${accepted.join(', ')} did. The old copy stays where it was, so until the canonical relay takes the new bag (the outbox retries it unless it was refused) the thing shows in both places there; remove_placed takes down the one you do not want.`)
+          throw new Refusal(`The canonical relay did not take the bag at the new place${said ? ` (${said})` : ''}; only ${accepted.join(', ')} did. The old copy stays where it was everywhere; on ${accepted.join(', ')} the thing now also shows at the new place (and on the canonical relay too if a retry gets it there). remove_placed takes down the copy you do not want.`)
         }
-        throw new Refusal(`The canonical relay did not take the bag at the new place${said ? ` (${said})` : sent.ok ? '' : ` (${sent.reason})`}. Nothing was moved; it stays where it was.${back}${sent.ok ? '' : ' A relay whose answer timed out may still have stored the new bag; placed shows what is there.'}`)
+        throw new Refusal(`The canonical relay did not take the bag at the new place${said ? ` (${said})` : sent.ok ? '' : ` (${sent.reason})`}. Nothing was moved; it stays where it was.${back}${accepted.length > 0 ? ` ${accepted.join(', ')} took the new bag, whose reference no longer opens now that the object is back; it is harmless and placed shows it as unreadable there.` : ''}${sent.ok ? '' : ' A relay whose answer timed out may still have stored the new bag; placed shows what is there.'}`)
       }
       this.host.keys.noteOwnBag(newKey, newBag.created_at, { bagId: newBag.id, event: newBag })
       if (rollback) this.host.keys.settlePutBack(rollback.id)
@@ -800,6 +837,6 @@ export class Placements {
     const entry = this.host.outbox.add(rollback)
     await this.host.outbox.send(entry)
     this.host.keys.settlePutBack(rollback.id)
-    return ' Its object, already sealed to the new place, could not be put back on the canonical relay yet; the outbox keeps sending the old version, and until a relay takes it the old copy may not open there.'
+    return ' Its old object version could not be put back on the canonical relay yet; the outbox keeps sending it. Where a relay took the object sealed to the new place, the old copy does not open until the old version lands there.'
   }
 }

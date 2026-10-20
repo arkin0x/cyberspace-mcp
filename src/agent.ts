@@ -245,6 +245,13 @@ export class Agent {
           this.keeper.markPublished(event.id, 'ok')
           this.holders.note(accepted)
         }
+        // A deletion of one of the agent's bags that a relay took on a retry counts as done from then on (placed.ts).
+        if (event.kind === 5) {
+          for (const t of event.tags) {
+            const m = t[0] === 'a' ? /^33330:([0-9a-f]{64}):(.+)$/.exec(t[1] ?? '') : null
+            if (m && m[1] === this.pubkey) this.keys.noteOwnDeletion(m[2], event.created_at, true)
+          }
+        }
       },
       guard: (event) => this.guardChainEvent(event),
     })
