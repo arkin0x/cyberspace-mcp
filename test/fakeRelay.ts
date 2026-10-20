@@ -100,13 +100,35 @@ export class FakeRelay {
     return [...this.events.values()].sort((a, b) => b.created_at - a.created_at || (a.id < b.id ? -1 : 1))
   }
 
+  /** NIP-09 deletions taken: addressable addresses deleted up to a time, and event ids deleted, each by its author. */
+  readonly deletedAddresses = new Map<string, number>()
+  readonly deletedIds = new Set<string>()
+
   private store(ev: NostrEvent): boolean {
     if (isEphemeral(ev.kind)) return true
     const key = this.keyOf(ev)
+    if (this.deletedIds.has(ev.id)) return false
+    if (isAddressable(ev.kind) && (this.deletedAddresses.get(key) ?? -1) >= ev.created_at) return false
     const have = this.events.get(key)
     if (have && (have.created_at > ev.created_at || (have.created_at === ev.created_at && have.id < ev.id))) return false
     this.events.set(key, ev)
+    if (ev.kind === 5) this.applyDeletion(ev)
     return true
+  }
+
+  /** A kind 5 as NIP-09 says: its e tags delete those events, its a tags every version of that address up to its created_at, only the author's own. */
+  private applyDeletion(del: NostrEvent): void {
+    for (const t of del.tags) {
+      if (t[0] === 'e' && t[1]) {
+        for (const [k, ev] of this.events) if (ev.id === t[1] && ev.pubkey === del.pubkey) this.events.delete(k)
+        this.deletedIds.add(t[1])
+      }
+      if (t[0] === 'a' && t[1] && t[1].split(':')[1] === del.pubkey) {
+        this.deletedAddresses.set(t[1], Math.max(this.deletedAddresses.get(t[1]) ?? -1, del.created_at))
+        const ev = this.events.get(t[1])
+        if (ev && ev.created_at <= del.created_at) this.events.delete(t[1])
+      }
+    }
   }
 
   /** Store and hand to every matching subscription, as a publish from another client would. */

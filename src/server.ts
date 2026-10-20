@@ -295,7 +295,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   server.registerTool('hide', {
     title: 'Hide',
-    description: 'Hide something at a coordinate inside a cube of the given height (0 to 16; h0 is the single gibson): a message (which may hold a Cashu token), an SNO object, an item (a key; forge_item says more), or a chest (seal_chest says more). Derives the region key, merges with your existing bag there (one bag per author per region; never replaces), and publishes. Optional hint heights (each at least the bag height) and a riddle make it findable.',
+    description: 'Hide something at a coordinate inside a cube of the given height (0 to 16; h0 is the single gibson): a message (which may hold a Cashu token), an SNO object, an item (a key; forge_item says more), or a chest (seal_chest says more). Derives the region key, merges with your existing bag there (one bag per author per region; never replaces), and publishes. Optional hint heights (each at least the bag height) and a riddle make it findable. The answer gives its id: placed lists what you placed, remove_placed takes a thing down, move_placed moves it.',
     inputSchema: {
       contents,
       coordinate,
@@ -371,6 +371,39 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     description: 'Validate an SNO payload (DECK-0003 1.9) and hide it as an object at a coordinate and height: inline when small, by reference as a hidden kind 33331 when large. Or place a published public object by its address (33331:<pubkey>:<d> or naddr) as a reference. Or place an object find or open_chest listed, or one you took from a chest, by its id.',
     inputSchema: { object: snoPayload.optional(), address: z.string().optional(), id: z.string().optional().describe('An object\'s id as find, open_chest or items lists it (at least 8 hex characters).'), coordinate, height: z.number().int().min(0).max(MAX_KEY_HEIGHT) },
   }, async (args) => call(() => agent.place(args)))
+
+  /** How a placed thing is named, said once for the three tools that take one (arkinox, 2026-10-20). */
+  const targetWords = 'Which thing: "last" (the newest thing you placed or moved; also "this" or "it"), its name as placed lists it (a shard\'s name, a message\'s first words, a key\'s or chest\'s name), or its id (at least 8 hex characters, as placed, hide or move_placed gave it). When a name fits several things the call is refused with the candidates and their ids; nothing is changed.'
+
+  server.registerTool('placed', {
+    title: 'What you placed',
+    description: 'List everything you have placed in cyberspace: every bag of yours on the relays (one per cube you hid in) and each thing in it, messages, objects (shards), items, chests and objects placed by reference, with its id, name, position (x y z), the cube height and its lineage (the first id a moved thing keeps), and which one is the newest thing you placed or moved ("last"). Read fresh from the relays each time. Use it before remove_placed or move_placed to see what is where. Example: your operator says "delete the shard you just placed": call remove_placed with target "last". "Move this 12 gibsons toward Z+": call move_placed with target "last" (or its name or id) and by: { dz: 12 }.',
+    inputSchema: { match: z.string().optional().describe('Only the things whose name or first words contain this.') },
+    annotations: { readOnlyHint: true },
+  }, async (args) => call(() => agent.placed(args)))
+
+  server.registerTool('remove_placed', {
+    title: 'Remove something you placed',
+    description: 'Take down something you placed, as ONOSENDAI\'s DELETE does. One thing: its bag is read fresh from the relays and rewritten without it, keeping everything else in the bag; when it was the last thing there, the bag itself is deleted (NIP-09 kind 5). A shard hidden by reference also has its sealed object taken down once nothing of yours names it; a public object (yours from publish_object, or anyone\'s) is never unpublished, only its placement goes. A whole bag: whole_bag: true deletes the bag the target is in and everything in it; or give bag (a lookup id or bag id from placed, at least 8 hex) to delete that bag, also one this server holds no key for. Only your own bags: nothing anyone else hid can be removed. Refused, with nothing changed, when no relay answers, when the bag holds a newer version than the relays show, or when a name fits several things. The answer says what each relay said, verbatim.',
+    inputSchema: {
+      target: z.string().optional().describe(targetWords),
+      whole_bag: z.boolean().optional().describe('true to delete the whole bag the target is in, everything in it.'),
+      bag: z.string().optional().describe('A lookup id or bag id (at least 8 hex, as placed lists) of a bag to delete whole. Instead of target.'),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  }, async (args) => call(() => agent.removePlaced(args)))
+
+  server.registerTool('move_placed', {
+    title: 'Move something you placed',
+    description: 'Move something you placed, as ONOSENDAI\'s EDIT does. Give by, an offset in gibsons from where the thing is now: "12 gibsons toward Z+" is by: { dz: 12 }, "3 toward X-" is by: { dx: -3 }, "up 5" is by: { dy: 5 }; or to, a coordinate: 64 hex, { x, y, z, plane }, or { dx, dy, dz } from where YOU stand (not from the thing). The thing is signed again at its new place with its lineage (d = its first id), so its reactions and comments follow it; an object placed by reference keeps its object\'s address. Inside the same cube its bag is rewritten in one step; a move across the cube\'s edge, or to another height, writes the bag at the new place first and then takes it out of the old bag (or deletes the old bag when it was the last thing there), so nothing else in either bag is lost. height: the cube height at the new place, 0 to 16 (default: the same as now). A new cube costs its key, priced like hide. You do not move, and nothing is moved when no relay takes the new bag. Comments are sealed to a bag, so comments left in the old cube stay there. Returns the new id.',
+    inputSchema: {
+      target: z.string().optional().describe(targetWords),
+      by: z.object({ dx: z.union([z.string(), z.number()]).optional(), dy: z.union([z.string(), z.number()]).optional(), dz: z.union([z.string(), z.number()]).optional() }).optional().describe('An offset in gibsons from where the thing is now; negative for X-, Y-, Z-.'),
+      to: coordinate.optional().describe('Where to put it instead: 64 hex, { x, y, z, plane }, or { dx, dy, dz } from where you stand.'),
+      height: z.number().int().min(0).max(MAX_KEY_HEIGHT).optional().describe('The cube height at the new place; the same as now when left out.'),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  }, async (args) => call(() => agent.movePlaced(args)))
 
   server.registerTool('set_avatar', {
     title: 'Set your avatar',

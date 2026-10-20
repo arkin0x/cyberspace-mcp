@@ -110,6 +110,26 @@ export async function objectTemplate(shard: ShardModel, regionKey: Uint8Array, d
   }
 }
 
+/**
+ * A kind 33331 object hidden by reference, sealed again to another region
+ * under the same `d` (ONOSENDAI #369: a move "reseals the same object under
+ * its own d, which replaces it on the relays and keeps its address, the thing
+ * its comments and reactions name"). The payload is opened with the old
+ * region's key and sealed with the new one; every other tag and the public
+ * preview stay as they were. Null when it does not open with `fromKey`.
+ */
+export async function resealedObject(object: NostrEvent, fromKey: Uint8Array, toKey: Uint8Array, createdAt: number): Promise<EventTemplate | null> {
+  const at = object.tags.findIndex((t) => t[0] === 'encrypted')
+  if (object.kind !== OBJECT_KIND || at < 0 || object.tags[at][1] !== ALGO || !object.tags[at][2]) return null
+  const plain = await decryptForRegion(fromKey, object.tags[at][2])
+  if (plain === null) return null
+  const sealed = [...object.tags[at]]
+  sealed[2] = await encryptForRegion(toKey, plain)
+  if (sealed.length < 4) sealed[3] = REGION_KEY_DERIVATION
+  const tags = object.tags.map((t, i) => (i === at ? sealed : [...t]))
+  return { kind: OBJECT_KIND, created_at: createdAt, content: object.content, tags }
+}
+
 /** The reference entry that hides a signed object at a point (spec 7.6). */
 export function referenceTo(object: NostrEvent, at: Position, plane: Plane, relayHint: string): Reference {
   const d = object.tags.find((t) => t[0] === 'd')?.[1] ?? ''
@@ -321,20 +341,92 @@ export function chatRumor(template: EventTemplate, pubkey: string): ChatRumor {
   return { ...unsigned, id: getEventHash(unsigned) }
 }
 
-/** What a bag says in public about itself, beyond its lookup id (spec 8.6, 7.7). */
+/**
+ * The identity an item keeps across a move (ONOSENDAI lib/hidden.ts
+ * itemLineage, #369; arkinox, 2026-10-16: "keep the d tag so comments and
+ * reactions aren't lost"). An item carried inline is a regular event, so
+ * moving it signs a new one with a new id; the new one carries
+ * `["d", <first version's id>]`, and comments and reactions name that id,
+ * whichever version they were made on. The tag is sealed in the bag like the
+ * rest of the item. An item with no `d` is its own first version. A shard
+ * hidden by reference is a kind 33331 object with a `d` of its own, which a
+ * move keeps, so it needs nothing here (null).
+ */
+export function itemLineage(inner: Pick<NostrEvent, 'id' | 'kind' | 'tags'> | undefined): string | null {
+  if (!inner || inner.kind === OBJECT_KIND) return null
+  // Only an event id: a `d` of any other shape is not a lineage, and is ignored.
+  return inner.tags.find((t) => t[0] === 'd' && /^[0-9a-f]{64}$/.test(t[1] ?? ''))?.[1] ?? inner.id
+}
+
+/**
+ * A moved item's template (ONOSENDAI editedTemplate, #369): the new place
+ * (`C`, from `next`) and the lineage `d`, then every other tag the version it
+ * replaces carried (a credit, a title, a lock), so a move changes only where
+ * it is.
+ */
+export function editedTemplate(next: EventTemplate, previous: Pick<NostrEvent, 'id' | 'kind' | 'tags'>): EventTemplate {
+  const at = next.tags.find((t) => t[0] === 'C')
+  const lineage = itemLineage(previous) ?? previous.id
+  const kept = previous.tags.filter((t) => t[0] !== 'C' && t[0] !== 'd')
+  return { ...next, tags: [...(at ? [at] : []), ['d', lineage], ...kept] }
+}
+
+/**
+ * What a bag says in public about itself, beyond its lookup id (spec 8.6,
+ * 7.7), as ONOSENDAI's BagSettings: the h tag, the hint, the riddle, and
+ * ONOSENDAI's contents and money hints (2026-10-18, `contents` tags). Every
+ * rewrite of a bag carries them forward, so removing or moving one thing
+ * never changes what the bag says about itself.
+ */
 export interface BagSettings {
   heightTag: boolean
   hint: HintHeights | null
   riddle: string
+  /** Publish what is inside, by kind and count (`contents` tags). */
+  contents?: boolean
+  /** Publish that money is inside while a Cashu token is (a `contents` tag for cashu alone). */
+  money?: boolean
 }
 
-const DEFAULT_BAG_SETTINGS: BagSettings = { heightTag: true, hint: null, riddle: '' }
+const DEFAULT_BAG_SETTINGS: BagSettings = { heightTag: true, hint: null, riddle: '', contents: false, money: false }
 
-/** The settings a published bag carries. */
+/** A Cashu token as written, as ONOSENDAI counts them (lib/cashu.ts TOKEN). */
+const CASHU_AS_WRITTEN = /cashu[AB][A-Za-z0-9_\-+/=]{16,}/g
+
+/** The order a bag's `contents` tags are written in (ONOSENDAI CONTENTS_KINDS). */
+const CONTENTS_KINDS = ['shard', 'message', 'key', 'chest', 'cashu'] as const
+type ContentsKind = typeof CONTENTS_KINDS[number]
+
+/** What a bag holds, by kind (ONOSENDAI bagContents): shards inline or by reference, messages, keys, chests, and the tokens in its messages. */
+function bagContents(entries: readonly (BagEntry | ChatRumor)[]): Record<ContentsKind, number> {
+  const out: Record<ContentsKind, number> = { shard: 0, message: 0, key: 0, chest: 0, cashu: 0 }
+  for (const e of entries) {
+    if (isReference(e)) { out.shard++; continue }
+    if (e.kind === SHARD_KIND) out.shard++
+    else if (e.kind === MESSAGE_KIND) { out.message++; out.cashu += (typeof e.content === 'string' ? e.content.match(CASHU_AS_WRITTEN) ?? [] : []).length }
+    else if (e.kind === KEY_KIND) out.key++
+    else if (e.kind === CHEST_KIND) out.chest++
+  }
+  return out
+}
+
+/** The public `contents` tags a bag's settings write, worked out from what is in it now (ONOSENDAI bagContentsTags). */
+function bagContentsTags(entries: readonly (BagEntry | ChatRumor)[], settings: Pick<BagSettings, 'contents' | 'money'>): string[][] {
+  if (!settings.contents && !settings.money) return []
+  const c = bagContents(entries)
+  if (settings.contents) return CONTENTS_KINDS.filter((k) => c[k] > 0).map((k) => ['contents', k, String(c[k])])
+  return c.cashu > 0 ? [['contents', 'cashu']] : []
+}
+
+/** The settings a published bag carries (ONOSENDAI bagSettingsOf). */
 export function bagSettingsOf(ev: NostrEvent, height: number): BagSettings {
   const h = heightHint(ev)
   const hint = parseHint(ev.tags, h ?? height)
-  return { heightTag: h !== null, hint: hint ? hint.heights : null, riddle: ev.content.slice(0, MAX_RIDDLE_LENGTH) }
+  const rows = ev.tags.filter((t) => t[0] === 'contents' && (CONTENTS_KINDS as readonly string[]).includes(t[1] ?? ''))
+  const counted = rows.some((t) => { const n = t[2] === undefined ? NaN : Number(t[2]); return Number.isInteger(n) && n > 0 && n < 1_000_000 })
+  // Money as a setting only in its own form: a counted cashu row is the contents hint speaking.
+  const moneyAlone = rows.some((t) => t[1] === 'cashu' && t[2] === undefined)
+  return { heightTag: h !== null, hint: hint ? hint.heights : null, riddle: ev.content.slice(0, MAX_RIDDLE_LENGTH), contents: counted, money: moneyAlone }
 }
 
 interface BagPlace { at: Position; plane: Plane }
@@ -353,6 +445,7 @@ export async function bagTemplate(entries: readonly (BagEntry | ChatRumor)[], re
     if (!hintFits(settings.hint, height)) throw new Error(`A hint box of heights ${settings.hint.join(', ')} cannot contain a height ${height} region.`)
     tags.push(...hintTags(place.at, place.plane, settings.hint))
   }
+  tags.push(...bagContentsTags(entries, settings))
   return { kind, created_at: createdAt, content: settings.riddle.trim().slice(0, MAX_RIDDLE_LENGTH), tags }
 }
 

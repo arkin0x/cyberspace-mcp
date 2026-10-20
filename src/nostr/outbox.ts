@@ -209,6 +209,16 @@ export class Outbox {
     return { sent, dropped, waiting }
   }
 
+  /**
+   * Give up on an entry: it is never sent again, and the outbox tool shows
+   * why. For an event whose moment has passed (a move that no relay took is
+   * abandoned, so the bag it would have written must not land later).
+   */
+  drop(entry: OutboxEntry, reason: string): void {
+    entry.dropped = reason
+    this.save()
+  }
+
   /** What the outbox tool shows. */
   state(): { pending: OutboxEntry[]; refused: OutboxEntry[]; dropped: OutboxEntry[]; nextRetryMs: number | null } {
     return {

@@ -63,6 +63,8 @@ export interface EntrySummary {
   /** A message that holds a Cashu token. */
   coin?: boolean
   byReference?: boolean
+  /** What comments and reactions name an inline item by: its first version's id, which a move carries in `d` (ONOSENDAI #369). Absent when it is the item's own id, and for a reference. */
+  lineage?: string
   /** A shard's bounds in gibsons at its unit, and its vertex and face counts. */
   shard?: { unit: number; vertices: number; faces: number; extent: number; mode: string }
   /** A key item: its public half and sentence. The secret is held in keys/items.json and never reported. */
@@ -167,7 +169,32 @@ export interface OpenedBag {
   at: number
 }
 
+/**
+ * One of the agent's own bags (arkinox, 2026-10-20: "xor doesn't know how to
+ * delete shards or bags he's placed"): the region key that opens it and the
+ * newest version this server wrote, kept in keys/mine.json and never
+ * trimmed, so `placed` can list it, and `remove_placed` and `move_placed`
+ * can rewrite or delete it, however many keys the scan has derived since.
+ * `lastAt` and `lastBagId` are the newest bag this server signed for it, so a
+ * rewrite never builds on an older copy a relay still serves; `deletedAt` is
+ * when it was taken down (NIP-09), so a later hide there is newer than the
+ * deletion.
+ */
+export interface OwnBag {
+  lookupId: string
+  keyHex: string
+  height: number
+  base: { x: string; y: string; z: string }
+  lastAt: number
+  lastBagId?: string
+  deletedAt?: number
+}
+
 interface KeysFile { version: 1; keys: HeldKey[] }
+interface MineFile { version: 1; bags: OwnBag[]; last?: LastPlaced }
+
+/** The thing the agent placed or moved most recently: what "last" and "this" name. */
+export interface LastPlaced { lookupId: string; entryKey: string; at: number }
 interface BagsFile { version: 1; bags: OpenedBag[] }
 interface ItemsFile { version: 1; items: HeldItem[] }
 interface TakenFile { version: 1; taken: TakenItem[] }
@@ -178,6 +205,7 @@ const BAGS_FILE = 'keys/bags.json'
 const ITEMS_FILE = 'keys/items.json'
 const TAKEN_FILE = 'keys/taken.json'
 const CHESTS_FILE = 'keys/chests.json'
+const MINE_FILE = 'keys/mine.json'
 /** How many seen chests are kept; the oldest seen go first. */
 const CHESTS_KEPT = 1000
 
@@ -195,8 +223,15 @@ export class KeyStore {
   readonly taken = new Map<string, TakenItem>()
   /** Chests seen, by their event id. */
   readonly chests = new Map<string, SeenChest>()
+  /** The agent's own bags, by lookup id: never trimmed. */
+  readonly mine = new Map<string, OwnBag>()
+  /** The thing placed or moved most recently, kept with the own bags. */
+  lastPlaced: LastPlaced | null = null
 
   constructor(private readonly dir: StateDir) {
+    const own = dir.readJson<MineFile | null>(MINE_FILE, null)
+    if (own?.version === 1) for (const b of own.bags) this.mine.set(b.lookupId, b)
+    this.lastPlaced = own?.last ?? null
     const keys = dir.readJson<KeysFile | null>(KEYS_FILE, null)
     if (keys?.version === 1) for (const k of keys.keys) this.keys.set(k.lookupId, k)
     const bags = dir.readJson<BagsFile | null>(BAGS_FILE, null)
@@ -320,6 +355,48 @@ export class KeyStore {
 
   forgetBag(lookupId: string): void {
     if (this.bags.delete(lookupId)) this.saveBags()
+  }
+
+  /**
+   * Record a version of one of the agent's own bags: written (`bagId`), or
+   * taken down (`deleted`). `at` is its created_at. The newest stands, so a
+   * record never moves backwards.
+   */
+  noteOwnBag(key: Pick<HeldKey, 'lookupId' | 'keyHex' | 'height' | 'base'>, at: number, change: { bagId: string } | { deleted: true }): void {
+    const was = this.mine.get(key.lookupId)
+    const row: OwnBag = was ? { ...was } : { lookupId: key.lookupId, keyHex: key.keyHex, height: key.height, base: { ...key.base }, lastAt: 0 }
+    if ('bagId' in change) {
+      if (at >= row.lastAt) { row.lastAt = at; row.lastBagId = change.bagId }
+    } else {
+      row.deletedAt = Math.max(row.deletedAt ?? 0, at)
+    }
+    this.mine.set(key.lookupId, row)
+    this.saveMine()
+  }
+
+  private saveMine(): void {
+    this.dir.writeJson(MINE_FILE, { version: 1, bags: [...this.mine.values()], ...(this.lastPlaced ? { last: this.lastPlaced } : {}) } satisfies MineFile)
+  }
+
+  /** Remember the thing just placed or moved, by its bag and its entry key. */
+  notePlaced(lookupId: string, entryKey: string, at: number): void {
+    this.lastPlaced = { lookupId, entryKey, at }
+    this.saveMine()
+  }
+
+  /** The least created_at the next version of an own bag may carry: newer than every version and deletion this server signed. */
+  ownBagFloor(lookupId: string): number {
+    const b = this.mine.get(lookupId)
+    return b ? Math.max(b.lastAt, b.deletedAt ?? 0) + 1 : 0
+  }
+
+  /** An item the agent holds moved with the key item that carries it: the row follows the new event and place. */
+  movedItem(oldEventId: string, newEventId: string, place: ItemPlace): void {
+    let changed = false
+    for (const i of this.items.values()) {
+      if (i.eventId === oldEventId) { i.eventId = newEventId; i.place = place; changed = true }
+    }
+    if (changed) this.dir.writeJson(ITEMS_FILE, { version: 1, items: [...this.items.values()] } satisfies ItemsFile)
   }
 
   /** The opened bags whose cube contains the position. */
