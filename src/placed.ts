@@ -211,10 +211,9 @@ export class Placements {
     return normalizeURL(this.host.relays.canonical)
   }
 
-  /** Whether a deletion in the outbox counts: some relay took it, or it may still be taken (not dropped, not refused by every relay). */
+  /** Whether a deletion in the outbox counts: the canonical relay took it, or may still take it (not dropped, not refused there). A lesser relay taking it is not enough (review of #32, round 3). */
   private liveDeletion(o: OutboxEntry): boolean {
-    if (o.dropped) return false
-    return o.accepted.length > 0 || Object.keys(o.refused ?? {}).length < this.host.relays.urls.length
+    return !o.dropped && o.refused?.[this.canonical] === undefined
   }
 
   /** The least created_at the next version of an own bag may carry: newer than every version this server signed and every deletion of it it sent. */
@@ -531,8 +530,8 @@ export class Placements {
     this.host.keys.noteOwnDeletion(lookupId, at, false)
     const entry = this.host.outbox.add(event)
     await this.host.outbox.send(entry)
-    // Recorded as done only once a relay took it: one every relay refused leaves the bag listed, so it can be removed again (review of #32).
-    if (key && entry.accepted.length > 0) this.host.keys.noteOwnBag(key, at, { deleted: true })
+    // Recorded as done only once the canonical relay took it: one it refused leaves the bag listed, so it can be removed again (review of #32).
+    if (key && entry.accepted.includes(this.canonical)) this.host.keys.noteOwnBag(key, at, { deleted: true })
     const noted = this.host.keys.bags.get(lookupId)
     if (noted?.author === this.host.pubkey) this.host.keys.forgetBag(lookupId)
     return { event, entry }

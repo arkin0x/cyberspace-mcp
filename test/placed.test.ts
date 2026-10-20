@@ -379,6 +379,20 @@ describe('when a relay refuses or is silent', () => {
     expect(bagsOn(s.mine, s.a.pubkey).has(key(BASE, 8).lookupId)).toBe(false)
   }, 60_000)
 
+  it('a deletion only a lesser relay took leaves the bag listed while the canonical relay serves it', async () => {
+    const s = await setup()
+    await s.call('hide', { contents: { message: 'still on canonical' }, ...at(0n), height: 8 })
+    s.canonical.policy.refuse = (ev) => (ev.kind === 5 ? 'blocked: no deletions here' : null)
+    const r = await s.call('remove_placed', { target: 'still on canonical' })
+    expect(r.text).toContain('blocked: no deletions here')
+    expect(bagsOn(s.mine, s.a.pubkey).has(key(BASE, 8).lookupId)).toBe(false)
+    expect(rowsOf(await s.call('placed')).map((x) => x.label)).toEqual(['still on canonical'])
+    s.canonical.policy.refuse = () => null
+    const again = await s.call('remove_placed', { target: 'still on canonical' })
+    expect(again.isError).toBe(false)
+    expect(bagsOn(s.canonical, s.a.pubkey).has(key(BASE, 8).lookupId)).toBe(false)
+  }, 60_000)
+
   it('refuses to rewrite when the canonical relay is silent, though another relay answers', async () => {
     const s = await setup()
     await s.call('hide', { contents: { message: 'keep' }, ...at(0n), height: 8 })
