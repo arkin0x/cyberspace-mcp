@@ -6,7 +6,8 @@
 // (this server copies nothing), and the LIVE LINK bookkeeping of the deploy
 // bar; everything that reads or writes a bag is kept.
 //
-// A hidden thing is a full signed nostr event, wrapped: the inner event is
+// A hidden thing is a nostr event, wrapped: signed, or for a message an
+// unsigned rumor (2026-10-20, innerAuthentic). The inner event is
 // serialized, encrypted to the region key for where it sits (spec 7), and
 // carried inside a kind 33330 envelope (spec 8.6) whose only public parts
 // are the lookup id and a height hint. A bag is a list of entries (spec
@@ -66,8 +67,14 @@ const REFERENCE_CONCURRENCY = 4
 
 /** A reference entry (spec 7.6): ["a" | "e", target, relay hint, coord hex]. */
 export type Reference = string[]
-/** One entry of a bag's list: an inline item, or a reference. */
-export type BagEntry = NostrEvent | Reference
+/**
+ * An event as a bag or a chest carries it: signed, or a rumor with no `sig`
+ * (a chat line, and a message since 2026-10-20). A signed event is one of
+ * these too.
+ */
+export type Rumor = Omit<NostrEvent, 'sig'> & { sig?: string }
+/** One entry of a bag's list: an inline item, signed or a rumor, or a reference. */
+export type BagEntry = NostrEvent | Rumor | Reference
 /** Fetches the event a reference names, or null. Injected so this file stays pure. */
 export type ResolveReference = (ref: Reference) => Promise<NostrEvent | null>
 
@@ -250,8 +257,12 @@ export function messagePreview(text: string, max = 48): string {
 export interface Hidden {
   /** The item's stable identity: its inner event id, or for a public reference the bag and the entry. */
   eventId: string
-  /** The signed inner event itself, verified. */
-  inner: NostrEvent
+  /**
+   * The inner event itself, verified (innerAuthentic): signed, or for a
+   * message a rumor with no `sig`, vouched for by the bag's signature. For
+   * a reference, the referenced event, which is always signed.
+   */
+  inner: Rumor
   /** The region key that opened its bag, as hex. */
   keyHex: string
   bagId: string
@@ -272,23 +283,43 @@ export interface Hidden {
   ref?: Reference
 }
 
-/** The inner shard event template (kind 3330), signed by the author. */
+/**
+ * NIP-70's protected tag (ONOSENDAI #409). Every item sealed in a bag or a
+ * chest carries it (arkinox, 2026-10-20): a relay that honours it accepts
+ * the event only from its author, so a finder cannot republish the hider's
+ * item. Never on what is published on its own (a kind 33331 object, which
+ * others place by reference), never on the envelope, never on chat.
+ */
+export const PROTECTED_TAG: readonly string[] = ['-']
+
+/** Whether a list of tags carries NIP-70's `-`. */
+export function isProtectedTags(tags: readonly (readonly string[])[]): boolean {
+  return tags.some((t) => Array.isArray(t) && t[0] === '-')
+}
+
+/** The inner shard event template (kind 3330), signed by the author, with NIP-70's `-`. */
 export function shardInnerTemplate(shard: ShardModel, at: Position, plane: Plane, createdAt: number): EventTemplate {
   return {
     kind: SHARD_KIND,
     created_at: createdAt,
     content: JSON.stringify(toPayload(shard)),
-    tags: [['C', positionHex(at, plane)]],
+    tags: [['C', positionHex(at, plane)], [...PROTECTED_TAG]],
   }
 }
 
-/** The inner message event template (kind 1), signed by the author. */
+/**
+ * The inner message event template (kind 1), with NIP-70's `-`. It is
+ * sealed as a rumor (rumorOf), never signed: a signed kind 1 lifted out of
+ * the bag would show anywhere as the hider's own public note, with the exact
+ * coordinate it was hidden at, and a rumor proves nothing once copied
+ * (arkinox, 2026-10-20). This holds in a chest as in a bag.
+ */
 export function messageInnerTemplate(text: string, at: Position, plane: Plane, createdAt: number): EventTemplate {
   return {
     kind: MESSAGE_KIND,
     created_at: createdAt,
     content: text.slice(0, MAX_MESSAGE_LENGTH),
-    tags: [['C', positionHex(at, plane)]],
+    tags: [['C', positionHex(at, plane)], [...PROTECTED_TAG]],
   }
 }
 
@@ -305,13 +336,18 @@ export function keyInnerTemplate(key: KeyItem, at: Position, plane: Plane, creat
   return { kind: KEY_KIND, created_at: createdAt, content: key.about.slice(0, MAX_ABOUT), tags }
 }
 
-/** The inner chest event template (kind 3341), signed by the hider (B1 2.2). */
+/**
+ * The inner chest event template (kind 3341), signed by the hider (B1 2.2),
+ * with NIP-70's `-` as every item. A chest stays signed: its signature is
+ * what vouches for the messages sealed inside it, which are rumors
+ * (hidden/chests.ts readContents).
+ */
 export function chestInnerTemplate(chest: ChestItem, at: Position, plane: Plane, createdAt: number): EventTemplate {
   return {
     kind: CHEST_KIND,
     created_at: createdAt,
     content: chest.payload,
-    tags: [['C', positionHex(at, plane)], ['title', chest.name.slice(0, MAX_ITEM_NAME)], ['lock', chest.lockPubkey, chest.senderPubkey], ['requires', chest.requires]],
+    tags: [['C', positionHex(at, plane)], ['title', chest.name.slice(0, MAX_ITEM_NAME)], ['lock', chest.lockPubkey, chest.senderPubkey], ['requires', chest.requires], [...PROTECTED_TAG]],
   }
 }
 
@@ -333,12 +369,49 @@ export function chatInnerTemplate(text: string, at: Position, plane: Plane, crea
  * a rumor cannot be republished as a valid event. The envelope, which the
  * speaker signs, vouches for who said it (chatInners).
  */
-export type ChatRumor = Omit<NostrEvent, 'sig'> & { sig?: string }
+export type ChatRumor = Rumor
 
-/** Seal-ready rumor of a chat template, said by `pubkey`. */
-export function chatRumor(template: EventTemplate, pubkey: string): ChatRumor {
+/**
+ * Seal-ready rumor of a template, by `pubkey`: its id computed as NIP-01
+ * computes it, and no signature. A chat line and a message are sealed this
+ * way; `pubkey` must be the key that signs the envelope (or the chest) that
+ * carries it, or no reader will accept it.
+ */
+export function rumorOf(template: EventTemplate, pubkey: string): Rumor {
   const unsigned = { kind: template.kind, created_at: template.created_at, tags: template.tags, content: template.content, pubkey }
   return { ...unsigned, id: getEventHash(unsigned) }
+}
+
+/** Seal-ready rumor of a chat template, said by `pubkey`. */
+export const chatRumor: (template: EventTemplate, pubkey: string) => ChatRumor = rumorOf
+
+/**
+ * Whether a rumor is what it says: its fields have their types and its `id`
+ * is the hash of them (NIP-01). Says nothing of who wrote it; that is the
+ * signer of whatever carries it.
+ */
+export function rumorHolds(ev: Partial<Rumor>): boolean {
+  if (typeof ev.kind !== 'number' || typeof ev.created_at !== 'number' || typeof ev.content !== 'string' || typeof ev.pubkey !== 'string' || typeof ev.id !== 'string') return false
+  if (!Array.isArray(ev.tags) || !ev.tags.every((t) => Array.isArray(t) && t.every((v) => typeof v === 'string'))) return false
+  try {
+    return getEventHash({ kind: ev.kind, created_at: ev.created_at, tags: ev.tags, content: ev.content, pubkey: ev.pubkey }) === ev.id
+  } catch { return false }
+}
+
+/**
+ * Whether an inline item of a bag is authentic for the key that signed the
+ * bag (ONOSENDAI innerAuthentic, #409; arkinox, 2026-10-20). Its `pubkey`
+ * must be the bag's signer, always. Then a message (kind 1) with no `sig`
+ * is a rumor, accepted when its id is its hash, its author vouched for by
+ * the bag's signature; anything that carries a `sig` must verify, so a
+ * signed message from before 2026-10-20 still reads; any other kind without
+ * a `sig` is dropped.
+ */
+export function innerAuthentic(inner: Partial<Rumor>, signer: string): boolean {
+  if (!inner || typeof inner !== 'object' || Array.isArray(inner) || typeof inner.kind !== 'number' || inner.pubkey !== signer) return false
+  // No `sig`, or an empty one, is unsigned (spec 7.6), as the chest reader has it.
+  if (inner.sig === undefined || inner.sig === '') return inner.kind === MESSAGE_KIND && rumorHolds(inner)
+  return isAuthentic(inner as NostrEvent)
 }
 
 /**
@@ -368,7 +441,10 @@ export function editedTemplate(next: EventTemplate, previous: Pick<NostrEvent, '
   const at = next.tags.find((t) => t[0] === 'C')
   const lineage = itemLineage(previous) ?? previous.id
   const kept = previous.tags.filter((t) => t[0] !== 'C' && t[0] !== 'd')
-  return { ...next, tags: [...(at ? [at] : []), ['d', lineage], ...kept] }
+  // NIP-70's `-` goes out when `next` carries it, so an item hidden before
+  // every item carried it gains it on its first move, and never twice.
+  const protect = isProtectedTags(next.tags) && !isProtectedTags(kept) ? [[...PROTECTED_TAG]] : []
+  return { ...next, tags: [...(at ? [at] : []), ['d', lineage], ...kept, ...protect] }
 }
 
 /**
@@ -449,7 +525,7 @@ export async function bagTemplate(entries: readonly (BagEntry | ChatRumor)[], re
   return { kind, created_at: createdAt, content: settings.riddle.trim().slice(0, MAX_RIDDLE_LENGTH), tags }
 }
 
-function tag(ev: NostrEvent, name: string): string | undefined {
+function tag(ev: Pick<NostrEvent, 'tags'>, name: string): string | undefined {
   return ev.tags.find((t) => t[0] === name)?.[1]
 }
 
@@ -470,10 +546,9 @@ export function heightHint(ev: NostrEvent): number | null {
 
 interface BagFacts { height: number; bag: BagSettings }
 
-/** One inner event of a bag -> a Hidden, or null if it does not verify or was not signed by the bag's author. */
-function fromInner(inner: NostrEvent, outer: NostrEvent, keyHex: string, facts: BagFacts): Hidden | null {
-  if (!inner || typeof inner.kind !== 'number' || inner.pubkey !== outer.pubkey) return null
-  if (!isAuthentic(inner)) return null
+/** One inner event of a bag -> a Hidden, or null if it is not authentic for the bag's author (innerAuthentic). */
+function fromInner(inner: Rumor, outer: NostrEvent, keyHex: string, facts: BagFacts): Hidden | null {
+  if (!innerAuthentic(inner, outer.pubkey)) return null
   const coordHex = tag(inner, 'C')
   if (!coordHex) return null
   const { x, y, z, plane } = coordToXyz(hexToCoord(coordHex))
@@ -511,7 +586,7 @@ export async function unbag(outer: NostrEvent, regionKey: Uint8Array, resolve?: 
   const keyHex = bytesToHex(regionKey)
   const regionHeight = height ?? heightHint(outer) ?? 0
   const facts: BagFacts = { height: regionHeight, bag: bagSettingsOf(outer, regionHeight) }
-  const out: (Hidden | null)[] = entries.map((entry) => (Array.isArray(entry) ? null : fromInner(entry as NostrEvent, outer, keyHex, facts)))
+  const out: (Hidden | null)[] = entries.map((entry) => (Array.isArray(entry) ? null : fromInner(entry as Rumor, outer, keyHex, facts)))
   if (resolve) {
     const refs = entries.map((e, i) => [e, i] as const).filter(([e]) => isReference(e)).slice(0, MAX_REFERENCES_PER_BAG)
     let next = 0

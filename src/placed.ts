@@ -34,12 +34,12 @@
 
 import { coordToXyz, hexToCoord, type Plane } from 'cyberspace-core'
 import {
-  HIDDEN_KIND, OBJECT_KIND, bagSettingsOf, bagTemplate, ciphertextOf, editedTemplate, entryKey, isReference, itemLineage, messagePreview, resealedObject, unbag,
-  type BagEntry, type BagSettings, type Hidden, type HiddenType, type Reference,
+  HIDDEN_KIND, MESSAGE_KIND, OBJECT_KIND, PROTECTED_TAG, bagSettingsOf, bagTemplate, ciphertextOf, editedTemplate, entryKey, isReference, itemLineage, messagePreview, resealedObject, rumorOf, unbag,
+  type BagEntry, type BagSettings, type Hidden, type HiddenType, type Reference, type Rumor,
 } from './hidden/bags.js'
 import { decryptForRegion } from './hidden/crypto.js'
 import { hintFits } from './hidden/hint.js'
-import { hexToBytes, nowSeconds, type EventTemplate, type NostrEvent } from './nostr/event.js'
+import { attributed, hexToBytes, nowSeconds, type EventTemplate, type NostrEvent } from './nostr/event.js'
 import type { Outbox, OutboxEntry } from './nostr/outbox.js'
 import { mergeAnswers, type RelayAnswer } from './nostr/relayOutcome.js'
 import { normalizeURL } from 'nostr-tools/utils'
@@ -150,6 +150,17 @@ function mergeEntries(a: BagEntry[], b: BagEntry[]): BagEntry[] {
   const out = a.slice()
   for (const e of b) { const k = entryKey(e); if (!seen.has(k)) { seen.add(k); out.push(e) } }
   return out
+}
+
+/**
+ * The event a reference entry names, as the signed event it always is: an
+ * object hidden by reference is published on its own, so it was signed here
+ * or verified with its signature when it was read (bags.ts fromReference).
+ * Only an item carried inline, a message, is ever a rumor. For a row whose
+ * entry is a reference only.
+ */
+function referenced(inner: Rumor): NostrEvent {
+  return inner as NostrEvent
 }
 
 function dOf(ev: Pick<NostrEvent, 'tags'>): string {
@@ -577,7 +588,7 @@ export class Placements {
     if (reading.unopened.length > 0 || reading.silent.length > 0) return ' Its sealed object (kind 33331) was left up: not every bag of yours could be read, so another may still name it.'
     const named = Placements.rows(reading).some((r) => r.objectAddress === row.objectAddress && !goneFrom.has(`${r.bag.lookupId}/${r.key}`))
     if (named) return ' Its sealed object stays: another of your placements names it.'
-    const still = await this.addressStillThis(object)
+    const still = await this.addressStillThis(referenced(object))
     if (still !== 'this') return ` Its sealed object was left up: ${still === 'newer' ? 'the relays hold a newer version of it' : 'no relay answered about it'}.`
     const del = this.host.sign({ kind: 5, created_at: nowSeconds(), content: 'hidden object removed', tags: [['a', row.objectAddress], ['e', object.id], ['k', String(OBJECT_KIND)]] })
     const entry = this.host.outbox.add(del)
@@ -714,12 +725,16 @@ export class Placements {
       let object: NostrEvent | null = null
       let rollback: NostrEvent | null = null
       if (!isReference(was)) {
-        const inner = was as NostrEvent
-        moved = this.host.sign(editedTemplate({ kind: inner.kind, created_at: now, content: inner.content, tags: [['C', dest.hex]] }, inner))
+        const inner = was as Rumor
+        // The moved version carries `-` (a version from before 2026-10-20
+        // gains it once), and a message goes out as a rumor, never signed,
+        // as when it was hidden (ONOSENDAI #409).
+        const next = editedTemplate({ kind: inner.kind, created_at: now, content: inner.content, tags: [['C', dest.hex], [...PROTECTED_TAG]] }, inner)
+        moved = inner.kind === MESSAGE_KIND ? rumorOf(attributed(next), this.host.pubkey) : this.host.sign(next)
       } else {
         const ref = was as Reference
         if (sealedOwn && !sameBag) {
-          const old = row.hidden!.inner
+          const old = referenced(row.hidden!.inner)
           const still = await this.addressStillThis(old)
           if (still !== 'this') throw new Refusal(still === 'newer' ? 'The relays hold a newer version of that shard\'s object than the one in your bag (moved from somewhere else?). Nothing was changed; call placed again.' : 'No relay answered about that shard\'s object, so sealing it again could overwrite a version this server cannot see. Nothing was changed; try again shortly.')
           const objectAt = Math.max(now, old.created_at + 1)

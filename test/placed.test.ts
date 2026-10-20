@@ -18,9 +18,11 @@ import { join } from 'node:path'
 import { afterAll, beforeEach, describe, expect, it } from 'vitest'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
-import { generateSecretKey } from 'nostr-tools/pure'
+import { generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { Agent } from '../src/agent.js'
-import { bagTemplate, HIDDEN_KIND, messageInnerTemplate, unbag, type BagEntry } from '../src/hidden/bags.js'
+import { bagTemplate, chestInnerTemplate, HIDDEN_KIND, messageInnerTemplate, rumorOf, unbag, type BagEntry } from '../src/hidden/bags.js'
+import { sealEntries } from '../src/hidden/chests.js'
+import { spawnPlace } from '../src/space/coords.js'
 import { regionKeyAt } from '../src/hidden/crypto.js'
 import { readComment } from '../src/hidden/comments.js'
 import { decryptForRegion } from '../src/hidden/crypto.js'
@@ -539,5 +541,102 @@ describe('a restart', () => {
     s = await restart(s)
     expect(s.a.keys.putBacks).toEqual([])
     expect(s.a.outbox.entries.some((e) => e.event.id === rollback.id)).toBe(false)
+  }, 60_000)
+})
+
+describe('what the agent hides and moves follows the rules of 2026-10-20 (`-`, messages as rumors)', () => {
+  let s: Awaited<ReturnType<typeof setup>>
+  beforeEach(async () => { s = await setup() })
+
+  it('hide writes a message as a rumor with `-`, an object signed with `-`; a move keeps the message a rumor and gives a signed message from before `-` once', async () => {
+    await s.call('hide', { contents: { message: 'no proof of me' }, ...at(0n), height: 8 })
+    await s.call('hide', { contents: { object: tetra }, ...at(1n), height: 8 })
+    const k = key(BASE, 8)
+    const current = bagsOn(s.mine, s.a.pubkey).get(k.lookupId)!
+    const entries = await entriesOf(current, k.key) as Array<Record<string, unknown> & { kind: number; tags: string[][]; id: string; pubkey: string }>
+    const msg = entries.find((e) => e.kind === 1)!
+    expect('sig' in msg).toBe(false)
+    expect(msg.pubkey).toBe(s.a.pubkey)
+    expect(msg.tags.map((t) => t[0])).toEqual(['C', '-', 'client'])
+    const obj = entries.find((e) => e.kind === 3330)!
+    expect(typeof obj.sig).toBe('string')
+    expect(obj.tags.filter((t) => t[0] === '-')).toHaveLength(1)
+    // The bag reads both, the rumor as the agent's.
+    const read = await unbag(current, k.key, undefined, undefined, 8)
+    expect(read.map((h) => [h.type, h.author])).toEqual([['message', s.a.pubkey], ['shard', s.a.pubkey]])
+
+    // A signed message hidden before 2026-10-20, with no `-`, as another session wrote it.
+    const legacy = signEvent({ kind: 1, created_at: current.created_at, content: 'signed long ago', tags: [['C', read[0].inner.tags[0][1].replace(/.$/, (c) => (c === '0' ? '1' : '0'))]] }, s.sk)
+    const withLegacy = signEvent(await bagTemplate([...entries as BagEntry[], legacy], k.key, k.lookupId, 8, current.created_at + 5, HIDDEN_KIND), s.sk)
+    s.mine.seed(withLegacy)
+    s.canonical.seed(withLegacy)
+    expect((await unbag(withLegacy, k.key, undefined, undefined, 8)).map((h) => h.text ?? h.shard?.name)).toContain('signed long ago')
+
+    for (const [target, old] of [['no proof of me', msg.id], ['signed long ago', legacy.id]] as const) {
+      const r = await s.call('move_placed', { target, by: { dx: 1 } })
+      expect(r.isError, target).toBe(false)
+      const now = bagsOn(s.mine, s.a.pubkey).get(k.lookupId)!
+      const moved = (await entriesOf(now, k.key) as Array<Record<string, unknown> & { kind: number; content: string; tags: string[][] }>).find((e) => e.kind === 1 && e.content === target)!
+      expect('sig' in moved, target).toBe(false)
+      expect(moved.tags.filter((t) => t[0] === '-'), target).toHaveLength(1)
+      expect(moved.tags.find((t) => t[0] === 'd'), target).toEqual(['d', old])
+      expect((await unbag(now, k.key, undefined, undefined, 8)).some((h) => h.text === target && h.author === s.a.pubkey), target).toBe(true)
+    }
+    // Dumped for a cross-check with ONOSENDAI's own reader, when asked.
+    if (process.env.PROTECT_INTEROP_DUMP) writeFileSync(process.env.PROTECT_INTEROP_DUMP, JSON.stringify({ bag: bagsOn(s.mine, s.a.pubkey).get(k.lookupId)!, keyHex: bytesToHex(k.key), height: 8 }))
+  }, 60_000)
+
+  it('a chest inside a chest vouches for its rumors only when its own author is a fact', async () => {
+    const lock = await s.call('forge_item', { name: 'Iron Key', height: 5 })
+    expect(lock.isError).toBe(false)
+    const lockPub = (lock.data.item as { itemPubkey: string }).itemPubkey
+    const other = generateSecretKey()
+    const otherPub = getPublicKey(other)
+    const here = spawnPlace(s.a.pubkey)
+    const T = nowSeconds()
+    const innerChest = (inner: BagEntry[], name: string, signedBy?: Uint8Array): BagEntry => {
+      const sealed = sealEntries(inner, lockPub)
+      const t = chestInnerTemplate({ name, lockPubkey: lockPub, senderPubkey: sealed.senderPubkey, requires: '', payload: sealed.payload }, here.position, here.plane, T)
+      return signedBy ? signEvent(t, signedBy) : rumorOf(t, otherPub)
+    }
+    // Another key's rumor, inside an UNSIGNED chest claiming that key: nobody vouches for it.
+    const forged = innerChest([rumorOf(messageInnerTemplate('I am someone else', here.position, here.plane, T), otherPub)], 'Forged Box')
+    // The same, inside a chest that key really signed: its signature vouches for it.
+    const real = innerChest([rumorOf(messageInnerTemplate('I really am', here.position, here.plane, T), otherPub)], 'Real Box', other)
+    const outerSealed = sealEntries([forged, real], lockPub)
+    const outer = signEvent(chestInnerTemplate({ name: 'Outer', lockPubkey: lockPub, senderPubkey: outerSealed.senderPubkey, requires: '', payload: outerSealed.payload }, here.position, here.plane, T), s.sk)
+    const k = regionKeyAt(here.position, 6, 20)
+    const bag = signEvent(await bagTemplate([outer], k.key, k.lookupId, 6, T, HIDDEN_KIND), s.sk)
+    s.mine.seed(bag)
+    s.canonical.seed(bag)
+    await s.call('find', {})
+    const o = await s.call('open_chest', { chest: outer.id.slice(0, 12) })
+    expect(o.isError, o.text).toBe(false)
+    const ids = new Map([...s.a.keys.chests.values()].filter((c) => c.inChest === outer.id).map((c) => [c.name, c]))
+    expect(ids.get('Forged Box')?.vouches).toBeUndefined()
+    expect(ids.get('Real Box')?.vouches).toBe(true)
+    const f = await s.call('open_chest', { chest: ids.get('Forged Box')!.id.slice(0, 12) })
+    expect(f.text).toContain('I am someone else')
+    expect(f.text).toContain('the author is a claim')
+    const r = await s.call('open_chest', { chest: ids.get('Real Box')!.id.slice(0, 12) })
+    expect(r.text).toContain('I really am')
+    expect(r.text).not.toContain('the author is a claim')
+  }, 60_000)
+
+  it('seal_chest writes its messages as rumors; open_chest and take say the chest vouches for them', async () => {
+    const lock = await s.call('forge_item', { name: 'Tin Key', height: 5, coordinate: P })
+    expect(lock.isError).toBe(false)
+    const sealed = await s.call('seal_chest', { name: 'Tin Box', lock: 'tin key', contents: [{ message: 'vouched for by the box' }], height: 5, coordinate: { ...P, z: (BASE + 1n).toString() } })
+    expect(sealed.isError).toBe(false)
+    const chestId = (sealed.data.chest as { id: string }).id
+    await s.call('find', {})
+    const opened = await s.call('open_chest', { chest: chestId.slice(0, 12) })
+    expect(opened.isError).toBe(false)
+    expect(opened.text).toContain('vouched for by the box')
+    expect(opened.text).not.toContain('the author is a claim')
+    const took = await s.call('take', { chest: chestId.slice(0, 12) })
+    expect(took.isError).toBe(false)
+    const row = (took.data.took as Array<{ type: string; verified: boolean }>)[0]
+    expect(row).toMatchObject({ type: 'message', verified: true })
   }, 60_000)
 })

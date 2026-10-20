@@ -57,7 +57,7 @@ export interface ContentRow {
   lock?: string
   requires?: string
   author: string
-  /** The content was signed and the signature checked; otherwise its author is a claim. */
+  /** The content was signed and the signature checked, or is a message the chest's signer wrote as a rumor (vouched for by the chest); otherwise its author is a claim. */
   verified: boolean
   purpose: string
 }

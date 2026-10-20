@@ -1,0 +1,412 @@
+{
+  "note": "Made with ONOSENDAI #409 (merged as 4a85a04: src/lib/hidden.ts, chests.ts, client.ts) by scripts/gen-onosendai-protected-fixture.ts run in an ONOSENDAI checkout, with test keys only. \"templates\" are ONOSENDAI's inner templates for fixed inputs, its rumor of the message, and two moves through its editedTemplate. \"bag\" is a kind 33330 ONOSENDAI sealed at the test agent's spawn, h6: a message as a rumor (tags C and -, as ONOSENDAI writes it), a shard, a key item (Brass Key), a chest locked to it (a rumor message, a signed message from before 2026-10-20, the next key), and a signed message from before. \"onosendaiRead\" is what ONOSENDAI's unbag and readContents made of it. \"mcpBag\" was written by cyberspace-mcp's code at generation time (a rumor message, a key, a chest holding a rumor and a shard, and a legacy signed message moved as a rumor); \"reverse\" is what ONOSENDAI's readers made of it.",
+  "onosendai": "4a85a04 (#409)",
+  "agentSecretHex": "9192da9807130e5cfd91759caee19709b11b4b62cb77332f83449158cd97c4fe",
+  "agent": "0b38cd21c22982e7effa78ff86a55a97eb97765ff62f3475560d9c24fac5ca03",
+  "hider": "1042f77e0d679735b95306341b7ac30b8d38a23f3ef1d5f2f48e551b89aa83ba",
+  "height": 6,
+  "lookupId": "d8898b1a56c299ae905ead0a37823a70a712dca5c215a122341343da9f813185",
+  "regionKeyHex": "0de9a3861953ec9ab1b143fbbad16a20636ad28ba230b65e3f7b80da9a474dcc",
+  "at": {
+    "x": "6206794385994207602778932",
+    "y": "17548382657296322798928536",
+    "z": "3576712053275273655246753",
+    "plane": 1
+  },
+  "brassSecretHex": "e51068af64fa1e110d091f49f90396ea31cd7e929c5bb55327c29533133af082",
+  "copperSecretHex": "14be010fc981f6b9ac01f7e91fbf74f6a3f874e1b50147c67bad5a2a8829ac3c",
+  "templates": {
+    "shard": {
+      "kind": 3330,
+      "created_at": 1792500000,
+      "content": "{\"v\":2,\"name\":\"XOR stella octangula\",\"unit\":0,\"extent\":1,\"mode\":\"solid\",\"vertices\":[[1,1,-1],[1,-1,1],[-1,1,1],[-1,-1,-1],[1,1,1],[1,-1,-1],[-1,1,-1],[-1,-1,1]],\"ticks\":[-8],\"palette\":[[39,255,102],[170,68,255]],\"colors\":[0,0,0,0,1,1,1,1],\"faces\":[[1,3,2],[0,2,3],[0,3,1],[0,1,2],[5,6,7],[4,7,6],[4,5,7],[4,6,5]]}",
+      "tags": [
+        [
+          "C",
+          "0b38cd21c22982e7effa78ff86a55a97eb97765ff62f3475560d9c24fac5ca03"
+        ],
+        [
+          "-"
+        ]
+      ]
+    },
+    "message": {
+      "kind": 1,
+      "created_at": 1792500000,
+      "content": "A fixed message.",
+      "tags": [
+        [
+          "C",
+          "0b38cd21c22982e7effa78ff86a55a97eb97765ff62f3475560d9c24fac5ca03"
+        ],
+        [
+          "-"
+        ]
+      ]
+    },
+    "messageRumor": {
+      "kind": 1,
+      "created_at": 1792500000,
+      "tags": [
+        [
+          "C",
+          "0b38cd21c22982e7effa78ff86a55a97eb97765ff62f3475560d9c24fac5ca03"
+        ],
+        [
+          "-"
+        ]
+      ],
+      "content": "A fixed message.",
+      "pubkey": "1042f77e0d679735b95306341b7ac30b8d38a23f3ef1d5f2f48e551b89aa83ba",
+      "id": "220d8034ef4f2fc270fe4f4d00b4f26e03575b1cbf71fc7484523d8bae3aba7f"
+    },
+    "key": {
+      "kind": 3340,
+      "created_at": 1792500000,
+      "content": "A fixed sentence.",
+      "tags": [
+        [
+          "C",
+          "0b38cd21c22982e7effa78ff86a55a97eb97765ff62f3475560d9c24fac5ca03"
+        ],
+        [
+          "title",
+          "Fixed"
+        ],
+        [
+          "item",
+          "82cbd5796718570bbe8e0f3209cb94e36551511a89702ec3d13363a759a81c32"
+        ],
+        [
+          "secret",
+          "e51068af64fa1e110d091f49f90396ea31cd7e929c5bb55327c29533133af082"
+        ],
+        [
+          "-"
+        ]
+      ]
+    },
+    "chest": {
+      "kind": 3341,
+      "created_at": 1792500000,
+      "content": "PAYLOAD",
+      "tags": [
+        [
+          "C",
+          "0b38cd21c22982e7effa78ff86a55a97eb97765ff62f3475560d9c24fac5ca03"
+        ],
+        [
+          "title",
+          "Fixed Chest"
+        ],
+        [
+          "lock",
+          "82cbd5796718570bbe8e0f3209cb94e36551511a89702ec3d13363a759a81c32",
+          "82cbd5796718570bbe8e0f3209cb94e36551511a89702ec3d13363a759a81c32"
+        ],
+        [
+          "requires",
+          "the Fixed"
+        ],
+        [
+          "-"
+        ]
+      ]
+    },
+    "chestInput": {
+      "name": "Fixed Chest",
+      "lockPubkey": "82cbd5796718570bbe8e0f3209cb94e36551511a89702ec3d13363a759a81c32",
+      "senderPubkey": "82cbd5796718570bbe8e0f3209cb94e36551511a89702ec3d13363a759a81c32",
+      "requires": "the Fixed",
+      "payload": "PAYLOAD"
+    },
+    "keyInput": {
+      "name": "Fixed",
+      "about": "A fixed sentence.",
+      "itemPubkey": "82cbd5796718570bbe8e0f3209cb94e36551511a89702ec3d13363a759a81c32",
+      "secretHex": "e51068af64fa1e110d091f49f90396ea31cd7e929c5bb55327c29533133af082"
+    },
+    "edited": [
+      {
+        "name": "legacy message moved",
+        "next": {
+          "kind": 1,
+          "created_at": 1792500001,
+          "content": "hidden before 2026-10-20",
+          "tags": [
+            [
+              "C",
+              "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            ],
+            [
+              "-"
+            ]
+          ]
+        },
+        "previous": {
+          "id": "86c7945bd482aeff09e31d144185455ee962f4b8a50439671ac2675b5e1352d9",
+          "kind": 1,
+          "tags": [
+            [
+              "C",
+              "0000000000000000000000000000000000000000000000000000000000000000"
+            ]
+          ]
+        },
+        "onosendai": {
+          "kind": 1,
+          "created_at": 1792500001,
+          "content": "hidden before 2026-10-20",
+          "tags": [
+            [
+              "C",
+              "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            ],
+            [
+              "d",
+              "86c7945bd482aeff09e31d144185455ee962f4b8a50439671ac2675b5e1352d9"
+            ],
+            [
+              "-"
+            ]
+          ]
+        }
+      },
+      {
+        "name": "protected shard moved",
+        "next": {
+          "kind": 3330,
+          "created_at": 1792500001,
+          "content": "{}",
+          "tags": [
+            [
+              "C",
+              "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            ],
+            [
+              "-"
+            ]
+          ]
+        },
+        "previous": {
+          "id": "abababababababababababababababababababababababababababababababab",
+          "kind": 3330,
+          "tags": [
+            [
+              "C",
+              "0000000000000000000000000000000000000000000000000000000000000000"
+            ],
+            [
+              "-"
+            ],
+            [
+              "client",
+              "ONOSENDAI"
+            ]
+          ]
+        },
+        "onosendai": {
+          "kind": 3330,
+          "created_at": 1792500001,
+          "content": "{}",
+          "tags": [
+            [
+              "C",
+              "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            ],
+            [
+              "d",
+              "abababababababababababababababababababababababababababababababab"
+            ],
+            [
+              "-"
+            ],
+            [
+              "client",
+              "ONOSENDAI"
+            ]
+          ]
+        }
+      }
+    ]
+  },
+  "bag": {
+    "kind": 33330,
+    "created_at": 1792500000,
+    "content": "",
+    "tags": [
+      [
+        "d",
+        "d8898b1a56c299ae905ead0a37823a70a712dca5c215a122341343da9f813185"
+      ],
+      [
+        "encrypted",
+        "aes-256-gcm",
+        "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"
+      ],
+      [
+        "version",
+        "2"
+      ],
+      [
+        "h",
+        "6"
+      ],
+      [
+        "client",
+        "ONOSENDAI"
+      ]
+    ],
+    "pubkey": "1042f77e0d679735b95306341b7ac30b8d38a23f3ef1d5f2f48e551b89aa83ba",
+    "id": "8936dae98c47ca95ec8eb82ef95af1e63d78c56d4db9959162912550028a6fa7",
+    "sig": "c578ccc66becc23eb93a33ba94fc3a59032dda52e15ccb46bc6a17f5c8743cd77eb0e4fad210a8353fded6d0fbd41f33065383ca3fdfc36652b6a7787e146c80"
+  },
+  "onosendaiRead": {
+    "items": [
+      {
+        "type": "message",
+        "id": "9238a424066c23b8b7efb1b690d47184e660e3103200f2cbcbefd3998ce9ffc4",
+        "author": "1042f77e0d679735b95306341b7ac30b8d38a23f3ef1d5f2f48e551b89aa83ba",
+        "signed": false,
+        "protected": true,
+        "label": "Hidden as a rumor by ONOSENDAI."
+      },
+      {
+        "type": "shard",
+        "id": "e62f6f71f3f6218f3b0035a16dee857c1ed12bbd3ac20354a6ef9d088c3dbeab",
+        "author": "1042f77e0d679735b95306341b7ac30b8d38a23f3ef1d5f2f48e551b89aa83ba",
+        "signed": true,
+        "protected": true,
+        "label": "XOR stella octangula"
+      },
+      {
+        "type": "key",
+        "id": "a519047474334da298593840ab389a94025914eeb7da7aade200e8e3e1d1b9e4",
+        "author": "1042f77e0d679735b95306341b7ac30b8d38a23f3ef1d5f2f48e551b89aa83ba",
+        "signed": true,
+        "protected": true,
+        "label": "Brass Key"
+      },
+      {
+        "type": "chest",
+        "id": "ef2ab2e009db6184da20b5c1caa9e021aa626fe0847c543efc9daf82c43f535c",
+        "author": "1042f77e0d679735b95306341b7ac30b8d38a23f3ef1d5f2f48e551b89aa83ba",
+        "signed": true,
+        "protected": true,
+        "label": "Vault"
+      },
+      {
+        "type": "message",
+        "id": "ba74395fa519593f8d6ceee937c4d20d61a53c56ae3feb5488955b56bc3ae4eb",
+        "author": "1042f77e0d679735b95306341b7ac30b8d38a23f3ef1d5f2f48e551b89aa83ba",
+        "signed": true,
+        "protected": false,
+        "label": "signed, in the bag, from before"
+      }
+    ],
+    "vault": [
+      {
+        "type": "message",
+        "id": "3f5f93e3093c08d2fa9099b585bc21ce03bb9e0add120ed5a5dedd418c1257b4",
+        "verified": true,
+        "text": "The vault remembers."
+      },
+      {
+        "type": "message",
+        "id": "923505b273ff98728ad456a072908eb46a05a82ad9f4ea8614ea53fb835ddb14",
+        "verified": true,
+        "text": "hidden before 2026-10-20"
+      },
+      {
+        "type": "key",
+        "id": "a521ca258761b4f00020f57154261b3152b22be91d6b8725467dcf245f1d1f6b",
+        "verified": true,
+        "text": null
+      }
+    ]
+  },
+  "mcpBag": {
+    "id": "7848f14e9dae86c37b037df1aec0013780043f5176fffda8216e4e7e84a4cfd5",
+    "pubkey": "0b38cd21c22982e7effa78ff86a55a97eb97765ff62f3475560d9c24fac5ca03",
+    "created_at": 1792500000,
+    "kind": 33330,
+    "tags": [
+      [
+        "d",
+        "d8898b1a56c299ae905ead0a37823a70a712dca5c215a122341343da9f813185"
+      ],
+      [
+        "encrypted",
+        "aes-256-gcm",
+        "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"
+      ],
+      [
+        "version",
+        "2"
+      ],
+      [
+        "h",
+        "6"
+      ],
+      [
+        "client",
+        "cyberspace-mcp"
+      ]
+    ],
+    "content": "",
+    "sig": "cc3eec02be42e79623c567780177455dccdddd9d4b834b3555ad1da9a6b76feb1fbab630ce4fb2f44cfb6a86c7a373e8f65094885701b75559e98ed3c7c30c71"
+  },
+  "reverse": {
+    "items": [
+      {
+        "type": "message",
+        "id": "7e4e83095ee494116d03f25429cf480880b82617bb87f31b56d855aa0a8dd547",
+        "author": "0b38cd21c22982e7effa78ff86a55a97eb97765ff62f3475560d9c24fac5ca03",
+        "signed": false,
+        "protected": true,
+        "lineage": "7e4e83095ee494116d03f25429cf480880b82617bb87f31b56d855aa0a8dd547",
+        "label": "Hidden as a rumor by the agent."
+      },
+      {
+        "type": "key",
+        "id": "110bfc6b1ab3960a323583c9346d0b65350035cb78af39664c5d390e54ac87a8",
+        "author": "0b38cd21c22982e7effa78ff86a55a97eb97765ff62f3475560d9c24fac5ca03",
+        "signed": true,
+        "protected": true,
+        "lineage": "110bfc6b1ab3960a323583c9346d0b65350035cb78af39664c5d390e54ac87a8",
+        "label": "Copper Key"
+      },
+      {
+        "type": "chest",
+        "id": "ebb76e637e06bfd7f62dfd41a770b60979056d85e2ea5cd97cea9cb36b918e91",
+        "author": "0b38cd21c22982e7effa78ff86a55a97eb97765ff62f3475560d9c24fac5ca03",
+        "signed": true,
+        "protected": true,
+        "lineage": "ebb76e637e06bfd7f62dfd41a770b60979056d85e2ea5cd97cea9cb36b918e91",
+        "label": "Agent Chest"
+      },
+      {
+        "type": "message",
+        "id": "83ee65a3af6c455955bc63119bd2191859e9a99d08e9526b280a56e8c2cc3309",
+        "author": "0b38cd21c22982e7effa78ff86a55a97eb97765ff62f3475560d9c24fac5ca03",
+        "signed": false,
+        "protected": true,
+        "lineage": "6bc9a960a490e881f583de45782fc8d9d22cdac84c1bcae37220b2365d7ef992",
+        "label": "an agent note from before"
+      }
+    ],
+    "chest": [
+      {
+        "type": "message",
+        "verified": true,
+        "text": "Sealed by the agent."
+      },
+      {
+        "type": "shard",
+        "verified": true,
+        "text": null
+      }
+    ],
+    "movedLineage": "6bc9a960a490e881f583de45782fc8d9d22cdac84c1bcae37220b2365d7ef992"
+  }
+}

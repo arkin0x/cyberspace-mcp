@@ -16,7 +16,7 @@
 import { v2 as nip44 } from 'nostr-tools/nip44'
 import { generateSecretKey, getEventHash, getPublicKey } from 'nostr-tools/pure'
 import { bytesToHex, hexToBytes, isAuthentic, type NostrEvent } from '../nostr/event.js'
-import { isReference, readItem, type BagEntry, type ChestItem, type ItemBody, type KeyItem } from './bags.js'
+import { MESSAGE_KIND, isReference, readItem, type BagEntry, type ChestItem, type ItemBody, type KeyItem } from './bags.js'
 
 /** A new key item: a fresh keypair under a name (B1 3.1). */
 export function forgeKey(name: string, about = ''): KeyItem {
@@ -68,24 +68,50 @@ export function openWithSecret(chest: Pick<ChestItem, 'senderPubkey' | 'payload'
 export interface ChestEntry {
   id: string
   event: NostrEvent
-  /** The event carried a signature and it checked out; an unsigned item's author is a claim. */
+  /**
+   * Its author is a fact, not a claim: it carried a signature that checked
+   * out, or it is a message written as a rumor by the chest's own signer
+   * (readContents `sealer`). Otherwise its author is a claim.
+   */
   verified: boolean
   body: ItemBody
 }
 
-/** The readable contents of an opened chest. A signed item that fails to verify is dropped; a reference is skipped. */
-export function readContents(entries: BagEntry[]): ChestEntry[] {
+/** Whether an entry has the fields an event is read by, each of its type; a chest's plaintext may hold anything. */
+function wellFormed(ev: Partial<NostrEvent>): ev is NostrEvent {
+  return typeof ev.kind === 'number' && typeof ev.content === 'string' && typeof ev.created_at === 'number'
+    && typeof ev.pubkey === 'string' && /^[0-9a-f]{64}$/.test(ev.pubkey)
+    && Array.isArray(ev.tags) && ev.tags.every((t) => Array.isArray(t) && t.every((v) => typeof v === 'string'))
+}
+
+/**
+ * The readable contents of an opened chest (ONOSENDAI lib/chests.ts
+ * readContents, #409). A signed item (a non-empty `sig`) that fails to
+ * verify is dropped, and only that item; a reference is skipped; a kind
+ * this server does not read is skipped. An unsigned item is kept, and its
+ * id is its hash, whatever it claims. Its author is a fact only when it is
+ * a message written as a rumor by the chest's own signer: `sealer` is the
+ * chest's pubkey, given only when the chest itself was verified (found in a
+ * bag whose signer it is, or inside a chest that vouched for it), and the
+ * rumor's `pubkey` is that key and its `id` its hash (spec 7.6 Rumors).
+ * Any other unsigned item's author is a claim.
+ */
+export function readContents(entries: BagEntry[], sealer?: string): ChestEntry[] {
   const out: ChestEntry[] = []
   for (const e of entries) {
-    if (isReference(e)) continue
-    const ev = e as NostrEvent
-    const signed = typeof ev.sig === 'string' && ev.sig.length > 0
-    if (signed && !isAuthentic(ev)) continue
-    let id: string
-    try { id = typeof ev.id === 'string' && /^[0-9a-f]{64}$/.test(ev.id) ? ev.id : getEventHash(ev) } catch { continue }
-    const body = readItem({ ...ev, id })
-    if (!body) continue
-    out.push({ id, event: { ...ev, id, sig: signed ? ev.sig : '' }, verified: signed, body })
+    try {
+      if (isReference(e) || !wellFormed(e as Partial<NostrEvent>)) continue
+      const ev = e as NostrEvent
+      // Unsigned is no `sig`, or an empty one (spec 7.6), as the bag reader has it.
+      const signed = ev.sig !== undefined && ev.sig !== ''
+      const plain = { pubkey: ev.pubkey, created_at: ev.created_at, kind: ev.kind, tags: ev.tags, content: ev.content }
+      if (signed && !isAuthentic({ ...plain, id: ev.id, sig: ev.sig })) continue
+      const hash = signed ? ev.id : getEventHash(plain)
+      const vouched = !signed && ev.kind === MESSAGE_KIND && sealer !== undefined && ev.pubkey === sealer && ev.id === hash
+      const body = readItem({ ...plain, id: hash })
+      if (!body) continue
+      out.push({ id: hash, event: { ...plain, id: hash, sig: signed ? ev.sig : '' }, verified: signed || vouched, body })
+    } catch { continue }
   }
   return out
 }
