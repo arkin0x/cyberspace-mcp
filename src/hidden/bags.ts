@@ -28,6 +28,7 @@ import { bytesToHex, hexToBytes, isAuthentic, type EventTemplate, type NostrEven
 import { positionHex, type Position } from '../space/coords.js'
 import { ALGO, decryptForRegion, encryptForRegion } from './crypto.js'
 import { hintFits, hintTags, parseHint, type HintHeights } from './hint.js'
+import { animationOf, modelOf, modelTags, type ItemAnimation, type ItemModelRef } from './itemModel.js'
 
 /** The location-encrypted envelope (spec 8.6). */
 export const HIDDEN_KIND = 33330
@@ -161,6 +162,14 @@ export interface KeyItem {
   itemPubkey: string
   /** The item's private key, 64 lowercase hex. Holding it is holding the item. */
   secretHex: string
+  /**
+   * The SNO the item wears in cyberspace, by its address, and how it moves
+   * (hidden/itemModel.ts, ONOSENDAI#439). Optional; an item without a model
+   * is drawn as the note's cube. `animation` is only read or written with a
+   * model, and is absent when the model stands still.
+   */
+  model?: ItemModelRef
+  animation?: ItemAnimation[]
 }
 
 /** What a chest item carries (B1 2.2); the payload is still sealed. */
@@ -212,7 +221,15 @@ export function keyItemOf(ev: Pick<NostrEvent, 'kind' | 'content' | 'tags'>): Ke
   const about = tagged !== undefined
     ? ev.content.trim().replace(/\s+/g, ' ').slice(0, MAX_ABOUT)
     : capped(ev.tags, 'about', MAX_ABOUT)
-  return { name: nameOf(ev.tags, 'key'), about, itemPubkey, secretHex }
+  // The model and its motions, read as ONOSENDAI reads them
+  // (hidden/itemModel.ts); motions with no model move nothing, and are not read.
+  const model = modelOf(ev.tags)
+  const animation = model ? animationOf(ev.tags) : []
+  return {
+    name: nameOf(ev.tags, 'key'), about, itemPubkey, secretHex,
+    ...(model ? { model } : {}),
+    ...(animation.length > 0 ? { animation } : {}),
+  }
 }
 
 /** A chest item out of its event, or null when its lock tag or payload is malformed. */
@@ -337,10 +354,14 @@ export function messageInnerTemplate(text: string, at: Position, plane: Plane, c
  * client that does not know the kind shows the sentence and never the
  * secret; title names it the way other nostr kinds name things; item is its
  * public key, so a reader can check one against the other; the NIP-70 `-`
- * tag keeps a finder from republishing it.
+ * tag keeps a finder from republishing it. The model and its motions follow,
+ * in a `model` and an `animate` tag, when the item has them
+ * (hidden/itemModel.ts, ONOSENDAI#439); a reader that does not know them
+ * skips them.
  */
 export function keyInnerTemplate(key: KeyItem, at: Position, plane: Plane, createdAt: number): EventTemplate {
   const tags: string[][] = [['C', positionHex(at, plane)], ['title', key.name.slice(0, MAX_ITEM_NAME)], ['item', key.itemPubkey], ['secret', key.secretHex], ['-']]
+  tags.push(...modelTags(key.model, key.animation))
   return { kind: KEY_KIND, created_at: createdAt, content: key.about.slice(0, MAX_ABOUT), tags }
 }
 

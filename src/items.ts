@@ -13,6 +13,7 @@
 
 import type { ChestEntry } from './hidden/chests.js'
 import { messagePreview, type HiddenType } from './hidden/bags.js'
+import { lookOf } from './hidden/itemModel.js'
 import { objectHandle } from './render.js'
 import type { HeldItem, ItemPlace, KeyStore, SeenChest, TakenItem } from './space/regionKeys.js'
 
@@ -99,6 +100,9 @@ export interface ItemRow {
   from: { chestId: string; chestName: string } | null
   heldSince: number
   opens: Array<{ id: string; name: string; place: ItemPlace }>
+  /** The SNO the item wears in cyberspace, by address, and its motions; only when it has one (hidden/itemModel.ts). */
+  model?: { address: string; relay?: string }
+  animation?: string[]
 }
 
 export function itemRow(i: HeldItem, keys: KeyStore): ItemRow {
@@ -106,6 +110,7 @@ export function itemRow(i: HeldItem, keys: KeyStore): ItemRow {
     name: i.name, about: i.about, itemPubkey: i.itemPubkey, source: i.source ?? 'found', hider: i.hider ?? null,
     place: i.place ?? null, from: i.from ? { chestId: i.from.chestId, chestName: i.from.chestName } : null, heldSince: i.at,
     opens: keys.chestsOpenedBy(i.itemPubkey).map((c) => ({ id: c.id, name: c.name, place: c.place })),
+    ...lookOf(i),
   }
 }
 

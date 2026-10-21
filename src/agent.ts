@@ -42,6 +42,7 @@ import { MAX_COMMENT_LENGTH, itemKind, sealedComment, type CommentParent, type C
 import { forgeKey, openWithSecret, openerFor, readContents, requiresLabel, sealEntries, type ChestEntry } from './hidden/chests.js'
 import { CASHU_TOKEN, chestStatus, contentLine, contentRow, handle, itemRow, placeWords, purposeOf, takenRow, type ContentRow } from './items.js'
 import { hintFits, hintTags, parseHint, hintCandidatesExponent, type HintHeights } from './hidden/hint.js'
+import { lookOf } from './hidden/itemModel.js'
 import { lookReport, type ChainFacts } from './look.js'
 import { attributed, bytesToHex, hexToBytes, nowSeconds, signEvent, tagValue, type EventTemplate, type NostrEvent } from './nostr/event.js'
 import { Outbox, type GuardVerdict } from './nostr/outbox.js'
@@ -61,7 +62,7 @@ import { describePlace, distanceBetween, distanceWords, parseCoordinate, placeFr
 import { apartOnBestAxis, nearestClear, overlapping, spacingFor, type Body } from './space/personalSpace.js'
 import { AvatarSizes } from './avatarSizes.js'
 import { planSummary, priceNextStep, type Ceilings, type PricedStep } from './space/plan.js'
-import { KeyStore, MAX_COMPUTE_HEIGHT, SCAN_MAX_HEIGHT, SCAN_MIN_HEIGHT, sealerOfSeen, type EntrySummary, type HeldItem, type HeldKey, type ItemPlace, type OpenedBag, type SeenChest } from './space/regionKeys.js'
+import { KeyStore, keyItemOfHeld, MAX_COMPUTE_HEIGHT, SCAN_MAX_HEIGHT, SCAN_MIN_HEIGHT, sealerOfSeen, type EntrySummary, type HeldItem, type HeldKey, type ItemPlace, type OpenedBag, type SeenChest } from './space/regionKeys.js'
 import { StateDir } from './state/dir.js'
 import { Refusal, type ToolResult } from './tool.js'
 import { Transit } from './transit.js'
@@ -1420,7 +1421,7 @@ export class Agent {
     if (h.key) {
       this.keys.holdItem({
         itemPubkey: h.key.itemPubkey, secretHex: h.key.secretHex, name: h.key.name, about: h.key.about, foundIn, at: nowSeconds(),
-        source: h.inner.pubkey === this.pubkey ? 'forged' : 'found', hider: h.inner.pubkey, eventId: h.eventId, place,
+        source: h.inner.pubkey === this.pubkey ? 'forged' : 'found', hider: h.inner.pubkey, eventId: h.eventId, place, ...lookOf(h.key),
       })
       summary.key = { itemPubkey: h.key.itemPubkey, about: h.key.about }
     }
@@ -1466,7 +1467,7 @@ export class Agent {
       if (c.body.key) {
         this.keys.holdItem({
           itemPubkey: c.body.key.itemPubkey, secretHex: c.body.key.secretHex, name: c.body.key.name, about: c.body.key.about, foundIn: chest.place.lookupId, at: nowSeconds(),
-          source: 'found', hider: c.event.pubkey, eventId: c.id, place: chest.place, from,
+          source: 'found', hider: c.event.pubkey, eventId: c.id, place: chest.place, from, ...lookOf(c.body.key),
         })
       }
       if (c.body.chest) {
@@ -1633,7 +1634,7 @@ export class Agent {
       const key = forgeKey(name, String(contents.key.about ?? '').trim().slice(0, MAX_ABOUT))
       const event = this.sign(keyInnerTemplate(key, at.position, at.plane, now))
       // Forged is held at once (B1 3.1), so chests can be sealed to it before anyone finds it.
-      this.keys.holdItem({ itemPubkey: key.itemPubkey, secretHex: key.secretHex, name: key.name, about: key.about, foundIn: where.lookupId, at: now, source: 'forged', hider: this.pubkey, eventId: event.id, place })
+      this.keys.holdItem({ itemPubkey: key.itemPubkey, secretHex: key.secretHex, name: key.name, about: key.about, foundIn: where.lookupId, at: now, source: 'forged', hider: this.pubkey, eventId: event.id, place, ...lookOf(key) })
       return { entries: [event], what: `an item "${key.name}" (public key ${key.itemPubkey})`, item: { name: key.name, itemPubkey: key.itemPubkey } }
     }
     if ('chest' in contents) {
@@ -1659,9 +1660,9 @@ export class Agent {
           inner.push(event)
           forged.push({ key, event })
         } else if ('item' in e) {
-          // A copy of an item the agent holds, signed by the agent: the same keypair, so the same chests open for the finder.
+          // A copy of an item the agent holds, signed by the agent: the same keypair, so the same chests open for the finder, and the same model and motions.
           const held = this.heldItemBy(String(e.item))
-          inner.push(this.sign(keyInnerTemplate({ name: held.name, about: held.about, itemPubkey: held.itemPubkey, secretHex: held.secretHex }, at.position, at.plane, now)))
+          inner.push(this.sign(keyInnerTemplate(keyItemOfHeld(held), at.position, at.plane, now)))
         } else {
           throw new Refusal('Each chest entry is one of: { message }, { object }, { key: { name, about } } (a new item), or { item } (an item you hold, by name or public key).')
         }
@@ -1674,7 +1675,7 @@ export class Agent {
       const chest = { name, lockPubkey: lock.pubkey, senderPubkey: sealed.senderPubkey, requires, payload: sealed.payload }
       const event = this.sign(chestInnerTemplate(chest, at.position, at.plane, now))
       for (const f of forged) {
-        this.keys.holdItem({ itemPubkey: f.key.itemPubkey, secretHex: f.key.secretHex, name: f.key.name, about: f.key.about, foundIn: where.lookupId, at: now, source: 'forged', hider: this.pubkey, eventId: f.event.id, place, from: { chestId: event.id, chestName: name } })
+        this.keys.holdItem({ itemPubkey: f.key.itemPubkey, secretHex: f.key.secretHex, name: f.key.name, about: f.key.about, foundIn: where.lookupId, at: now, source: 'forged', hider: this.pubkey, eventId: f.event.id, place, from: { chestId: event.id, chestName: name }, ...lookOf(f.key) })
       }
       const counts = (['message', 'object', 'item'] as const).map((k) => [k, (contents.chest.entries ?? []).filter((e) => k in e || (k === 'item' && 'key' in e)).length] as const).filter(([, n]) => n > 0).map(([k, n]) => `${n} ${k}${n === 1 ? '' : 's'}`)
       return {
@@ -1905,7 +1906,8 @@ export class Agent {
     for (const r of rows) {
       const how = r.source === 'forged' ? 'forged by you' : `${r.source === 'taken' ? 'taken' : 'found'}${r.from ? ` in the chest "${r.from.chestName}"` : ' in a bag'}${r.hider ? `, made by ${r.hider === this.pubkey ? 'you' : `${r.hider.slice(0, 8)}...`}` : ''}`
       const opens = r.opens.length ? `opens ${r.opens.map((c) => `"${c.name}" (open_chest ${handle(c.id)}, ${placeWords(c.place)})`).join(', ')}` : 'opens none of the chests you have seen'
-      lines.push(`- "${r.name}"${r.about ? `: "${r.about}"` : ''}. Public key ${r.itemPubkey}. ${how}, ${placeWords(r.place ?? undefined)}. It ${opens}.`)
+      const looks = r.model ? ` It wears the SNO object ${r.model.address}${r.animation?.length ? ` (${r.animation.join(', ')})` : ''}.` : ''
+      lines.push(`- "${r.name}"${r.about ? `: "${r.about}"` : ''}. Public key ${r.itemPubkey}. ${how}, ${placeWords(r.place ?? undefined)}. It ${opens}.${looks}`)
     }
     if (taken.length) {
       lines.push(`Taken from chests (${taken.length}):`)
@@ -1966,7 +1968,7 @@ export class Agent {
         ...(b.type === 'message' ? { text: b.text ?? '' } : {}), ...(row.coin ? { coin: true } : {}),
         ...(b.shard ? { payload: toPayload(b.shard) } : {}), ...(b.key ? { itemPubkey: b.key.itemPubkey } : {}),
       })
-      if (b.key) fresh = this.keys.holdItem({ itemPubkey: b.key.itemPubkey, secretHex: b.key.secretHex, name: b.key.name, about: b.key.about, foundIn: c.place.lookupId, at: now, source: 'taken', hider: e.event.pubkey, eventId: e.id, place: c.place, from }) || fresh
+      if (b.key) fresh = this.keys.holdItem({ itemPubkey: b.key.itemPubkey, secretHex: b.key.secretHex, name: b.key.name, about: b.key.about, foundIn: c.place.lookupId, at: now, source: 'taken', hider: e.event.pubkey, eventId: e.id, place: c.place, from, ...lookOf(b.key) }) || fresh
       ;(fresh ? took : already).push(row)
     }
     const text = [

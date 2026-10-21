@@ -24,7 +24,8 @@ import type { Plane } from 'cyberspace-core'
 import { bytesToHex, type NostrEvent } from '../nostr/event.js'
 import type { StateDir } from '../state/dir.js'
 import { regionKeyAt } from '../hidden/crypto.js'
-import type { HiddenType } from '../hidden/bags.js'
+import type { HiddenType, KeyItem } from '../hidden/bags.js'
+import { lookOf, type ItemAnimation, type ItemModelRef } from '../hidden/itemModel.js'
 import type { HintHeights } from '../hidden/hint.js'
 import type { Position } from './coords.js'
 
@@ -109,6 +110,18 @@ export interface HeldItem {
   eventId?: string
   place?: ItemPlace
   from?: ItemFrom
+  /** The SNO the item wears and how it moves, as its event named them (hidden/itemModel.ts). Absent on items held before 2026-10-21, and on items with none. */
+  model?: ItemModelRef
+  animation?: ItemAnimation[]
+}
+
+/**
+ * A held item as a key item again, to be sealed as a copy: the same keypair,
+ * name and sentence, and the same model and motions, so a copy put in a
+ * chest looks and moves as the item does.
+ */
+export function keyItemOfHeld(held: HeldItem): KeyItem {
+  return { name: held.name, about: held.about, itemPubkey: held.itemPubkey, secretHex: held.secretHex, ...lookOf(held) }
 }
 
 /** A content taken out of a chest (B1 3.3 Taken): a copy, so the chest still holds it for whoever else opens it. */
