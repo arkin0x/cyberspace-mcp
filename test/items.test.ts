@@ -20,12 +20,14 @@ import { afterAll, describe, expect, it } from 'vitest'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { Agent, Refusal } from '../src/agent.js'
-import { chestInnerTemplate, chestItemOf, keyInnerTemplate, keyItemOf, unbag, type KeyItem } from '../src/hidden/bags.js'
-import { openWithSecret, readContents } from '../src/hidden/chests.js'
+import { finalizeEvent, generateSecretKey } from 'nostr-tools/pure'
+import { bagTemplate, chestInnerTemplate, chestItemOf, keyInnerTemplate, keyItemOf, unbag, type KeyItem } from '../src/hidden/bags.js'
+import { forgeKey, openWithSecret, readContents } from '../src/hidden/chests.js'
 import { commentTemplate, readComment } from '../src/hidden/comments.js'
 import { hexToBytes, type NostrEvent } from '../src/nostr/event.js'
 import { createServer } from '../src/server.js'
 import type { Calibration } from '../src/space/calibration.js'
+import { positionHex } from '../src/space/coords.js'
 import { KEY_GENERATED_BY, StateDir } from '../src/state/dir.js'
 import { FakeNetwork } from './fakeRelay.js'
 
@@ -321,4 +323,71 @@ describe('the agent and ONOSENDAI\'s items and chests', () => {
       for (const f of readdirSync(dir).filter((n) => n.endsWith('.json'))) expect(readFileSync(join(dir, f), 'utf8')).not.toContain(secret)
     }
   })
+})
+
+describe('a held item copied into a chest is the item as it was (ONOSENDAI#439)', () => {
+  // An item ONOSENDAI might hide: a picture, a model, its motions (ONOSENDAI
+  // writes imeta ahead of model), a tag nobody here knows, and two
+  // single-letter tags a copy must not re-sign (p would notify someone).
+  const network = new FakeNetwork()
+  network.add(CANONICAL)
+  const mine = network.add(MINE)
+  const dir = mkdtempSync(join(tmpdir(), 'cyberspace-mcp-items-copy-'))
+  StateDir.open(dir)
+  writeFileSync(join(dir, 'key'), JSON.stringify({ generatedBy: KEY_GENERATED_BY, secret: fx.agentSecretHex, createdAt: 'test' }), { mode: 0o600 })
+  const agents: Agent[] = []
+  afterAll(async () => { for (const a of agents) await a.stop() })
+
+  const lamp = forgeKey('Lamp', 'Lights the stair.')
+  const imeta = ['imeta', 'url data:image/png;base64,iVBORw0KGgo=', 'dim 2x2']
+  const model = ['model', `33331:${'ab'.repeat(32)}:lamp-1`, 'wss://relay.example']
+  const animate = ['animate', 'bob', 'spin-x']
+  const flavor = ['flavor', 'x']
+
+  it('seal_chest with { item } keeps its picture, model, motions and unknown tags, in order, and drops what it must not re-sign', async () => {
+    const hider = generateSecretKey()
+    const now = Math.floor(Date.now() / 1000)
+    const item = finalizeEvent({
+      kind: 3340, created_at: now, content: lamp.about,
+      tags: [['C', positionHex(at, fx.at.plane)], ['title', 'Lamp'], ['item', lamp.itemPubkey], ['secret', lamp.secretHex], ['-'], imeta, model, animate, flavor, ['p', 'cd'.repeat(32)], ['t', 'lamp'], ['client', 'ONOSENDAI']],
+    }, hider)
+    mine.seed(finalizeEvent(await bagTemplate([item], regionKey, fx.lookupId, fx.height, now), hider))
+
+    const a = await Agent.start({
+      stateDir: dir, relays: [CANONICAL, MINE], capCallSeconds: 30, capSessionSeconds: 120, maxSidestepHeight: 24, allowRespawn: false,
+      websocketImplementation: network.WebSocket, calibration: cal, relayMaxWaitMs: 1500, ordersPollMs: 0, log: () => {},
+    })
+    agents.push(a)
+    const server = createServer(a, () => {})
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await server.connect(serverSide)
+    const client = new Client({ name: 'test', version: '0' })
+    await client.connect(clientSide)
+    const call = async (name: string, args: Record<string, unknown> = {}) => {
+      const r = await client.callTool({ name, arguments: args })
+      return { text: (r.content as Array<{ text: string }>).map((c) => c.text ?? '').join('\n'), data: (r.structuredContent ?? {}) as Record<string, unknown>, isError: !!r.isError }
+    }
+
+    const found = await call('find', { max_height: fx.height })
+    expect(found.text).toContain('Lamp')
+    expect(a.keys.items.get(lamp.itemPubkey)).toMatchObject({ name: 'Lamp', source: 'found', carried: [imeta, model, animate, flavor] })
+
+    const sealed = await call('seal_chest', { name: 'Lamp Copy', lock: 'Lamp', contents: [{ item: 'Lamp' }], height: 5 })
+    expect(sealed.isError).toBe(false)
+    const chestId = (sealed.data.chest as { id: string }).id
+
+    // The bag as published, opened with its key, and the chest in it opened with the Lamp.
+    const bag = mine.all().filter((e) => e.kind === 33330 && e.pubkey === a.pubkey).sort((x, y) => y.created_at - x.created_at)[0]
+    const key = [...a.keys.keys.values()].find((k) => k.lookupId === bag.tags.find((t) => t[0] === 'd')![1])!
+    const inside = await unbag(bag, hexToBytes(key.keyHex), undefined, undefined, 5)
+    const chest = inside.find((h) => h.type === 'chest' && h.eventId === chestId)!
+    const contents = readContents(openWithSecret(chest.chest!, lamp.secretHex), chest.inner.pubkey)
+    expect(contents).toHaveLength(1)
+    const copy = contents[0].event
+    expect(copy.pubkey).toBe(a.pubkey)
+    // The fixed tags, then the item's own in their order, then this server's client tag; no p, no t, no second model.
+    expect(copy.tags.slice(5)).toEqual([imeta, model, animate, flavor, ['client', 'cyberspace-mcp']])
+    expect(copy.tags.filter((t) => t[0] === 'model')).toHaveLength(1)
+    expect(contents[0].body.key).toMatchObject({ itemPubkey: lamp.itemPubkey, model: { address: model[1], relay: model[2] }, animation: ['bob', 'spin-x'] })
+  }, 60_000)
 })

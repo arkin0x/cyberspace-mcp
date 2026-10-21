@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure'
-import { KEY_KIND, keyInnerTemplate, keyItemOf, type KeyItem } from '../src/hidden/bags.js'
+import { KEY_KIND, MAX_CARRIED_BYTES, MAX_CARRIED_TAGS, carriedTags, keyInnerTemplate, keyItemOf, type KeyItem } from '../src/hidden/bags.js'
 import { forgeKey, openWithSecret, readContents, sealEntries } from '../src/hidden/chests.js'
 import { animationOf, isModelAddress, lookOf, modelOf, modelTags } from '../src/hidden/itemModel.js'
 import { itemRow } from '../src/items.js'
@@ -144,5 +144,53 @@ describe('holding an item keeps its look, and so does a copy sealed into a chest
     const old: HeldItem = { itemPubkey, secretHex, name: 'Lantern', about: 'It glows.', foundIn: 'look', at: 1 }
     expect(keyItemOfHeld(old)).toEqual({ name: 'Lantern', about: 'It glows.', itemPubkey, secretHex })
     expect(keyInnerTemplate(keyItemOfHeld(old), at, 1, 1).tags.map((x) => x[0])).toEqual(['C', 'title', 'item', 'secret', '-'])
+  })
+})
+
+describe('the tags a copy carries over (carriedTags)', () => {
+  it('keeps the item\'s own tags in order and drops what the copy writes itself or must not re-sign', () => {
+    const imeta = ['imeta', 'url data:image/png;base64,AAAA', 'dim 2x2']
+    const tags: unknown[] = [
+      ['C', 'ff'], ['title', 'x'], ['name', 'x'], ['item', 'ab'], ['secret', 'cd'], ['about', 'x'], ['d', 'x'], ['-'], ['client', 'ONOSENDAI'],
+      imeta, ['p', 'ab'.repeat(32)], ['e', 'cd'.repeat(32)], ['a', '1:2:3'], ['q', 'x'], ['t', 'lamp'], ['k', '1'],
+      ['model', ADDRESS], ['delegation', 'x', 'y', 'z'], ['nonce', '1', '20'], ['animate', 'bob'],
+      ['flavor', 'x'], 'not a tag', [], [5, 'x'], ['odd', 5], ['', 'empty name'],
+    ]
+    expect(carriedTags(tags)).toEqual([imeta, ['model', ADDRESS], ['animate', 'bob'], ['flavor', 'x']])
+  })
+
+  it('caps the count and the bytes, keeping order and skipping a tag that would pass the byte cap', () => {
+    const many = Array.from({ length: 40 }, (_, i) => ['n' + i, String(i)])
+    expect(carriedTags(many)).toEqual(many.slice(0, MAX_CARRIED_TAGS))
+    // An imeta with an 8192-character data URI fits; a second one would pass 12 KB and is skipped; a small tag after it is kept.
+    const big = ['imeta', 'url data:image/png;base64,' + 'A'.repeat(8192), 'dim 32x32']
+    const kept = carriedTags([big, big, ['flavor', 'x']])
+    expect(kept).toEqual([big, ['flavor', 'x']])
+    expect(new TextEncoder().encode(JSON.stringify(kept)).length).toBeLessThanOrEqual(MAX_CARRIED_BYTES)
+  })
+
+  it('a key item with carried tags writes them verbatim instead of its model fields: no model or animate twice', () => {
+    const carried = [['imeta', 'url https://x.example/a.png', 'dim 8x8'], ['model', ADDRESS, 'wss://relay.example'], ['animate', 'spin-y'], ['flavor', 'x']]
+    const t = keyInnerTemplate({ ...lantern, carried }, at, 1, 1700000000)
+    expect(t.tags.slice(5)).toEqual(carried)
+    expect(t.tags.filter((x) => x[0] === 'model')).toHaveLength(1)
+    expect(t.tags.filter((x) => x[0] === 'animate')).toHaveLength(1)
+    // Carried tags are filtered again on the way out: a row edited by hand cannot make the copy re-sign a p tag.
+    expect(keyInnerTemplate({ ...lantern, carried: [['p', 'ab'.repeat(32)], ['flavor', 'x']] }, at, 1, 1).tags.slice(5)).toEqual([['flavor', 'x']])
+  })
+
+  it('a row held before the tags were kept gains them when the item is read again, and nothing else of it changes', () => {
+    const state = StateDir.open(mkdtempSync(join(tmpdir(), 'cyberspace-mcp-item-backfill-')))
+    const keys = new KeyStore(state)
+    const old: HeldItem = { itemPubkey, secretHex, name: 'Lantern', about: 'First sentence.', foundIn: 'first', at: 1, source: 'found', hider: 'aa'.repeat(32), eventId: 'ee'.repeat(32) }
+    expect(keys.holdItem(old)).toBe(true)
+    const carried = [['model', ADDRESS], ['animate', 'bob'], ['flavor', 'x']]
+    const again = { ...old, name: 'Renamed', about: 'Other.', foundIn: 'second', at: 2, source: 'taken' as const, eventId: 'ff'.repeat(32), model: { address: ADDRESS }, animation: ['bob' as const], carried }
+    expect(keys.holdItem(again)).toBe(false)
+    expect(new KeyStore(state).items.get(itemPubkey)).toEqual({ ...old, model: { address: ADDRESS }, animation: ['bob'], carried })
+    // Once filled, a third reading changes nothing.
+    expect(keys.holdItem({ ...again, carried: [['other', 'y']] })).toBe(false)
+    expect(keys.items.get(itemPubkey)!.carried).toEqual(carried)
+    expect(keyInnerTemplate(keyItemOfHeld(keys.items.get(itemPubkey)!), at, 1, 1).tags.slice(5)).toEqual(carried)
   })
 })

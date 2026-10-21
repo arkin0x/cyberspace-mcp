@@ -34,7 +34,7 @@ import { AVATAR_KIND, MAX_AVATAR_BYTES, avatarPrice, avatarSeconds, avatarTempla
 import { avatarThreads, mineAvatar } from './avatarMine.js'
 import { Chat, type ChatLine } from './chat.js'
 import {
-  HIDDEN_KIND, MAX_ABOUT, MAX_ITEM_NAME, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, REFERENCE_THRESHOLD_BYTES, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
+  HIDDEN_KIND, MAX_ABOUT, MAX_ITEM_NAME, carriedTags, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, REFERENCE_THRESHOLD_BYTES, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
   itemLineage, keyInnerTemplate, messageInnerTemplate, messagePreview, objectTemplate, referenceCount, referenceTo, rumorOf, shardInnerTemplate, unbag, wantsReference, entryKey,
   type BagEntry, type Hidden, type HiddenType, type KeyItem, type Reference, type Rumor,
 } from './hidden/bags.js'
@@ -1421,7 +1421,7 @@ export class Agent {
     if (h.key) {
       this.keys.holdItem({
         itemPubkey: h.key.itemPubkey, secretHex: h.key.secretHex, name: h.key.name, about: h.key.about, foundIn, at: nowSeconds(),
-        source: h.inner.pubkey === this.pubkey ? 'forged' : 'found', hider: h.inner.pubkey, eventId: h.eventId, place, ...lookOf(h.key),
+        source: h.inner.pubkey === this.pubkey ? 'forged' : 'found', hider: h.inner.pubkey, eventId: h.eventId, place, ...lookOf(h.key), carried: carriedTags(h.inner.tags),
       })
       summary.key = { itemPubkey: h.key.itemPubkey, about: h.key.about }
     }
@@ -1467,7 +1467,7 @@ export class Agent {
       if (c.body.key) {
         this.keys.holdItem({
           itemPubkey: c.body.key.itemPubkey, secretHex: c.body.key.secretHex, name: c.body.key.name, about: c.body.key.about, foundIn: chest.place.lookupId, at: nowSeconds(),
-          source: 'found', hider: c.event.pubkey, eventId: c.id, place: chest.place, from, ...lookOf(c.body.key),
+          source: 'found', hider: c.event.pubkey, eventId: c.id, place: chest.place, from, ...lookOf(c.body.key), carried: carriedTags(c.event.tags),
         })
       }
       if (c.body.chest) {
@@ -1634,7 +1634,7 @@ export class Agent {
       const key = forgeKey(name, String(contents.key.about ?? '').trim().slice(0, MAX_ABOUT))
       const event = this.sign(keyInnerTemplate(key, at.position, at.plane, now))
       // Forged is held at once (B1 3.1), so chests can be sealed to it before anyone finds it.
-      this.keys.holdItem({ itemPubkey: key.itemPubkey, secretHex: key.secretHex, name: key.name, about: key.about, foundIn: where.lookupId, at: now, source: 'forged', hider: this.pubkey, eventId: event.id, place, ...lookOf(key) })
+      this.keys.holdItem({ itemPubkey: key.itemPubkey, secretHex: key.secretHex, name: key.name, about: key.about, foundIn: where.lookupId, at: now, source: 'forged', hider: this.pubkey, eventId: event.id, place, ...lookOf(key), carried: carriedTags(event.tags) })
       return { entries: [event], what: `an item "${key.name}" (public key ${key.itemPubkey})`, item: { name: key.name, itemPubkey: key.itemPubkey } }
     }
     if ('chest' in contents) {
@@ -1660,7 +1660,7 @@ export class Agent {
           inner.push(event)
           forged.push({ key, event })
         } else if ('item' in e) {
-          // A copy of an item the agent holds, signed by the agent: the same keypair, so the same chests open for the finder, and the same model and motions.
+          // A copy of an item the agent holds, signed by the agent: the same keypair, so the same chests open for the finder, and the item's own tags (picture, model, motions) as it carried them.
           const held = this.heldItemBy(String(e.item))
           inner.push(this.sign(keyInnerTemplate(keyItemOfHeld(held), at.position, at.plane, now)))
         } else {
@@ -1675,7 +1675,7 @@ export class Agent {
       const chest = { name, lockPubkey: lock.pubkey, senderPubkey: sealed.senderPubkey, requires, payload: sealed.payload }
       const event = this.sign(chestInnerTemplate(chest, at.position, at.plane, now))
       for (const f of forged) {
-        this.keys.holdItem({ itemPubkey: f.key.itemPubkey, secretHex: f.key.secretHex, name: f.key.name, about: f.key.about, foundIn: where.lookupId, at: now, source: 'forged', hider: this.pubkey, eventId: f.event.id, place, from: { chestId: event.id, chestName: name }, ...lookOf(f.key) })
+        this.keys.holdItem({ itemPubkey: f.key.itemPubkey, secretHex: f.key.secretHex, name: f.key.name, about: f.key.about, foundIn: where.lookupId, at: now, source: 'forged', hider: this.pubkey, eventId: f.event.id, place, from: { chestId: event.id, chestName: name }, ...lookOf(f.key), carried: carriedTags(f.event.tags) })
       }
       const counts = (['message', 'object', 'item'] as const).map((k) => [k, (contents.chest.entries ?? []).filter((e) => k in e || (k === 'item' && 'key' in e)).length] as const).filter(([, n]) => n > 0).map(([k, n]) => `${n} ${k}${n === 1 ? '' : 's'}`)
       return {
@@ -1968,7 +1968,7 @@ export class Agent {
         ...(b.type === 'message' ? { text: b.text ?? '' } : {}), ...(row.coin ? { coin: true } : {}),
         ...(b.shard ? { payload: toPayload(b.shard) } : {}), ...(b.key ? { itemPubkey: b.key.itemPubkey } : {}),
       })
-      if (b.key) fresh = this.keys.holdItem({ itemPubkey: b.key.itemPubkey, secretHex: b.key.secretHex, name: b.key.name, about: b.key.about, foundIn: c.place.lookupId, at: now, source: 'taken', hider: e.event.pubkey, eventId: e.id, place: c.place, from, ...lookOf(b.key) }) || fresh
+      if (b.key) fresh = this.keys.holdItem({ itemPubkey: b.key.itemPubkey, secretHex: b.key.secretHex, name: b.key.name, about: b.key.about, foundIn: c.place.lookupId, at: now, source: 'taken', hider: e.event.pubkey, eventId: e.id, place: c.place, from, ...lookOf(b.key), carried: carriedTags(e.event.tags) }) || fresh
       ;(fresh ? took : already).push(row)
     }
     const text = [
