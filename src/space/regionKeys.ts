@@ -24,7 +24,8 @@ import type { Plane } from 'cyberspace-core'
 import { bytesToHex, type NostrEvent } from '../nostr/event.js'
 import type { StateDir } from '../state/dir.js'
 import { regionKeyAt } from '../hidden/crypto.js'
-import type { HiddenType } from '../hidden/bags.js'
+import type { HiddenType, KeyItem } from '../hidden/bags.js'
+import { lookOf, type ItemAnimation, type ItemModelRef } from '../hidden/itemModel.js'
 import type { HintHeights } from '../hidden/hint.js'
 import type { Position } from './coords.js'
 
@@ -109,6 +110,29 @@ export interface HeldItem {
   eventId?: string
   place?: ItemPlace
   from?: ItemFrom
+  /** The SNO the item wears and how it moves, as its event named them (hidden/itemModel.ts). Absent on items held before 2026-10-21, and on items with none. */
+  model?: ItemModelRef
+  animation?: ItemAnimation[]
+  /**
+   * The item event's own tags a copy carries (hidden/bags.ts carriedTags):
+   * written back verbatim when the item is copied into a chest. Absent on
+   * items held before 2026-10-21 until the item is read again (holdItem).
+   */
+  carried?: string[][]
+}
+
+/**
+ * A held item as a key item again, to be sealed as a copy: the same keypair,
+ * name and sentence, and the item event's own tags (its picture, model,
+ * motions, and whatever else it carried), so a copy put in a chest is the
+ * item as it was. A row held before those tags were kept falls back to
+ * the model and motions alone.
+ */
+export function keyItemOfHeld(held: HeldItem): KeyItem {
+  return {
+    name: held.name, about: held.about, itemPubkey: held.itemPubkey, secretHex: held.secretHex, ...lookOf(held),
+    ...(held.carried !== undefined ? { carried: held.carried.map((t) => [...t]) } : {}),
+  }
 }
 
 /** A content taken out of a chest (B1 3.3 Taken): a copy, so the chest still holds it for whoever else opens it. */
@@ -284,10 +308,20 @@ export class KeyStore {
    * Hold a key item: from now on a chest sealed to it opens. An item already
    * held keeps its row (ONOSENDAI addHeld), so a key read again, in a rescan
    * or inside a chest, is held once and its first holding stands. Returns
-   * whether it was new.
+   * whether it was new. One thing is filled in on a row already held: a row
+   * from before the item's own tags were kept gains them (and the model and
+   * motions they name) the next time the item is read, and nothing else of
+   * it changes.
    */
   holdItem(item: HeldItem): boolean {
-    if (this.items.has(item.itemPubkey)) return false
+    const had = this.items.get(item.itemPubkey)
+    if (had) {
+      if (had.carried === undefined && item.carried !== undefined) {
+        this.items.set(item.itemPubkey, { ...had, ...(had.model ? {} : lookOf(item)), carried: item.carried })
+        this.dir.writeJson(ITEMS_FILE, { version: 1, items: [...this.items.values()] } satisfies ItemsFile)
+      }
+      return false
+    }
     this.items.set(item.itemPubkey, item)
     this.dir.writeJson(ITEMS_FILE, { version: 1, items: [...this.items.values()] } satisfies ItemsFile)
     return true

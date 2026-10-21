@@ -28,6 +28,7 @@ import { bytesToHex, hexToBytes, isAuthentic, type EventTemplate, type NostrEven
 import { positionHex, type Position } from '../space/coords.js'
 import { ALGO, decryptForRegion, encryptForRegion } from './crypto.js'
 import { hintFits, hintTags, parseHint, type HintHeights } from './hint.js'
+import { animationOf, modelOf, modelTags, type ItemAnimation, type ItemModelRef } from './itemModel.js'
 
 /** The location-encrypted envelope (spec 8.6). */
 export const HIDDEN_KIND = 33330
@@ -161,6 +162,21 @@ export interface KeyItem {
   itemPubkey: string
   /** The item's private key, 64 lowercase hex. Holding it is holding the item. */
   secretHex: string
+  /**
+   * The SNO the item wears in cyberspace, by its address, and how it moves
+   * (hidden/itemModel.ts, ONOSENDAI#439). Optional; an item without a model
+   * is drawn as the note's cube. `animation` is only read or written with a
+   * model, and is absent when the model stands still.
+   */
+  model?: ItemModelRef
+  animation?: ItemAnimation[]
+  /**
+   * The item event's own tags past the ones keyInnerTemplate writes itself
+   * (carriedTags), for a copy: written back verbatim, in their order, in
+   * place of the model and animate tags built from the fields above. Never
+   * set by keyItemOf; a held item fills it (space/regionKeys.ts keyItemOfHeld).
+   */
+  carried?: string[][]
 }
 
 /** What a chest item carries (B1 2.2); the payload is still sealed. */
@@ -212,7 +228,15 @@ export function keyItemOf(ev: Pick<NostrEvent, 'kind' | 'content' | 'tags'>): Ke
   const about = tagged !== undefined
     ? ev.content.trim().replace(/\s+/g, ' ').slice(0, MAX_ABOUT)
     : capped(ev.tags, 'about', MAX_ABOUT)
-  return { name: nameOf(ev.tags, 'key'), about, itemPubkey, secretHex }
+  // The model and its motions, read as ONOSENDAI reads them
+  // (hidden/itemModel.ts); motions with no model move nothing, and are not read.
+  const model = modelOf(ev.tags)
+  const animation = model ? animationOf(ev.tags) : []
+  return {
+    name: nameOf(ev.tags, 'key'), about, itemPubkey, secretHex,
+    ...(model ? { model } : {}),
+    ...(animation.length > 0 ? { animation } : {}),
+  }
 }
 
 /** A chest item out of its event, or null when its lock tag or payload is malformed. */
@@ -337,11 +361,59 @@ export function messageInnerTemplate(text: string, at: Position, plane: Plane, c
  * client that does not know the kind shows the sentence and never the
  * secret; title names it the way other nostr kinds name things; item is its
  * public key, so a reader can check one against the other; the NIP-70 `-`
- * tag keeps a finder from republishing it.
+ * tag keeps a finder from republishing it. The model and its motions follow,
+ * in a `model` and an `animate` tag, when the item has them
+ * (hidden/itemModel.ts, ONOSENDAI#439); a reader that does not know them
+ * skips them.
  */
 export function keyInnerTemplate(key: KeyItem, at: Position, plane: Plane, createdAt: number): EventTemplate {
   const tags: string[][] = [['C', positionHex(at, plane)], ['title', key.name.slice(0, MAX_ITEM_NAME)], ['item', key.itemPubkey], ['secret', key.secretHex], ['-']]
+  // A copy writes the item's own tags back as they were (an imeta ahead of
+  // the model, as ONOSENDAI writes them, and tags this server does not
+  // know); otherwise the model and its motions from the fields.
+  tags.push(...(key.carried !== undefined ? carriedTags(key.carried) : modelTags(key.model, key.animation)))
   return { kind: KEY_KIND, created_at: createdAt, content: key.about.slice(0, MAX_ABOUT), tags }
+}
+
+/**
+ * Tag names a copy of a key item never carries over from the item event:
+ * the ones keyInnerTemplate writes itself (C, title, item, secret, `-`), the
+ * older name and about, d, and the client tag its signer adds; and two that
+ * make a claim about the original event which is false once the agent signs
+ * the copy (NIP-26 delegation, NIP-13 nonce). Every one-character name is
+ * dropped as well (below).
+ */
+const NOT_CARRIED = new Set(['C', 'd', 'title', 'name', 'item', 'secret', 'about', '-', 'client', 'delegation', 'nonce'])
+/** Most tags a copy carries over: room for an imeta, a model, an animate tag and a dozen more. */
+export const MAX_CARRIED_TAGS = 16
+/** Most bytes of JSON the carried tags may take together: enough for an imeta holding an 8192-character data URI. */
+export const MAX_CARRIED_BYTES = 12 * 1024
+
+/**
+ * The tags of a key item event that a copy of it carries, in their order:
+ * how a copy sealed into a chest keeps the item's picture, model, motions
+ * and any tag added later. The agent signs the copy, so it re-signs what
+ * another hider wrote, and only what is harmless is kept: a tag must be a
+ * non-empty array of strings; a name of one character is dropped (every
+ * single-letter tag is one relays index, NIP-01, and e, p, a, q, t and the
+ * like point at or notify someone), as is every name in NOT_CARRIED; at
+ * most MAX_CARRIED_TAGS tags and MAX_CARRIED_BYTES of JSON are kept, a tag
+ * that would pass the byte cap skipped and the rest still read.
+ */
+export function carriedTags(tags: readonly unknown[]): string[][] {
+  const out: string[][] = []
+  let bytes = 0
+  for (const raw of tags) {
+    if (out.length >= MAX_CARRIED_TAGS) break
+    if (!Array.isArray(raw) || raw.length === 0 || !raw.every((v) => typeof v === 'string')) continue
+    const tag = raw as string[]
+    if (tag[0].length <= 1 || NOT_CARRIED.has(tag[0])) continue
+    const size = new TextEncoder().encode(JSON.stringify(tag)).length
+    if (bytes + size > MAX_CARRIED_BYTES) continue
+    bytes += size
+    out.push([...tag])
+  }
+  return out
 }
 
 /**
