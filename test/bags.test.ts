@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { newShard } from 'sno-core/shards'
 import {
-  CHAT_BAG_KIND, CHAT_KIND, HIDDEN_KIND, KEY_KIND, bagEntries, bagTemplate, chatInnerTemplate, chatInners, chatRumor, chestInnerTemplate, chestItemOf, ciphertextOf,
+  CHAT_BAG_KIND, CHAT_KIND, HIDDEN_KIND, KEY_KIND, bagEntries, bagSettingsOf, bagTemplate, heightHint, chatInnerTemplate, chatInners, chatRumor, chestInnerTemplate, chestItemOf, ciphertextOf,
   keyInnerTemplate, keyItemOf, messageInnerTemplate, objectTemplate, readItem, referenceTo, unbag, entryKey,
 } from '../src/hidden/bags.js'
 import { forgeKey, openWithSecret, openerFor, readContents, sealEntries } from '../src/hidden/chests.js'
@@ -31,12 +31,57 @@ describe('the cipher', () => {
   })
 })
 
+describe('the height tag: H, read with a fallback to a legacy h (spec 8.6)', () => {
+  const ev = (...height: string[][]) => ({ tags: [['d', lookup], ['version', '2'], ...height] })
+
+  it('a bag writes H, never h', async () => {
+    const bag = await bagTemplate([], key, lookup, 7, 1, HIDDEN_KIND)
+    expect(bag.tags).toContainEqual(['H', '7'])
+    expect(bag.tags.some((t) => t[0] === 'h')).toBe(false)
+    const quiet = await bagTemplate([], key, lookup, 7, 1, HIDDEN_KIND, { heightTag: false, hint: null, riddle: '' })
+    expect(quiet.tags.some((t) => t[0] === 'H' || t[0] === 'h')).toBe(false)
+  })
+
+  it('reads H', () => {
+    expect(heightHint(ev(['H', '6']))).toBe(6)
+  })
+
+  it('reads a legacy h when there is no H', () => {
+    expect(heightHint(ev(['h', '7']))).toBe(7)
+  })
+
+  it('reads H alone when both are present, whatever h says', () => {
+    expect(heightHint(ev(['h', '7'], ['H', '6']))).toBe(6)
+    expect(heightHint(ev(['H', '6'], ['h', '7']))).toBe(6)
+    expect(heightHint(ev(['H', '06'], ['h', '7']))).toBeNull()
+    expect(heightHint(ev(['H'], ['h', '7']))).toBeNull()
+  })
+
+  it('states no height when there is neither, or the tag it reads appears twice', () => {
+    expect(heightHint(ev())).toBeNull()
+    expect(heightHint(ev(['H', '6'], ['H', '6']))).toBeNull()
+    expect(heightHint(ev(['h', '7'], ['h', '7']))).toBeNull()
+  })
+
+  it('a bag that said its height with h opens at it, and is rewritten with H', async () => {
+    const sk = generateSecretKey()
+    const ct = await encryptForRegion(key, '[]')
+    const old = signEvent({ kind: HIDDEN_KIND, created_at: 1, content: '', tags: [['d', lookup], ['encrypted', 'aes-256-gcm', ct], ['version', '2'], ['h', '7']] }, sk)
+    const settings = bagSettingsOf(old, 7)
+    expect(settings.heightTag).toBe(true)
+    const next = await bagTemplate([], key, lookup, 7, 2, HIDDEN_KIND, settings)
+    expect(next.tags).toContainEqual(['H', '7'])
+    expect(next.tags.some((t) => t[0] === 'h')).toBe(false)
+  })
+})
+
 describe('the ephemeral envelope', () => {
   it('is a 33330 in everything but the kind', async () => {
     const { outer } = await said('hello')
     expect(outer.kind).toBe(CHAT_BAG_KIND)
     expect(outer.tags.find((t) => t[0] === 'd')?.[1]).toBe(lookup)
-    expect(outer.tags.find((t) => t[0] === 'h')?.[1]).toBe('12')
+    expect(outer.tags.find((t) => t[0] === 'H')?.[1]).toBe('12')
+    expect(outer.tags.some((t) => t[0] === 'h')).toBe(false)
     expect(ciphertextOf(outer)).not.toBeNull()
   })
 

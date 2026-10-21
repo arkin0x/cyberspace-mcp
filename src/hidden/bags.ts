@@ -33,6 +33,14 @@ import { hintFits, hintTags, parseHint, type HintHeights } from './hint.js'
 export const HIDDEN_KIND = 33330
 /** The same envelope in the ephemeral range: chat. A 23330 is a 33330 in every respect but the kind. */
 export const CHAT_BAG_KIND = 23330
+/**
+ * The bag's height tag (spec 8.6): ["H", "<height>"] on a 33330 bag and a
+ * 23330 chat envelope. Uppercase since 2026-10-21 (arkinox), because NIP-29
+ * reads `h` on every kind as a group id. `h` is read only on events written
+ * before then (heightHint) and never written.
+ */
+export const HEIGHT_TAG = 'H'
+export const LEGACY_HEIGHT_TAG = 'h'
 /** A chat line, inside the ephemeral envelope. */
 export const CHAT_KIND = 23333
 /** Longest chat line (brief, ruling 8). */
@@ -449,7 +457,7 @@ export function editedTemplate(next: EventTemplate, previous: Pick<NostrEvent, '
 
 /**
  * What a bag says in public about itself, beyond its lookup id (spec 8.6,
- * 7.7), as ONOSENDAI's BagSettings: the h tag, the hint, the riddle, and
+ * 7.7), as ONOSENDAI's BagSettings: the H tag, the hint, the riddle, and
  * ONOSENDAI's contents and money hints (2026-10-18, `contents` tags). Every
  * rewrite of a bag carries them forward, so removing or moving one thing
  * never changes what the bag says about itself.
@@ -494,7 +502,10 @@ function bagContentsTags(entries: readonly (BagEntry | ChatRumor)[], settings: P
   return c.cashu > 0 ? [['contents', 'cashu']] : []
 }
 
-/** The settings a published bag carries (ONOSENDAI bagSettingsOf). */
+/**
+ * The settings a published bag carries (ONOSENDAI bagSettingsOf). A bag read
+ * by a legacy `h` reads as heightTag: true, so its next rewrite says `H`.
+ */
 export function bagSettingsOf(ev: NostrEvent, height: number): BagSettings {
   const h = heightHint(ev)
   const hint = parseHint(ev.tags, h ?? height)
@@ -512,10 +523,12 @@ interface BagPlace { at: Position; plane: Plane }
  * by d = lookup_id, so there is one per author, region and height; kind
  * 33330 is addressable, so republishing it replaces the old one. The caller
  * signs and publishes, with a created_at that exceeds the previous bag's.
+ * The height goes out as `H` (HEIGHT_TAG) unless settings turn it off, and
+ * never as `h`; chat envelopes are written here too.
  */
 export async function bagTemplate(entries: readonly (BagEntry | ChatRumor)[], regionKey: Uint8Array, lookupId: string, height: number, createdAt: number, kind: number = HIDDEN_KIND, settings: BagSettings = DEFAULT_BAG_SETTINGS, place?: BagPlace): Promise<EventTemplate> {
   const tags: string[][] = [['d', lookupId], ['encrypted', ALGO, await encryptForRegion(regionKey, JSON.stringify(entries))], ['version', '2']]
-  if (settings.heightTag) tags.push(['h', String(height)])
+  if (settings.heightTag) tags.push([HEIGHT_TAG, String(height)])
   if (settings.hint) {
     if (!place) throw new Error('A hint needs the place it points to.')
     if (!hintFits(settings.hint, height)) throw new Error(`A hint box of heights ${settings.hint.join(', ')} cannot contain a height ${height} region.`)
@@ -537,9 +550,19 @@ export function ciphertextOf(ev: NostrEvent): string | null {
   return enc[2]
 }
 
-/** The bag's h tag, or null when it carries none or a malformed one. */
-export function heightHint(ev: NostrEvent): number | null {
-  const h = tag(ev, 'h')
+/**
+ * The bag's height tag (spec 8.6), or null when it states no height (ONOSENDAI
+ * heightHint). The tag is `H` since 2026-10-21; it was `h`, which NIP-29 reads
+ * on any kind as a group id. An event that carries any `H` is read by `H`
+ * alone and its `h` tags are ignored; one without `H` is read by a legacy `h`.
+ * The tag read must appear exactly once with a canonical decimal value; more
+ * than one, or a malformed value, and the bag states no height (it still opens).
+ */
+export function heightHint(ev: Pick<NostrEvent, 'tags'>): number | null {
+  const name = ev.tags.some((t) => t[0] === HEIGHT_TAG) ? HEIGHT_TAG : LEGACY_HEIGHT_TAG
+  const found = ev.tags.filter((t) => t[0] === name)
+  if (found.length !== 1) return null
+  const h = found[0][1]
   if (h === undefined || !/^(0|[1-9][0-9]*)$/.test(h)) return null
   return Number(h)
 }
@@ -573,7 +596,7 @@ function fromInner(inner: Rumor, outer: NostrEvent, keyHex: string, facts: BagFa
  * Empty covers every way it fails to open: not an envelope, the wrong key,
  * or a bag that is not an array. Each item that does not verify is dropped,
  * not the whole bag. `height` is the height of the region `regionKey` was
- * derived for; it wins over the bag's h tag.
+ * derived for; it wins over the bag's height tag.
  */
 export async function unbag(outer: NostrEvent, regionKey: Uint8Array, resolve?: ResolveReference, origin?: RegionOrigin, height?: number): Promise<Hidden[]> {
   const ct = ciphertextOf(outer)
