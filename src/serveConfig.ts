@@ -55,6 +55,18 @@ export interface WakeSettings {
   continueDelaySeconds: number
   /** The directory the turn runs in; default the directory serve was started in. */
   cwd: string | null
+  /**
+   * Files whose modification time counts as activity for the watchdog, besides
+   * tool calls and the command's output (arkinox, 2026-10-22: Hermes prints
+   * nothing until its turn ends, so a turn that ran scripts for 15 minutes was
+   * stopped as idle). For a Hermes agent: its profile's state.db and
+   * state.db-wal, which Hermes writes at every step. Default none.
+   */
+  activityPaths: string[]
+  /** Continue turns after a work turn ended before its orders were marked done (work_done); then one DM to the operator. 0 turns resuming off. */
+  maxResumes: number
+  /** Seconds between a work turn's end and the continue turn that resumes it. */
+  resumeDelaySeconds: number
 }
 
 export const WAKE_DEFAULTS = {
@@ -67,6 +79,8 @@ export const WAKE_DEFAULTS = {
   followSettleSeconds: 12,
   maxContinuations: 12,
   continueDelaySeconds: 30,
+  maxResumes: 3,
+  resumeDelaySeconds: 60,
 } as const
 
 export interface ServeSettings {
@@ -203,6 +217,17 @@ export interface ServeFileConfig {
 
 const obj = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
 const posNum = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined)
+const countOf = (v: unknown): number | undefined => (typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : undefined)
+
+/** wake.activityPaths: a path or a list of paths; a leading ~/ is the home directory. Throws a sentence when it is unusable. */
+export function activityPathsOf(value: unknown): string[] {
+  if (value === undefined || value === null || value === '') return []
+  const list = typeof value === 'string' ? [value] : value
+  if (!Array.isArray(list) || !list.every((p) => typeof p === 'string' && p.trim() !== '')) {
+    throw new Error('config.json wake.activityPaths must be a path or an array of paths')
+  }
+  return (list as string[]).map((p) => (p.startsWith('~/') ? join(homedir(), p.slice(2)) : p))
+}
 
 /** serve's settings: defaults, then config.json, then the flags. A wake command that is there and unusable stops serve with a sentence. */
 export function serveSettingsFrom(args: ServeArgs, file: ServeFileConfig): ServeSettings {
@@ -231,6 +256,9 @@ export function serveSettingsFrom(args: ServeArgs, file: ServeFileConfig): Serve
       maxContinuations: posNum(w.maxContinuations) !== undefined ? Math.floor(posNum(w.maxContinuations)!) : WAKE_DEFAULTS.maxContinuations,
       continueDelaySeconds: posNum(w.continueDelaySeconds) ?? WAKE_DEFAULTS.continueDelaySeconds,
       cwd: typeof w.cwd === 'string' && w.cwd.trim() ? w.cwd : null,
+      activityPaths: activityPathsOf(w.activityPaths),
+      maxResumes: countOf(w.maxResumes) ?? WAKE_DEFAULTS.maxResumes,
+      resumeDelaySeconds: posNum(w.resumeDelaySeconds) ?? WAKE_DEFAULTS.resumeDelaySeconds,
     },
   }
 }
@@ -246,10 +274,12 @@ Usage: cyberspace-mcp serve [--state <dir>] [options] [agent options]
   --wake-command <cmd>          The command that runs one model turn; {prompt} is replaced by the prompt,
                                 as one argument (no shell). Example: claude -p {prompt} --mcp-config ...
   --reply-command <cmd>         The same, for replies (a DM, a chat tag, your operator's move, a ride ready):
-                                a faster model. Default: the wake command.
+                                a faster model. Default: the wake command. With it, orders get a quick
+                                reply turn and then a work turn on the wake command.
   --no-wake                     Serve without the waker, even when config.json has a wake command.
   --poll-seconds <n>            How often the waker looks for a reason to wake. Default ${WAKE_DEFAULTS.pollSeconds}
-  --idle-kill-minutes <n>       Stop a turn with no tool call and no output for this long. Default ${WAKE_DEFAULTS.idleKillMinutes}
+  --idle-kill-minutes <n>       Stop a turn with no tool call, no output and no write to wake.activityPaths
+                                for this long. Default ${WAKE_DEFAULTS.idleKillMinutes}
   --max-turn-minutes <n>        Stop a turn that runs this long. Default ${WAKE_DEFAULTS.maxTurnMinutes}
   --chat-stranger-minutes <n>   Least minutes between turns woken by strangers in chat. Default ${WAKE_DEFAULTS.chatStrangerMinutes}
   --roam-rewake-minutes <n>     Least minutes between roam wakes. Default ${WAKE_DEFAULTS.roamRewakeMinutes}
@@ -257,5 +287,6 @@ Usage: cyberspace-mcp serve [--state <dir>] [options] [agent options]
 Every agent option of the stdio mode works here too (--operator, --cap-call-seconds, ...);
 see cyberspace-mcp --help. config.json keys: "serve": { "port", "token" } and
 "wake": { "command", "replyCommand", "pollSeconds", "idleKillMinutes", "maxTurnMinutes",
-"chatStrangerMinutes", "roamRewakeMinutes", "ordersRewakeMinutes", "maxContinuations", "cwd" }.
+"chatStrangerMinutes", "roamRewakeMinutes", "ordersRewakeMinutes", "maxContinuations", "cwd",
+"activityPaths", "maxResumes", "resumeDelaySeconds" }.
 Pause the waker with cyberspace-mcp wake pause (the file <state>/wake.pause); resume with wake resume.`

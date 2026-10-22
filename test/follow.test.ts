@@ -12,10 +12,11 @@
 // protected, a human stranger's is; and a ride's arrival at a stop reports
 // the exception.
 
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it, vi } from 'vitest'
+import * as nip59 from 'nostr-tools/nip59'
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { Agent, Refusal } from '../src/agent.js'
 import { hopTemplate, spawnTemplate } from '../src/chain/builder.js'
@@ -44,6 +45,7 @@ interface World {
   canonical: FakeRelay
   mine: FakeRelay
   general: FakeRelay
+  inbox: FakeRelay
 }
 
 function world(): World {
@@ -51,8 +53,8 @@ function world(): World {
   const canonical = network.add(CANONICAL, { refuse: (ev) => (ev.kind === 1059 ? 'blocked: kind 1059 is not accepted here' : null) })
   const mine = network.add(MINE)
   const general = network.add(GENERAL, { requireAuth: false })
-  network.add(INBOX, { challengeOnReq: true, protectWraps: true, requireAuthToPublish: true })
-  return { network, canonical, mine, general }
+  const inbox = network.add(INBOX, { challengeOnReq: true, protectWraps: true, requireAuthToPublish: true })
+  return { network, canonical, mine, general, inbox }
 }
 
 const running: Agent[] = []
@@ -322,5 +324,176 @@ describe('nobody\'s gibson', () => {
     } finally {
       spy.mockRestore()
     }
+  }, 30_000)
+})
+
+/** The operator's lists (DM inbox, and a contact list that follows the agent), and a STRATEGY sender. */
+function operatorOf(w: World, opSk: Uint8Array, me: string) {
+  w.general.seed(finalizeEvent({ kind: 10050, created_at: nowSeconds(), tags: [['relay', INBOX]], content: '' }, opSk) as NostrEvent, finalizeEvent({ kind: 3, created_at: nowSeconds(), tags: [['p', me]], content: '' }, opSk) as NostrEvent)
+  let at = nowSeconds() - 120
+  return (text: string): void => {
+    at += 5
+    w.inbox.seed(nip59.wrapEvent({ kind: 14, content: text, tags: [['p', me], ['agent', 'strategy']], created_at: at }, opSk, me) as NostrEvent)
+  }
+}
+
+describe('following belongs to a STRATEGY (arkinox, 2026-10-22)', () => {
+  const w = world()
+  const opSk = generateSecretKey()
+  const op = getPublicKey(opSk)
+  const agentSk = generateSecretKey()
+  const me = getPublicKey(agentSk)
+  const home = placeFromHex(me)
+  const dir = dirWithKey(agentSk)
+  const operator = new Walker(opSk)
+  const strategy = operatorOf(w, opSk, me)
+  let a: Agent
+
+  it('a new STRATEGY switches the watch off, inbox says why once, and moves are no longer reported', async () => {
+    a = await start(w, dir, op)
+    await a.identity({ name: 'xor' })
+    await a.hop({ target: { dx: 5, dy: 0, dz: 0 } })
+    w.canonical.seed(operator.spawn, operator.hop(east(home, 30n)))
+    strategy('Follow me around.')
+    await a.inbox()
+    await a.followOperator({ on: true })
+    expect(a.follow.status().onFor).toBe(a.operatorChannel.strategy()!.id)
+
+    // The next STRATEGY says nothing about following.
+    strategy('Build things by the disco floor.')
+    const r = await a.inbox()
+    expect(r.text).toContain('Follow watch switched off: a new STRATEGY from your operator arrived')
+    expect(r.text).toContain('If your STRATEGY asks you to follow or meet your operator, call follow_operator with on: true')
+    expect(r.data.followSwitchedOff).toMatchObject({ reason: expect.stringContaining('a new STRATEGY') })
+    expect(a.follow.on).toBe(false)
+    expect(readFileSync(join(dir, 'follow.json'), 'utf8')).toContain('a new STRATEGY from your operator arrived')
+
+    w.canonical.inject(operator.hop(east(home, 40n)))
+    await new Promise((r) => setTimeout(r, 300))
+    const ow = await a.ordersWaiting()
+    expect(ow.data.operatorMoved).toBeNull()
+    // inbox said so already: nothing for the waker to wake on, and inbox does not say it twice.
+    expect(ow.data.followSwitchedOff).toBeNull()
+    expect((await a.inbox()).text).not.toContain('Follow watch switched off')
+  }, 30_000)
+
+  it('when the new STRATEGY does ask to follow, on again stays on through inbox reads and a restart, and reports moves', async () => {
+    strategy('Follow me, and build where I stop.')
+    const r = await a.inbox()
+    // Already off: nothing to switch, nothing to say.
+    expect(r.text).not.toContain('Follow watch switched off')
+    const on = await a.followOperator({ on: true })
+    expect(on.data.on).toBe(true)
+    expect(a.follow.status().onFor).toBe(a.operatorChannel.strategy()!.id)
+    expect((await a.inbox()).text).not.toContain('Follow watch switched off')
+    expect(a.follow.on).toBe(true)
+    const h = operator.hop(east(home, 50n))
+    w.canonical.inject(h)
+    await until('the move', () => a.follow.unseen()?.eventId === h.id)
+    expect((await a.ordersWaiting()).data.operatorMoved).toMatchObject({ eventId: h.id, quiet: false })
+
+    await stop(a)
+    a = await start(w, dir, op)
+    expect((await a.ordersWaiting()).data.followSwitchedOff).toBeNull()
+    expect(a.follow.on).toBe(true)
+    await stop(a)
+  }, 30_000)
+
+  it('a watch left on by a version that kept no STRATEGY is switched off once one is known, and orders_waiting says so until inbox does', async () => {
+    const legacy = { version: 1, on: true, operator: op, latest: null, ackedId: null }
+    writeFileSync(join(dir, 'follow.json'), JSON.stringify(legacy))
+    a = await start(w, dir, op)
+    const ow = await a.ordersWaiting()
+    expect(a.follow.on).toBe(false)
+    expect(ow.data.followSwitchedOff).toMatchObject({ reason: expect.stringContaining('from before this server kept which STRATEGY asked for it') })
+    expect((await a.ordersWaiting()).data.followSwitchedOff).not.toBeNull()
+    const r = await a.inbox()
+    expect(r.text).toContain('Follow watch switched off')
+    expect((await a.ordersWaiting()).data.followSwitchedOff).toBeNull()
+    await stop(a)
+  }, 30_000)
+
+  it('a legacy watch with no STRATEGY ever set stays on', async () => {
+    const w2 = world()
+    const sk = generateSecretKey()
+    const d = dirWithKey(sk)
+    operatorOf(w2, opSk, getPublicKey(sk))
+    writeFileSync(join(d, 'follow.json'), JSON.stringify({ version: 1, on: true, operator: op, latest: null, ackedId: null }))
+    const b = await start(w2, d, op)
+    await b.identity({ name: 'other' })
+    const ow = await b.ordersWaiting()
+    expect(b.follow.on).toBe(true)
+    expect(ow.data.followSwitchedOff).toBeNull()
+    await stop(b)
+  }, 30_000)
+})
+
+describe('out of reach, once per STRATEGY (arkinox, 2026-10-22: five "I can\'t reach you without a hyperjump" DMs)', () => {
+  const w = world()
+  const opSk = generateSecretKey()
+  const op = getPublicKey(opSk)
+  const agentSk = generateSecretKey()
+  const me = getPublicKey(agentSk)
+  const home = placeFromHex(me)
+  const dir = dirWithKey(agentSk)
+  const operator = new Walker(opSk)
+  const strategy = operatorOf(w, opSk, me)
+  const FAR = 1n << 40n
+  let a: Agent
+
+  async function moveTo(p: Place): Promise<void> {
+    const h = operator.hop(p)
+    w.canonical.inject(h)
+    await until('the move', () => a.follow.unseen()?.eventId === h.id)
+  }
+
+  it('invites the one note the first time, then says not to, and keeps the far moves quiet', async () => {
+    a = await start(w, dir, op)
+    await a.identity({ name: 'xor' })
+    await a.hop({ target: { dx: 5, dy: 0, dz: 0 } })
+    w.canonical.seed(operator.spawn, operator.hop(east(home, FAR)))
+    strategy('Follow me.')
+    await a.inbox()
+    const first = await a.followOperator({ on: true })
+    expect(first.data.needsRide).toBe(true)
+    expect(first.data.unreachableNote).toBe('invited')
+    expect(first.text).toContain('Only if your STRATEGY asks you to follow or meet your operator, tell them once')
+    const second = await a.followOperator()
+    expect(second.data.unreachableNote).toBe('sent')
+    expect(second.text).toContain('do not message them about it again')
+    expect(second.text).not.toContain('tell them once')
+    // Turning it on again does not reset the rule.
+    expect((await a.followOperator({ on: true })).data.unreachableNote).toBe('sent')
+
+    await moveTo(east(home, FAR + 100n))
+    const ow = await a.ordersWaiting()
+    expect(ow.data.operatorMoved).toMatchObject({ quiet: true })
+    expect(ow.text).toContain('still out of your reach; they were already told')
+  }, 30_000)
+
+  it('the rule survives a restart', async () => {
+    await stop(a)
+    a = await start(w, dir, op)
+    await until('the operator read', () => a.follow.latest() !== null)
+    expect((await a.ordersWaiting()).data.operatorMoved).toMatchObject({ quiet: true })
+    expect((await a.followOperator()).data.unreachableNote).toBe('sent')
+  }, 30_000)
+
+  it('ends when the operator is within reach again; out of reach later is a new situation', async () => {
+    await moveTo(east(home, 30n))
+    expect((await a.ordersWaiting()).data.operatorMoved).toMatchObject({ quiet: false })
+    const near = await a.followOperator()
+    expect(near.data.needsRide).toBe(false)
+    expect(near.data.unreachableNote).toBeNull()
+    expect(near.text).toContain('Following is silent: no message to your operator about it.')
+    await moveTo(east(home, FAR))
+    expect((await a.ordersWaiting()).data.operatorMoved).toMatchObject({ quiet: false })
+    expect((await a.followOperator()).data.unreachableNote).toBe('invited')
+  }, 30_000)
+
+  it('a new STRATEGY that asks to follow gets its own note', async () => {
+    strategy('Follow me, new plan.')
+    expect((await a.inbox()).text).toContain('Follow watch switched off')
+    expect((await a.followOperator({ on: true })).data.unreachableNote).toBe('invited')
   }, 30_000)
 })
