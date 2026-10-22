@@ -15,6 +15,7 @@ import { generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { Agent, Refusal } from '../src/agent.js'
 import { hopTemplate, spawnTemplate } from '../src/chain/builder.js'
 import { bytesToHex, signEvent } from '../src/nostr/event.js'
+import { DEFAULT_RELAY } from '../src/nostr/relays.js'
 import type { Calibration } from '../src/space/calibration.js'
 import { placeFromHex, placeOf } from '../src/space/coords.js'
 import type { EntrySummary, OpenedBag } from '../src/space/regionKeys.js'
@@ -60,6 +61,30 @@ function heardLine(chat: Agent['chat'], text: string): Promise<void> {
     chat.on('line', onLine)
   })
 }
+
+describe('an agent on the default canonical relay', () => {
+  it('starts without the non-default warning, and identity reports the default', async () => {
+    // The fake network stands in for the default relay: nothing leaves the process.
+    network.add(DEFAULT_RELAY)
+    const lines: string[] = []
+    const agent = await startAgent(dirWithKey(generateSecretKey()), { relays: [DEFAULT_RELAY, MINE], operator: getPublicKey(generateSecretKey()), log: (l) => lines.push(l) })
+    expect(agent.nonDefaultCanonical).toBe(false)
+    expect(lines.some((l) => l.includes('WARNING'))).toBe(false)
+    const r = await agent.identity({})
+    expect(r.data.canonical).toBe(`${DEFAULT_RELAY}/`)
+    expect(r.data.nonDefaultCanonical).toBe(false)
+    expect(r.text).not.toContain('WARNING')
+  })
+
+  it('warns at startup when the canonical relay is the old default, wss://onosendai.feeds.relay.tools', async () => {
+    const FEEDS = 'wss://onosendai.feeds.relay.tools'
+    network.add(FEEDS)
+    const lines: string[] = []
+    const agent = await startAgent(dirWithKey(generateSecretKey()), { relays: [FEEDS, MINE], log: (l) => lines.push(l) })
+    expect(agent.nonDefaultCanonical).toBe(true)
+    expect(lines.find((l) => l.startsWith('WARNING'))).toContain(`the canonical relay is ${FEEDS}/, not the default ${DEFAULT_RELAY}`)
+  })
+})
 
 describe('an agent on a fresh key', () => {
   const skA = generateSecretKey()

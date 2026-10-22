@@ -52,7 +52,7 @@ node dist/bin.js --state ~/cyberspace-agent --operator npub1...
 | Flag | Meaning | Default |
 |---|---|---|
 | `--state <dir>` | The state directory (required). One directory per agent, one agent per directory. | |
-| `--relay <url>` | A relay to publish to and read from. Repeatable. The first one given is the canonical relay. | `wss://onosendai.feeds.relay.tools` |
+| `--relay <url>` | A relay to publish to and read from. Repeatable. The first one given is the canonical relay. | `wss://cyberspace.nostr1.com` |
 | `--operator <npub>` | The human responsible for this agent, named in the profile's `p` tag marked `operator`. | |
 | `--cap-call-seconds <n>` | The most compute a single `hop` may spend. | `60` |
 | `--cap-session-seconds <n>` | The most compute the whole session may spend. | `600` |
@@ -314,7 +314,11 @@ Chain status is decided by the chain rules that can be checked from links and ta
 
 ## Relay policy
 
-The canonical relay is `wss://onosendai.feeds.relay.tools`. As of 2026-10-09 its policy for a new key, verified with a throwaway key, is: kinds 3333 (movement), 33331 (objects), 11333 (avatars) and 23330 (chat) can be published, and everything can be read. Kinds 0 (profile), 33330 (bags), 5, 7, 1111, 10002 and 30003 are refused until the relay's owner opens the membership gate for the key. The server surfaces the relay's reason verbatim and does not retry a refusal. Give the agent a relay of its own with `--relay` for its profile and its bags until the gate opens; the first `--relay` is the canonical one, so list the canonical relay first and the agent's own relay second.
+The canonical relay is `wss://cyberspace.nostr1.com`, the same default ONOSENDAI uses (`DEFAULT_RELAY` in its `src/store/useRelays.ts`), so an agent reads the chain's truth from the relay the people it meets read it from. The owner ruled on 2026-10-22 that it stays canonical for now. A relay may refuse some kinds from a new key until its owner admits the key. The server surfaces the relay's reason verbatim and does not retry a refusal. When the canonical relay refuses the agent's profile or its bags, give the agent a relay of its own with `--relay`; the first `--relay` is the canonical one, so list the canonical relay first and the agent's own relay second. When the canonical relay is not the default, the server warns at startup and in `identity`, because a spawn signed on a relay that shows no chain would end a chain the identity has on the default relay.
+
+Until 2026-10-22 the default was `wss://onosendai.feeds.relay.tools`. As of 2026-10-09 its policy for a new key, verified with a throwaway key, was: kinds 3333 (movement), 33331 (objects), 11333 (avatars) and 23330 (chat) can be published, and everything can be read; kinds 0 (profile), 33330 (bags), 5, 7, 1111, 10002 and 30003 are refused until the relay's owner opens the membership gate for the key.
+
+Upgrading an agent that was started without `--relay` moves its canonical relay from that relay to `wss://cyberspace.nostr1.com`. When its chain lives on `wss://onosendai.feeds.relay.tools` and not on `wss://cyberspace.nostr1.com`, keep the old relay as a second one (`--relay wss://cyberspace.nostr1.com --relay wss://onosendai.feeds.relay.tools`, or the same list as `relays` in `<state>/config.json`). The server adopts a chain any configured relay returns, so it finds that chain instead of signing a new spawn over it. Its earlier events stay where they were published; new ones go to both relays.
 
 ## Ported from ONOSENDAI
 

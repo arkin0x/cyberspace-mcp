@@ -5,7 +5,8 @@
 
 import { describe, expect, it } from 'vitest'
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure'
-import { Relays } from '../src/nostr/relays.js'
+import { parseArgs, settingsFrom } from '../src/config.js'
+import { DEFAULT_RELAY, Relays, isDefaultRelay } from '../src/nostr/relays.js'
 import { signEvent } from '../src/nostr/event.js'
 import { FakeNetwork } from './fakeRelay.js'
 
@@ -19,6 +20,24 @@ function relaysOn(network: FakeNetwork, urls: string[], sk = generateSecretKey()
 }
 
 const note = (sk: Uint8Array, text: string, createdAt = 1_700_000_000) => signEvent({ kind: 1, created_at: createdAt, content: text, tags: [] }, sk)
+
+describe('the default canonical relay', () => {
+  it('is ONOSENDAI\'s DEFAULT_RELAY, wss://cyberspace.nostr1.com (owner\'s ruling, 2026-10-22)', () => {
+    expect(DEFAULT_RELAY).toBe('wss://cyberspace.nostr1.com')
+  })
+
+  it('is what a server started without --relay or config.json relays uses', () => {
+    expect(settingsFrom(parseArgs(['--state', '/x']), {}).relays).toEqual(['wss://cyberspace.nostr1.com'])
+  })
+
+  it('is recognized however the URL is written, and no other relay is', () => {
+    expect(isDefaultRelay('wss://cyberspace.nostr1.com')).toBe(true)
+    expect(isDefaultRelay('wss://cyberspace.nostr1.com/')).toBe(true)
+    expect(isDefaultRelay('WSS://Cyberspace.Nostr1.com')).toBe(true)
+    expect(isDefaultRelay('wss://onosendai.feeds.relay.tools')).toBe(false)
+    expect(isDefaultRelay('wss://canonical.example')).toBe(false)
+  })
+})
 
 describe('the relay client over the fake relay', () => {
   it('authenticates, publishes, and reads back what it published', async () => {

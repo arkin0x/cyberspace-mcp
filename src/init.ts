@@ -13,6 +13,7 @@ import { Agent, type AgentConfig } from './agent.js'
 import { parsePubkey } from './chain/resolve.js'
 import { readFileConfig, readWalletFile, settingsFrom } from './config.js'
 import { ensureToken, TOKEN_FILE } from './http.js'
+import { DEFAULT_RELAY } from './nostr/relays.js'
 import { DEFAULT_PORT, PROMPT_PLACEHOLDER, defaultStateDir, mcpUrl } from './serveConfig.js'
 import { LockHeldError, StateDir } from './state/dir.js'
 import { getPublicKey } from 'nostr-tools/pure'
@@ -27,7 +28,7 @@ Usage: cyberspace-mcp init [options]
   --about <text>             The agent's profile text.
   --cap-call-seconds <n>     The most compute one hop may spend. Default 60
   --cap-session-seconds <n>  The most compute a session may spend. Default 600
-  --relay <url>              A relay; repeatable; the first is canonical. Default the ONOSENDAI relay.
+  --relay <url>              A relay; repeatable; the first is canonical. Default ${DEFAULT_RELAY}, ONOSENDAI's relay.
   --client <name>            Who runs the agent's turns: claude (Claude Code), hermes, or none. Default: claude
                              when it is installed, else hermes when it is, else none.
   --hermes-profile <name>    The Hermes profile for --client hermes. Default cyberspace
