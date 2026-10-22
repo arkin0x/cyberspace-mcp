@@ -1,10 +1,12 @@
-// contentsInterop.test.ts: a bag's `contents` rows, against ONOSENDAI #441
-// (2311e07), which added `["contents", "nft", "<count>"]` after `cashu`: the
+// contentsInterop.test.ts: a bag's `contents` rows, against ONOSENDAI #444
+// (b892512), which reads them as spec 7.7 "Contents" has them (cyberspace
+// #75): `["contents", "nft", "<count>"]` after `cashu` (ONOSENDAI #441), the
 // nonfungible.cash claim links written in a bag's messages, each once per
-// message, under "Publish contents" only, as the cashu count is written.
+// message and none inside another URL, under "Publish contents" only, as the
+// cashu count is written; counts are positive decimal integers with no cap.
 // fixtures/onosendai-contents.json was made with ONOSENDAI's own code
 // (scripts/gen-onosendai-contents-fixture.ts): how many links its recognizer
-// (#440) counts in each text, the rows it writes for fixed bags under each
+// counts in each text, the rows it writes for fixed bags under each
 // setting, the settings it reads from rows, and two bags it sealed with the
 // test agent's key, with the rows it writes after each rewrite made here
 // through the tools (hide, remove_placed, move_placed), over fake relays only.
@@ -42,9 +44,19 @@ const fx = JSON.parse(readFileSync(new URL('./fixtures/onosendai-contents.json',
 const BASE = BigInt(fx.base)
 const rowsOf = (t: { tags: string[][] }): string[][] => t.tags.filter((x) => x[0] === 'contents')
 
-describe('contents rows, against ONOSENDAI #441', () => {
+describe('contents rows, against ONOSENDAI #444', () => {
   it('counts nonfungible.cash claim links as ONOSENDAI does, text by text, and never a look-alike', () => {
     expect(fx.recognizer.some((r) => r.onosendai > 1)).toBe(true)
+    // What the fixture pins (spec 7.7), so a regenerated one that lost a case fails here. A and B are the generator's links.
+    const A = `https://nonfungible.cash/claim/${'6f'.repeat(16)}#${'A'.repeat(42)}w`
+    const B = `https://nonfungible.cash/claim/${'0a'.repeat(16)}#${'b_-'.repeat(14)}Q`
+    const counted = (text: string) => fx.recognizer.find((r) => r.text === text)?.onosendai
+    expect(counted(`https://a.example/?b=1;${A}`)).toBe(0)
+    expect(counted(`https://a.example/x(${A}`)).toBe(0)
+    expect(counted(`https://a.example/?b=1;${B} and ${A}`)).toBe(1)
+    expect(counted(`see;${A}`)).toBe(1)
+    expect(counted(`HTTPS://A.EXAMPLE/#top;${A}`)).toBe(1)
+    expect(counted(`${A},${B}`)).toBe(2)
     for (const r of fx.recognizer) expect(nftLinkCount(r.text), JSON.stringify(r.text)).toBe(r.onosendai)
   })
 
@@ -61,6 +73,13 @@ describe('contents rows, against ONOSENDAI #441', () => {
   })
 
   it('reads rows into a bag\'s settings as ONOSENDAI does: a counted nft row is the contents hint, a bare one is nothing', () => {
+    // What the fixture pins (spec 7.7): no cap, no sign or leading zero, and money alone only from the bare cashu row.
+    const read = (rows: string[][]) => fx.reads.find((r) => JSON.stringify(r.rows) === JSON.stringify(rows))?.onosendai
+    expect(read([['contents', 'shard', '1000000']])).toEqual({ contents: true, money: false })
+    expect(read([['contents', 'shard', '9'.repeat(400)]])).toEqual({ contents: true, money: false })
+    for (const bad of ['03', '+3', '1e2', '0']) expect(read([['contents', 'shard', bad]]), bad).toEqual({ contents: false, money: false })
+    expect(read([['contents', 'cashu', '0']])).toEqual({ contents: false, money: false })
+    expect(read([['contents', 'cashu']])).toEqual({ contents: false, money: true })
     for (const r of fx.reads) {
       const ev = { id: '0'.repeat(64), pubkey: fx.agent, created_at: 1, kind: HIDDEN_KIND, content: '', sig: '', tags: [['d', 'x'], ['H', '8'], ...r.rows] }
       const s = bagSettingsOf(ev, 8)
