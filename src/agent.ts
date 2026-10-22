@@ -1063,8 +1063,11 @@ export class Agent {
    * Whether the operator's position is out of reach from where the agent
    * stands, from memory and cheap: 'ride' across a wall no hop crosses,
    * 'caps' when the next step toward them is refused by the caps, null
-   * otherwise. follow_operator's own answer weighs the landing too; this is
-   * only for keeping quiet about a move.
+   * otherwise. follow_operator's own answer aims beside them and weighs the
+   * landing too; this is only for keeping quiet about a move, and quiet
+   * needs follow_operator to have found them out of reach first, so a
+   * difference between the two at the edge of reach only delays a wake to
+   * the operator's next move.
    */
   private reachOf(m: OperatorMove): 'ride' | 'caps' | null {
     const me = this.keeper.place()
@@ -1094,14 +1097,14 @@ export class Agent {
       this.follow.setOn(false)
       return { text: 'Follow watch off: your operator\'s moves are no longer watched, and orders_waiting no longer reports them.', data: { on: false } }
     }
-    // Any call says why the server switched the watch off, so it is told once.
-    this.follow.refresh()
-    const off = this.follow.pendingOff()
-    if (off) this.follow.markOffShown()
     const problem = this.operatorProblem()
     if (problem) throw new Refusal(problem)
     const op = this.operatorOfProfile()
     if (!op) throw new Refusal('Your profile names no operator, so there is nobody to follow. Call identity with operator (your human\'s npub), or have the server started with --operator.')
+    // Any answer says why the server switched the watch off, so it is told once.
+    this.follow.refresh()
+    const off = this.follow.pendingOff()
+    if (off) this.follow.markOffShown()
     if (input.on === true) this.follow.setOn(true)
     const on = this.follow.on
     if (!on) {
@@ -1325,10 +1328,16 @@ export class Agent {
    */
   async inbox(): Promise<ToolResult> {
     const result = await this.operatorChannel.inbox()
-    this.follow.refresh()
-    const off = this.follow.pendingOff()
+    // The orders are marked read already: the follow bookkeeping failing must never lose them.
+    let off: ReturnType<OperatorWatch['pendingOff']> = null
+    try {
+      this.follow.refresh()
+      off = this.follow.pendingOff()
+      if (off) this.follow.markOffShown()
+    } catch (err) {
+      this.log(`follow: ${err instanceof Error ? err.message : String(err)}`)
+    }
     if (!off) return result
-    this.follow.markOffShown()
     return { ...result, text: `${result.text}\n${followOffWords(off.reason)}`, data: { ...result.data, followSwitchedOff: { at: off.at, reason: off.reason } } }
   }
 

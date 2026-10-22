@@ -246,7 +246,14 @@ export class Waker {
     this.now = deps.now ?? Date.now
     this.dir = StateDir.open(deps.stateDir)
     const saved = this.dir.readJson<OpenWork | null>(WORK_FILE, null)
-    if (saved?.version === 1 && Array.isArray(saved.ids) && saved.ids.length > 0) this.work = saved
+    if (saved?.version === 1 && Array.isArray(saved.ids) && saved.ids.length > 0) {
+      this.work = saved
+      // A crash (not a clean stop, which records how the turn ended) during a work turn left nothing due: resume it now.
+      if (saved.resumeAt === null && saved.workTurns > 0) {
+        this.work = { ...saved, resumeAt: this.now(), lastEnd: { why: 'the server stopped during it', abnormal: true } }
+        this.saveWork()
+      }
+    }
   }
 
   /** The open work, for the tests: how many orders, how many turns, whether a resume is due. */
@@ -279,14 +286,16 @@ export class Waker {
     const raw = Array.isArray(result.data.messages) ? result.data.messages as OrderSeen[] : []
     const fresh = raw.filter((m) => m && typeof m.id === 'string')
     const before = this.work ? [...this.work.ids] : []
-    if (fresh.length > 0) {
+    // Only an id not open yet is new work (the same rumor can come back in a second wrap): it gives the work a fresh count and a fresh age.
+    const added = fresh.filter((m) => !this.work?.ids.includes(m.id))
+    for (const m of fresh) this.words.set(m.id, { id: m.id, at: m.at, text: String(m.text ?? ''), strategy: !!m.strategy })
+    if (added.length > 0) {
       const w: OpenWork = this.work ?? { version: 1, ids: [], strategy: false, openedAt: this.now(), workTurns: 0, resumes: 0, resumeAt: null, lastEnd: null }
-      for (const m of fresh) {
+      for (const m of added) {
         if (!w.ids.includes(m.id)) w.ids.push(m.id)
-        this.words.set(m.id, { id: m.id, at: m.at, text: String(m.text ?? ''), strategy: !!m.strategy })
         if (m.strategy) w.strategy = true
       }
-      Object.assign(w, { workTurns: 0, resumes: 0, resumeAt: null, lastEnd: null })
+      Object.assign(w, { openedAt: this.now(), workTurns: 0, resumes: 0, resumeAt: null, lastEnd: null })
       this.work = w
       this.saveWork()
     }
@@ -438,7 +447,12 @@ export class Waker {
         const marks = this.doneMarks
         await this.turn(reason, REPLY_ORDERS_PROMPT(orders, !!data.strategy), 'reply')
         const closedByReply = this.doneMarks > marks && this.work === null
-        if (!closedByReply && !this.stopped && !this.paused()) await this.turn(`work: ${reason}`, WORK_PROMPT, 'work')
+        if (!closedByReply && !this.stopped && !this.paused()) {
+          // A wake_again from the reply turn is not the work turn's: the work turn asks for its own.
+          this.againRequested = false
+          try { unlinkSync(join(this.deps.stateDir, AGAIN_FILE)) } catch { /* none */ }
+          await this.turn(`work: ${reason}`, WORK_PROMPT, 'work')
+        }
       } else {
         await this.turn(reason, ORDERS_PROMPT(orders, !!data.strategy), 'work')
       }
@@ -515,7 +529,9 @@ export class Waker {
 
   /**
    * After a turn: a turn on the full command that ended while work was open
-   * counts as a work turn, and unless it asked to go on (wake_again, whose
+   * counts as a work turn (without a reply command that is every turn, a
+   * roam or a move turn too, since each one starts with inbox and acts on
+   * what is open), and unless it asked to go on (wake_again, whose
    * continuation carries the work), a continue turn is due
    * resumeDelaySeconds later. A reply turn leaves the work to a work turn.
    */
@@ -561,7 +577,7 @@ export class Waker {
     return outcome
   }
 
-  /** What the activity paths look like now: a change between two looks is activity. */
+  /** What the activity paths look like now: a change between two looks is activity. Local absolute paths: a stat runs on every watchdog tick. */
   private activityMark(): string {
     return this.settings.activityPaths.map((p) => {
       try {

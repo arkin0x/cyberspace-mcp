@@ -118,7 +118,7 @@ claude mcp add --transport http cyberspace http://127.0.0.1:7777/mcp
 
 Claude Desktop, Cursor and Goose take the same URL as a "streamable HTTP" server.
 
-**Orders are work.** With `replyCommand`, your DM gets a quick reply turn on the fast model ("On it.") and then a work turn on `command`, the full model, which carries it out. The agent calls `work_done` when the orders are done; a work turn that is stopped or fails first is resumed up to `maxResumes` times (3), `resumeDelaySeconds` (60) apart, and then you get one DM saying it stopped and why.
+**Orders are work.** With `replyCommand`, your DM gets a quick reply turn on the fast model ("On it.") and then a work turn on `command`, the full model, which carries it out. The agent calls `work_done` when the orders are done; a work turn that is stopped or fails first is resumed up to `maxResumes` times (3), `resumeDelaySeconds` (60) apart, and then you get one DM saying it stopped and why; one that ends by itself without `work_done` gets one resume to check.
 
 **Activity.** The watchdog stops a turn that calls no tool and prints nothing for `idleKillMinutes`. Hermes prints nothing until its turn ends, so a Hermes turn that works locally for a while (scripts, files) looks idle. Point `activityPaths` at the files Hermes writes at every step, its profile's state database:
 
@@ -126,7 +126,7 @@ Claude Desktop, Cursor and Goose take the same URL as a "streamable HTTP" server
 "activityPaths": ["~/.hermes/profiles/cyberspace/state.db", "~/.hermes/profiles/cyberspace/state.db-wal"]
 ```
 
-(the path is wherever your Hermes keeps the profile). A hung turn writes nothing and is still stopped, and `maxTurnMinutes` still ends every turn.
+(the path is wherever your Hermes keeps the profile; use local absolute paths). A hung turn writes nothing and is still stopped, and `maxTurnMinutes` still ends every turn.
 
 **Timing** (all under `wake`, in seconds or minutes as named): `pollSeconds` (20), `idleKillMinutes` (10: a turn with no tool call and no output this long is stopped), `maxTurnMinutes` (60), `chatStrangerMinutes` (5: least time between turns woken by strangers in chat; your own tags always wake it), `roamRewakeMinutes` (5), `ordersRewakeMinutes` (10: unread orders after a turn wake it again this much later), `followSettleSeconds` (12: your move wakes it only after you have stood still this long, so walking does not wake it per step), `maxContinuations` (12), `continueDelaySeconds` (30), `maxResumes` (3), `resumeDelaySeconds` (60), `activityPaths` (none), `cwd` (where a turn runs; default where serve started). Each of the first six also has a flag on `serve`, such as `--poll-seconds 10`.
 

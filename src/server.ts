@@ -471,11 +471,16 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   server.registerTool('inbox', {
     title: 'Inbox',
-    description: 'Your operator\'s private messages (NIP-17 DMs) since the last read, oldest first: these are your orders. Also the current STRATEGY (the operator\'s standing orders, kept across restarts; reread them every turn) and how many messages from anyone else were ignored. A message counts only when it is sealed by the operator your profile names and that operator follows you. Marks what it returns as read. Call this at the start of every turn, and at once whenever a tool result says NEW ORDERS. Before starting work on an order that takes more than a minute, reply with message_operator saying what you are about to do. The server has already reacted 👀 to each order the moment it saw it, so your operator knows you have it; answer with message_operator.',
+    description: 'Your operator\'s private messages (NIP-17 DMs) since the last read, oldest first: these are your orders. Also the current STRATEGY (the operator\'s standing orders, kept across restarts; reread them every turn) and how many messages from anyone else were ignored. A message counts only when it is sealed by the operator your profile names and that operator follows you. Marks what it returns as read. Call this at the start of every turn, and at once whenever a tool result says NEW ORDERS. Before starting work on an order that takes more than a minute, reply with message_operator saying what you are about to do (unless your waker\'s prompt says your reply turn already did). The server has already reacted 👀 to each order the moment it saw it, so your operator knows you have it; answer with message_operator.',
     annotations: { readOnlyHint: false, idempotentHint: false },
   }, async () => call(async () => {
     const result = await agent.inbox()
-    return hooks.onInbox ? hooks.onInbox(result) : result
+    if (!hooks.onInbox) return result
+    // inbox has already marked these orders read: the waker's bookkeeping failing must never lose them.
+    try { return hooks.onInbox(result) } catch (err) {
+      log(`waker: could not keep the open work: ${err instanceof Error ? err.message : String(err)}`)
+      return result
+    }
   }))
 
   server.registerTool('orders_waiting', {
