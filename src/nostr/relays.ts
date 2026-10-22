@@ -35,8 +35,36 @@ import { LiveRegistry, type Handlers } from './liveSub.js'
 import { classifyClose, mergeAnswers, type RelayAnswer } from './relayOutcome.js'
 import { GuardedWebSocket } from './websocket.js'
 
-/** The canonical relay (brief, ruling 9). Configurable; this is the default. */
-export const DEFAULT_RELAY = 'wss://onosendai.feeds.relay.tools'
+/**
+ * The canonical relay (brief, ruling 9). Configurable; this is the default.
+ * It is ONOSENDAI's DEFAULT_RELAY (src/store/useRelays.ts), so an agent and
+ * the people it meets read the chain's truth from the same relay; the owner
+ * ruled on 2026-10-22 that wss://cyberspace.nostr1.com stays canonical for
+ * now. Before that the default here was wss://onosendai.feeds.relay.tools.
+ */
+export const DEFAULT_RELAY = 'wss://cyberspace.nostr1.com'
+
+/** Whether a relay URL is the default canonical relay, compared the way nostr-tools normalizes URLs. */
+export function isDefaultRelay(url: string): boolean {
+  return normalizeURL(url) === normalizeURL(DEFAULT_RELAY)
+}
+
+/** The default canonical relay until 2026-10-22. */
+export const FORMER_DEFAULT_RELAY = 'wss://onosendai.feeds.relay.tools'
+
+/**
+ * The relays the own-chain self-check reads besides the configured ones:
+ * the former default, while the canonical relay is the default. An agent
+ * set up without --relay moved from it to the new default on upgrade; when
+ * its chain lives only on the former default and its chain.json is gone,
+ * this is what finds that chain, so the first hop adopts it instead of
+ * signing a spawn that would end it. Read, never written: the self-check's
+ * verdict is unchanged (any relay can say "found", only the canonical
+ * relay can say "none"), and nothing is published there.
+ */
+export function selfCheckFallbacks(canonical: string): string[] {
+  return isDefaultRelay(canonical) ? [FORMER_DEFAULT_RELAY] : []
+}
 
 /**
  * Where a person's contact list (kind 3) and DM relay list (kind 10050) are

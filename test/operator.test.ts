@@ -43,7 +43,7 @@ interface World {
 
 function world(): World {
   const network = new FakeNetwork()
-  // The cyberspace relay refuses DMs (onosendai.feeds.relay.tools refuses kind 1059).
+  // The cyberspace relay refuses DMs (onosendai.feeds.relay.tools refused kind 1059 on 2026-10-09).
   const canonical = network.add(CANONICAL, { refuse: (ev) => (ev.kind === 1059 ? 'blocked: kind 1059 is not accepted here' : null) })
   network.add(MINE)
   const general = network.add(GENERAL, { requireAuth: false })

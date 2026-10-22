@@ -48,7 +48,7 @@ import { attributed, bytesToHex, hexToBytes, nowSeconds, signEvent, tagValue, ty
 import { Outbox, type GuardVerdict } from './nostr/outbox.js'
 import { unwrapMessage, wrapMessage, wrapReaction } from './nostr/dm.js'
 import { mergeAnswers } from './nostr/relayOutcome.js'
-import { DEFAULT_RELAY, GENERAL_RELAYS, Relays, normalizeRelay, type PublishResult } from './nostr/relays.js'
+import { DEFAULT_RELAY, GENERAL_RELAYS, Relays, isDefaultRelay, normalizeRelay, type PublishResult } from './nostr/relays.js'
 import { OperatorWatch, type OperatorMove } from './follow.js'
 import { ORDERS_POLL_MS, OperatorChannel } from './operator.js'
 import { Presence, neighborhoodFilter, sectorsApart, type Person } from './presence.js'
@@ -367,7 +367,7 @@ export class Agent {
 
   /** Whether the chain's truth is being read from a relay other than the default canonical one. */
   get nonDefaultCanonical(): boolean {
-    return this.relays.canonical !== normalizeURL(DEFAULT_RELAY)
+    return !isDefaultRelay(this.relays.canonical)
   }
 
   /**
