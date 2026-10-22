@@ -586,6 +586,13 @@ function bagContentsTags(entries: readonly (BagEntry | ChatRumor)[], settings: P
 }
 
 /**
+ * A count as spec 7.7 writes one (ONOSENDAI CONTENTS_COUNT): a positive
+ * integer in decimal, with no sign and no leading zeros (the rules of spec 10),
+ * and no cap. "03", "+3", "1e2" and "0" are not counts.
+ */
+const CONTENTS_COUNT = /^[1-9][0-9]*$/
+
+/**
  * The settings a published bag carries (ONOSENDAI bagSettingsOf). A bag read
  * by a legacy `h` reads as heightTag: true, so its next rewrite says `H`.
  */
@@ -593,7 +600,8 @@ export function bagSettingsOf(ev: NostrEvent, height: number): BagSettings {
   const h = heightHint(ev)
   const hint = parseHint(ev.tags, h ?? height)
   const rows = ev.tags.filter((t) => t[0] === 'contents' && (CONTENTS_KINDS as readonly string[]).includes(t[1] ?? ''))
-  const counted = rows.some((t) => { const n = t[2] === undefined ? NaN : Number(t[2]); return Number.isInteger(n) && n > 0 && n < 1_000_000 })
+  // A row whose count is there but is not a count is ignored (spec 7.7 Reading contents; CONTENTS_COUNT).
+  const counted = rows.some((t) => typeof t[2] === 'string' && CONTENTS_COUNT.test(t[2]))
   // Money as a setting only in its own form: a counted cashu row is the contents hint speaking.
   const moneyAlone = rows.some((t) => t[1] === 'cashu' && t[2] === undefined)
   return { heightTag: h !== null, hint: hint ? hint.heights : null, riddle: ev.content.slice(0, MAX_RIDDLE_LENGTH), contents: counted, money: moneyAlone }

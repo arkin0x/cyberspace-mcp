@@ -29,13 +29,35 @@ const AFTER = String.raw`(?![A-Za-z0-9_\-=+/%&#])`
 
 const PATTERN = new RegExp(`${BEFORE}${LINK}${AFTER}`, 'g')
 
+/** A character a URL may be written with (RFC 3986: unreserved, reserved but `[` and `]`, and `%`). */
+const URL_CHAR = /[A-Za-z0-9\-._~:/?#@!$&'()*+,;=%]/
+
 /**
- * How many claim links a text carries, each counted once (ONOSENDAI
- * findNftLinks(text).length): the same link twice in one text is one.
+ * How many claim links a text carries for a bag's `nft` count (ONOSENDAI
+ * countNftLinks, spec 7.7 Contents), each distinct link once. A link that
+ * stands inside another URL's path or query is not counted: the URL
+ * characters right before it, back to the first one a URL cannot hold,
+ * contain a `://` with no `#` after it. So `https://a.example/?b=1;https://nonfungible.cash/...`
+ * counts none, and `see;https://nonfungible.cash/...`, `[a page](https://nonfungible.cash/...)`
+ * and two links joined by a comma (the second is in the first one's
+ * fragment, not its path or query) count every link. Text with no scheme
+ * before it (`a.example/?b=1;`) is not a URL here, and a character outside
+ * RFC 3986 (`é`) ends one. One pass over the text, however many links.
  */
 export function nftLinkCount(text: unknown): number {
   if (typeof text !== 'string' || !text) return 0
   const seen = new Set<string>()
-  for (const m of text.matchAll(PATTERN)) seen.add(`${m[2]}#${m[3]}`)
+  // The run of URL characters before position `i`: where its last `://` is (-1 for none), and whether a `#` came after that.
+  let i = 0, scheme = -1, fragment = false
+  for (const m of text.matchAll(PATTERN)) {
+    const at = m.index! + m[1].length
+    for (; i < at; i++) {
+      const c = text[i]
+      if (!URL_CHAR.test(c)) { scheme = -1; fragment = false }
+      else if (c === ':' && text[i + 1] === '/' && text[i + 2] === '/') { scheme = i; fragment = false }
+      else if (c === '#') fragment = true
+    }
+    if (scheme === -1 || fragment) seen.add(`${m[2]}#${m[3]}`)
+  }
   return seen.size
 }

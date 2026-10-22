@@ -1,14 +1,16 @@
 // Generates test/fixtures/onosendai-contents.json for cyberspace-mcp with
-// ONOSENDAI's own code (ONOSENDAI #441, merged as 2311e07: src/lib/hidden.ts
+// ONOSENDAI's own code (ONOSENDAI #444, merged as b892512: src/lib/hidden.ts
 // bagContents, bagContentsTags, bagTemplate, bagSettingsOf; src/lib/nftLink.ts
-// findNftLinks, from #440, 5109448), for a bag's `contents` rows with the
-// `nft` count of 2026-10-22: how many links ONOSENDAI finds in a text, the
-// rows it writes for fixed bags under each setting, how it reads rows back
-// into a bag's settings, and two bags it sealed with the test agent's key
-// (contents on; money alone), with the rows it would write after each rewrite
-// the test makes through the agent's tools. It checks the reverse direction
-// too: cyberspace-mcp's bagTemplate writes the same rows, and ONOSENDAI reads
-// the agent's bags into the same settings.
+// countNftLinks), for a bag's `contents` rows as spec 7.7 "Contents" has them
+// (cyberspace #75, ba87bbd): the `nft` count of ONOSENDAI #441, counts read as
+// positive decimal integers with no cap, and no link counted inside another
+// URL's path or query. It records how many links ONOSENDAI counts in a text,
+// the rows it writes for fixed bags under each setting, how it reads rows
+// back into a bag's settings, and two bags it sealed with the test agent's key (contents on;
+// money alone), with the rows it would write after each rewrite the test makes
+// through the agent's tools. It checks the reverse direction too:
+// cyberspace-mcp's bagTemplate writes the same rows, and ONOSENDAI reads the
+// agent's bags into the same settings.
 //
 // Run from an ONOSENDAI checkout of that commit (so ./src/lib resolves to
 // ONOSENDAI), with this repository's tsx:
@@ -19,7 +21,7 @@ import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure
 import { fromPayload } from 'sno-core/shards'
 import * as ono from './src/lib/hidden'
 import * as onoChests from './src/lib/chests'
-import { findNftLinks } from './src/lib/nftLink'
+import { countNftLinks } from './src/lib/nftLink'
 import { attributed } from './src/lib/client'
 import { regionKeyAt } from './src/lib/shardCrypto'
 import { bytesToHex } from './src/lib/events'
@@ -74,8 +76,12 @@ const texts = [
   '', 'no link here', A, `${A} and ${A} again`, `${A} ${B} ${C}`, C, lookalikes, `${lookalikes} ${D}`,
   `[an NFT](${A})`, `"${A}"`, `\u201c${A}\u201d`, `link:${A}`, `\u2014${A}.`, `*${A}*`, `> ${A}`, `| ${A} |`, `\`${A}\``, `${A}, ${B}; ${C}!`, `\u200b${A}`,
   `a.example/?b=1;${A}`, `${A}\n${B}\r\n${A}`, `${A}${B}`, `${TOKEN} ${A}`, `${A}?`, `${A})`, `${A}/`, `${A}%20`,
+  // Spec 7.7 (cyberspace #75): a link inside another URL's path or query is not counted, after any mark a URL may hold; one in a fragment is.
+  `https://a.example/?b=1;${A}`, `https://a.example/x,${A}`, `https://a.example/x:${A}`, `https://a.example/x(${A}`, `https://a.example/x'${A}`,
+  `https://a.example/x*${A}`, `HTTPS://A.EXAMPLE/#top;${A}`, `https://a.example/#top;https://b.example/?q;${A}`, `${A};${B}`, `see https://a.example/?b=1;${A} now`, `${A},${B}`, `${A}, ${B}`,
+  `see;${A}`, `one,${B}`, `[https://a.example](${A})`, `<https://a.example/>;${A}`, `"https://a.example/";${A}`, `https://a.example/?b=1;${B} and ${A}`,
 ]
-const recognizer = texts.map((text) => ({ text, onosendai: findNftLinks(text).length }))
+const recognizer = texts.map((text) => ({ text, onosendai: countNftLinks(text) }))
 for (const r of recognizer) if (mcpNft.nftLinkCount(r.text) !== r.onosendai) throw new Error(`count differs for ${JSON.stringify(r.text)}`)
 
 // A bag's things, as ONOSENDAI writes them: messages as rumors, the rest signed.
@@ -113,6 +119,10 @@ for (const [name, inners] of [['everything', all], ['an NFT alone', nftOnly], ['
 const reads = [
   [['contents', 'nft', '2']], [['contents', 'nft']], [['contents', 'nft', '0']], [['contents', 'nft', '-1']], [['contents', 'nft', '1.5']],
   [['contents', 'message', '1'], ['contents', 'nft', '1']], [['contents', 'cashu']], [['contents', 'cashu'], ['contents', 'nft', '1']], [['contents', 'gold', '5']],
+  // Spec 7.7 (cyberspace #75): a count is a positive decimal integer, no sign, no leading zeros, no cap; a row with any other count is ignored.
+  [['contents', 'shard', '1000000']], [['contents', 'shard', '9007199254740993']], [['contents', 'shard', '9'.repeat(400)]],
+  [['contents', 'shard', '03']], [['contents', 'shard', '+3']], [['contents', 'shard', '1e2']], [['contents', 'shard', '0']], [['contents', 'shard', ' 3']],
+  [['contents', 'cashu', '0']], [['contents', 'cashu', 'x']], [['contents', 'cashu', '1000000']], [['contents', 'shard', '2'], ['contents', 'cashu']],
 ].map((rows) => {
   const ev = { id: '0'.repeat(64), pubkey: agent, created_at: T, kind: 33330, content: '', sig: '', tags: [['d', region8.lookupId], ['H', '8'], ...rows] }
   const s = ono.bagSettingsOf(ev, 8)
@@ -153,8 +163,8 @@ const expected = {
 }
 
 writeFileSync(OUT, JSON.stringify({
-  note: 'Made with ONOSENDAI #441 (merged as 2311e07: src/lib/hidden.ts bagContents, bagContentsTags, bagTemplate, bagSettingsOf; src/lib/nftLink.ts findNftLinks from #440) by scripts/gen-onosendai-contents-fixture.ts run in an ONOSENDAI checkout, with test keys and made-up links only (none is a real claim link). "recognizer" is how many nonfungible.cash claim links ONOSENDAI counts in each text. "cases" are the contents rows ONOSENDAI writes for fixed bags under each setting. "reads" are the settings ONOSENDAI reads from rows. "bags" are two kind 33330 bags ONOSENDAI sealed with the test agent key at the point placed.test.ts uses (h8 with contents on; h3 with money alone), and "expected" the rows ONOSENDAI writes for what is in them after each rewrite contentsInterop.test.ts makes through the tools.',
-  onosendai: '2311e07 (#441)',
+  note: 'Made with ONOSENDAI #444 (merged as b892512: src/lib/hidden.ts bagContents, bagContentsTags, bagTemplate, bagSettingsOf; src/lib/nftLink.ts countNftLinks), which reads contents as spec 7.7 has them (cyberspace #75), by scripts/gen-onosendai-contents-fixture.ts run in an ONOSENDAI checkout, with test keys and made-up links only (none is a real claim link). "recognizer" is how many nonfungible.cash claim links ONOSENDAI counts in each text. "cases" are the contents rows ONOSENDAI writes for fixed bags under each setting. "reads" are the settings ONOSENDAI reads from rows. "bags" are two kind 33330 bags ONOSENDAI sealed with the test agent key at the point placed.test.ts uses (h8 with contents on; h3 with money alone), and "expected" the rows ONOSENDAI writes for what is in them after each rewrite contentsInterop.test.ts makes through the tools.',
+  onosendai: 'b892512 (#444)',
   agentSecretHex: bytesToHex(agentSk), agent,
   base: BASE.toString(), T,
   recognizer,
