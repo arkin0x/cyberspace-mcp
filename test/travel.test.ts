@@ -52,7 +52,7 @@ interface World {
 
 function world(): World {
   const network = new FakeNetwork()
-  // The cyberspace relay refuses notes, as onosendai.feeds.relay.tools does.
+  // The cyberspace relay refuses notes, as onosendai.feeds.relay.tools did on 2026-10-09.
   const canonical = network.add(CANONICAL, { refuse: (ev) => (ev.kind === 1 || ev.kind === 1059 ? `blocked: kind ${ev.kind} is not accepted here` : null) })
   const mine = network.add(MINE)
   const general = network.add(GENERAL, { requireAuth: false })

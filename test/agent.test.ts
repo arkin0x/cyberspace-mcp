@@ -35,7 +35,7 @@ function dirWithKey(sk: Uint8Array): string {
 }
 
 const network = new FakeNetwork()
-// The canonical relay's policy as the brief records it: a new key may publish 3333, 33331, 11333 and 23330; kind 0 and 33330 are refused.
+// A canonical relay's policy, the former default's (onosendai.feeds.relay.tools) as the brief recorded it on 2026-10-09: a new key may publish 3333, 33331, 11333 and 23330; kind 0 and 33330 are refused.
 const canonical = network.add(CANONICAL, { refuse: (ev) => ([0, 33330, 5, 7, 1111, 10002, 30003].includes(ev.kind) ? 'blocked: not a member yet' : null) })
 const mine = network.add(MINE)
 
@@ -83,6 +83,9 @@ describe('an agent on the default canonical relay', () => {
     const agent = await startAgent(dirWithKey(generateSecretKey()), { relays: [FEEDS, MINE], log: (l) => lines.push(l) })
     expect(agent.nonDefaultCanonical).toBe(true)
     expect(lines.find((l) => l.startsWith('WARNING'))).toContain(`the canonical relay is ${FEEDS}/, not the default ${DEFAULT_RELAY}`)
+    const r = await agent.identity({})
+    expect(r.data.nonDefaultCanonical).toBe(true)
+    expect(r.text).toContain(`WARNING: the chain's truth is being read from ${FEEDS}/, not the default canonical relay ${DEFAULT_RELAY}`)
   })
 })
 

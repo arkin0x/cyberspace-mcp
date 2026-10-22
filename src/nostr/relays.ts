@@ -49,6 +49,23 @@ export function isDefaultRelay(url: string): boolean {
   return normalizeURL(url) === normalizeURL(DEFAULT_RELAY)
 }
 
+/** The default canonical relay until 2026-10-22. */
+export const FORMER_DEFAULT_RELAY = 'wss://onosendai.feeds.relay.tools'
+
+/**
+ * The relays the own-chain self-check reads besides the configured ones:
+ * the former default, while the canonical relay is the default. An agent
+ * set up without --relay moved from it to the new default on upgrade; when
+ * its chain lives only on the former default and its chain.json is gone,
+ * this is what finds that chain, so the first hop adopts it instead of
+ * signing a spawn that would end it. Read, never written: the self-check's
+ * verdict is unchanged (any relay can say "found", only the canonical
+ * relay can say "none"), and nothing is published there.
+ */
+export function selfCheckFallbacks(canonical: string): string[] {
+  return isDefaultRelay(canonical) ? [FORMER_DEFAULT_RELAY] : []
+}
+
 /**
  * Where a person's contact list (kind 3) and DM relay list (kind 10050) are
  * most likely to be found, besides the configured relays: ONOSENDAI's
