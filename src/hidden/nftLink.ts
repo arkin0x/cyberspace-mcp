@@ -1,9 +1,10 @@
 /**
  * nftLink.ts: a nonfungible.cash claim link written in a hidden message, as
  * ONOSENDAI recognizes one (ONOSENDAI #440, merged as 5109448: src/lib/nftLink.ts
- * `findNftLinks`). This server only counts them, for a bag's `nft` contents
- * row (ONOSENDAI #441, 2311e07): it never opens or claims one, and this file
- * never returns a link's key.
+ * `findNftLinks`), counted for a bag's `nft` contents row (ONOSENDAI #441,
+ * 2311e07) as ONOSENDAI #444 (b892512) `countNftLinks` counts them under
+ * spec 7.7. This server only counts them: it never opens or claims one, and
+ * this file never returns a link's key.
  *
  *   https://nonfungible.cash/claim/<id>#<key>
  *

@@ -47,10 +47,16 @@ const rowsOf = (t: { tags: string[][] }): string[][] => t.tags.filter((x) => x[0
 describe('contents rows, against ONOSENDAI #444', () => {
   it('counts nonfungible.cash claim links as ONOSENDAI does, text by text, and never a look-alike', () => {
     expect(fx.recognizer.some((r) => r.onosendai > 1)).toBe(true)
-    // What the fixture pins (spec 7.7), so a regenerated one that lost a case fails here.
-    const inside = fx.recognizer.find((r) => r.text.startsWith('https://a.example/?b=1;https://nonfungible.cash/'))
-    expect(inside?.onosendai).toBe(0)
-    expect(fx.recognizer.find((r) => r.text.startsWith('see;https://nonfungible.cash/'))?.onosendai).toBe(1)
+    // What the fixture pins (spec 7.7), so a regenerated one that lost a case fails here. A and B are the generator's links.
+    const A = `https://nonfungible.cash/claim/${'6f'.repeat(16)}#${'A'.repeat(42)}w`
+    const B = `https://nonfungible.cash/claim/${'0a'.repeat(16)}#${'b_-'.repeat(14)}Q`
+    const counted = (text: string) => fx.recognizer.find((r) => r.text === text)?.onosendai
+    expect(counted(`https://a.example/?b=1;${A}`)).toBe(0)
+    expect(counted(`https://a.example/x(${A}`)).toBe(0)
+    expect(counted(`https://a.example/?b=1;${B} and ${A}`)).toBe(1)
+    expect(counted(`see;${A}`)).toBe(1)
+    expect(counted(`HTTPS://A.EXAMPLE/#top;${A}`)).toBe(1)
+    expect(counted(`${A},${B}`)).toBe(2)
     for (const r of fx.recognizer) expect(nftLinkCount(r.text), JSON.stringify(r.text)).toBe(r.onosendai)
   })
 
@@ -70,7 +76,8 @@ describe('contents rows, against ONOSENDAI #444', () => {
     // What the fixture pins (spec 7.7): no cap, no sign or leading zero, and money alone only from the bare cashu row.
     const read = (rows: string[][]) => fx.reads.find((r) => JSON.stringify(r.rows) === JSON.stringify(rows))?.onosendai
     expect(read([['contents', 'shard', '1000000']])).toEqual({ contents: true, money: false })
-    expect(read([['contents', 'shard', '03']])).toEqual({ contents: false, money: false })
+    expect(read([['contents', 'shard', '9'.repeat(400)]])).toEqual({ contents: true, money: false })
+    for (const bad of ['03', '+3', '1e2', '0']) expect(read([['contents', 'shard', bad]]), bad).toEqual({ contents: false, money: false })
     expect(read([['contents', 'cashu', '0']])).toEqual({ contents: false, money: false })
     expect(read([['contents', 'cashu']])).toEqual({ contents: false, money: true })
     for (const r of fx.reads) {
