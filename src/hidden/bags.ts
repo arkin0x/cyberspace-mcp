@@ -29,6 +29,7 @@ import { positionHex, type Position } from '../space/coords.js'
 import { ALGO, decryptForRegion, encryptForRegion } from './crypto.js'
 import { hintFits, hintTags, parseHint, type HintHeights } from './hint.js'
 import { animationOf, modelOf, modelTags, type ItemAnimation, type ItemModelRef } from './itemModel.js'
+import { nftLinkCount } from './nftLink.js'
 
 /** The location-encrypted envelope (spec 8.6). */
 export const HIDDEN_KIND = 33330
@@ -549,24 +550,34 @@ const DEFAULT_BAG_SETTINGS: BagSettings = { heightTag: true, hint: null, riddle:
 /** A Cashu token as written, as ONOSENDAI counts them (lib/cashu.ts TOKEN). */
 const CASHU_AS_WRITTEN = /cashu[AB][A-Za-z0-9_\-+/=]{16,}/g
 
-/** The order a bag's `contents` tags are written in (ONOSENDAI CONTENTS_KINDS). */
-const CONTENTS_KINDS = ['shard', 'message', 'key', 'chest', 'cashu'] as const
+/** The order a bag's `contents` tags are written in (ONOSENDAI CONTENTS_KINDS, `nft` after `cashu` since #441). */
+const CONTENTS_KINDS = ['shard', 'message', 'key', 'chest', 'cashu', 'nft'] as const
 type ContentsKind = typeof CONTENTS_KINDS[number]
 
-/** What a bag holds, by kind (ONOSENDAI bagContents): shards inline or by reference, messages, keys, chests, and the tokens in its messages. */
+/**
+ * What a bag holds, by kind (ONOSENDAI bagContents): shards inline or by
+ * reference, messages, keys, chests, and the Cashu tokens and nonfungible.cash
+ * claim links (nftLink.ts) written in its messages. What a chest holds is
+ * sealed, so a chest counts as a chest and nothing inside it is counted.
+ */
 function bagContents(entries: readonly (BagEntry | ChatRumor)[]): Record<ContentsKind, number> {
-  const out: Record<ContentsKind, number> = { shard: 0, message: 0, key: 0, chest: 0, cashu: 0 }
+  const out: Record<ContentsKind, number> = { shard: 0, message: 0, key: 0, chest: 0, cashu: 0, nft: 0 }
   for (const e of entries) {
     if (isReference(e)) { out.shard++; continue }
     if (e.kind === SHARD_KIND) out.shard++
-    else if (e.kind === MESSAGE_KIND) { out.message++; out.cashu += (typeof e.content === 'string' ? e.content.match(CASHU_AS_WRITTEN) ?? [] : []).length }
+    else if (e.kind === MESSAGE_KIND) { out.message++; out.cashu += (typeof e.content === 'string' ? e.content.match(CASHU_AS_WRITTEN) ?? [] : []).length; out.nft += nftLinkCount(e.content) }
     else if (e.kind === KEY_KIND) out.key++
     else if (e.kind === CHEST_KIND) out.chest++
   }
   return out
 }
 
-/** The public `contents` tags a bag's settings write, worked out from what is in it now (ONOSENDAI bagContentsTags). */
+/**
+ * The public `contents` tags a bag's settings write, worked out from what is
+ * in it now (ONOSENDAI bagContentsTags): with `contents`, one counted row per
+ * kind present, `nft` included; with `money` alone, `["contents", "cashu"]`
+ * while a token is inside. There is no NFT-alone form: an NFT is not money.
+ */
 function bagContentsTags(entries: readonly (BagEntry | ChatRumor)[], settings: Pick<BagSettings, 'contents' | 'money'>): string[][] {
   if (!settings.contents && !settings.money) return []
   const c = bagContents(entries)

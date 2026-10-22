@@ -1,0 +1,1687 @@
+{
+  "note": "Made with ONOSENDAI #441 (merged as 2311e07: src/lib/hidden.ts bagContents, bagContentsTags, bagTemplate, bagSettingsOf; src/lib/nftLink.ts findNftLinks from #440) by scripts/gen-onosendai-contents-fixture.ts run in an ONOSENDAI checkout, with test keys and made-up links only (none is a real claim link). \"recognizer\" is how many nonfungible.cash claim links ONOSENDAI counts in each text. \"cases\" are the contents rows ONOSENDAI writes for fixed bags under each setting. \"reads\" are the settings ONOSENDAI reads from rows. \"bags\" are two kind 33330 bags ONOSENDAI sealed with the test agent key at the point placed.test.ts uses (h8 with contents on; h3 with money alone), and \"expected\" the rows ONOSENDAI writes for what is in them after each rewrite contentsInterop.test.ts makes through the tools.",
+  "onosendai": "2311e07 (#441)",
+  "agentSecretHex": "5c2e62fca8dc55306fa7dd1c229e443873d998612a095f90f67bfe18235d8b04",
+  "agent": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+  "base": "1099511627876",
+  "T": 1792600000,
+  "recognizer": [
+    {
+      "text": "",
+      "onosendai": 0
+    },
+    {
+      "text": "no link here",
+      "onosendai": 0
+    },
+    {
+      "text": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw",
+      "onosendai": 1
+    },
+    {
+      "text": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw and https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw again",
+      "onosendai": 1
+    },
+    {
+      "text": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a#b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-Q Https://NonFungible.CASH/claim/c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3#Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z90",
+      "onosendai": 3
+    },
+    {
+      "text": "Https://NonFungible.CASH/claim/c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3#Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z90",
+      "onosendai": 1
+    },
+    {
+      "text": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB https://nonfungible.cash/claim/6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw http://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://www.nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/link/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw xhttps://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://a.example/?u=https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://a.example/https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw= https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw&x https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f",
+      "onosendai": 0
+    },
+    {
+      "text": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB https://nonfungible.cash/claim/6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw http://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://www.nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/link/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw xhttps://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://a.example/?u=https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://a.example/https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw= https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw&x https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f https://nonfungible.cash/claim/d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4#kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkE",
+      "onosendai": 1
+    },
+    {
+      "text": "[an NFT](https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw)",
+      "onosendai": 1
+    },
+    {
+      "text": "\"https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw\"",
+      "onosendai": 1
+    },
+    {
+      "text": "“https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw”",
+      "onosendai": 1
+    },
+    {
+      "text": "link:https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw",
+      "onosendai": 1
+    },
+    {
+      "text": "—https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw.",
+      "onosendai": 1
+    },
+    {
+      "text": "*https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw*",
+      "onosendai": 1
+    },
+    {
+      "text": "> https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw",
+      "onosendai": 1
+    },
+    {
+      "text": "| https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw |",
+      "onosendai": 1
+    },
+    {
+      "text": "`https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw`",
+      "onosendai": 1
+    },
+    {
+      "text": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw, https://nonfungible.cash/claim/0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a#b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-Q; Https://NonFungible.CASH/claim/c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3#Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z90!",
+      "onosendai": 3
+    },
+    {
+      "text": "​https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw",
+      "onosendai": 1
+    },
+    {
+      "text": "a.example/?b=1;https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw",
+      "onosendai": 1
+    },
+    {
+      "text": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw\nhttps://nonfungible.cash/claim/0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a#b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-Q\r\nhttps://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw",
+      "onosendai": 2
+    },
+    {
+      "text": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwhttps://nonfungible.cash/claim/0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a#b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-Q",
+      "onosendai": 0
+    },
+    {
+      "text": "cashuBo2FteBtodHRwczovL21pbnQubWluaWJpdHMuY2FzaC9CaXRjb2lu https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw",
+      "onosendai": 1
+    },
+    {
+      "text": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw?",
+      "onosendai": 1
+    },
+    {
+      "text": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw)",
+      "onosendai": 1
+    },
+    {
+      "text": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw/",
+      "onosendai": 0
+    },
+    {
+      "text": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw%20",
+      "onosendai": 0
+    }
+  ],
+  "cases": [
+    {
+      "name": "everything",
+      "inners": [
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0380"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "A plain note.",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "605d44ea0b53a7a235a410a7596ae82da29309e4afdc80fc210fc33e6ff3056b"
+        },
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0382"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "For the finder: https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "be9a7e23ee3a280f73b3827ec236a7829d6160130320089fa8bdde43ff07c397"
+        },
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0390"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "cashuBo2FteBtodHRwczovL21pbnQubWluaWJpdHMuY2FzaC9CaXRjb2lu and https://nonfungible.cash/claim/0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a#b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-Q, https://nonfungible.cash/claim/0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a#b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-Q again, and Https://NonFungible.CASH/claim/c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3#Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z90",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "cbbbd144bee8555a82d2843c6f80d3d9ea7b06c68bd0d1abfd5a3cb95e3a31e7"
+        },
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0392"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB https://nonfungible.cash/claim/6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw http://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://www.nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/link/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw xhttps://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://a.example/?u=https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://a.example/https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw= https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw&x https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "5ed033d5e0cebbb5876a733036098425db27d62657246a9cf51bcba30da8b94e"
+        },
+        {
+          "kind": 3330,
+          "created_at": 1792600000,
+          "content": "{\"v\":2,\"name\":\"XOR stella octangula\",\"unit\":0,\"extent\":1,\"mode\":\"solid\",\"vertices\":[[1,1,-1],[1,-1,1],[-1,1,1],[-1,-1,-1],[1,1,1],[1,-1,-1],[-1,1,-1],[-1,-1,1]],\"ticks\":[-8],\"palette\":[[39,255,102],[170,68,255]],\"colors\":[0,0,0,0,1,1,1,1],\"faces\":[[1,3,2],[0,2,3],[0,3,1],[0,1,2],[5,6,7],[4,7,6],[4,5,7],[4,6,5]]}",
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0700"
+            ],
+            [
+              "-"
+            ],
+            [
+              "client",
+              "ONOSENDAI"
+            ]
+          ],
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "02b2f1bd35758427c20dde03098d2021fe1c0fc5acfce055b430156e544e2d74",
+          "sig": "6ad1d8b78b0c0f697cd6b469e8171ad0673d50d285b706038aef8699edaa483d5935d5430f0d47b126ddc3f9e3b77aae46a2c3fd7c77691c009b47ea06fd3e51"
+        },
+        {
+          "kind": 3340,
+          "created_at": 1792600000,
+          "content": "Opens the vault under the stop.",
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0700"
+            ],
+            [
+              "title",
+              "Brass Key"
+            ],
+            [
+              "item",
+              "2d4c01ab9c3f56431d59c1ea9e24877b6fdd97a1b12ba2066fcdf9971ceca36b"
+            ],
+            [
+              "secret",
+              "4c4c5dd840ad898e16068ef0ec6938a65e69e41619fd6f23826b19ef4d0273fb"
+            ],
+            [
+              "-"
+            ],
+            [
+              "client",
+              "ONOSENDAI"
+            ]
+          ],
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "e547407d93184be28f570daa24a67fad906cc9b4bddf642bb888dceeb981f270",
+          "sig": "6e75e28e4e905a88f3c22734912c7af50cbc8bb821d2a7c1c7426bfa7198ea3f66b800c37bec45ce2bb5a142b66f1974b7db4abe99cf36363ed5a0af8649c928"
+        },
+        {
+          "kind": 3341,
+          "created_at": 1792600000,
+          "content": "AvPEsOLbYrIQA40FOFJDmcIQgF3GM7rvbnlgcC9WNqJKiHIKeDKM1uaeU3A0JtjV8JHkxRRUPCspsn8dWLc2+AAkE3FAewlefbcmDQ49LHclq6nEhMk6/Uof5OokU/v/F3qbE9VDv8u674E9lveNd0H/jeKKkoR51mDsU0SB9/1tTZIz80O2EMjBzGmhaLM0sCbOT8OTRRur5u6+7T9JbDe1hGEp3oPlFp7o10zT+KcdtglV/XRWFeXtK0EE6swYThNdmGsT5KEJeKxeA9LbUwWeUMtVAe32UgDBSRziP6ByEVkFAeoykqSGBTth4PDl7kmMRs7QDZWECYu/PxUT9HN+KtqRHws2xy7oTokRihqxexlutoANrwfd4/8bHzFfnC+DzFMJsYULoIGAkCQfOprJsWQ/NdTsfz76OtNMhoP2xA5845rUKITt8x4zNENRdUdEEQl7FVi1mn0GG97SIqt52DCOdYU9dB6wvbgbatdIXOaghiXN3SPRZGNJrIWECgLfMF+ODCPJb0DhClsM8j9Os4ld9W31dps5BlG0sMomVztpmRlt1Ixjuy4xU/CuOo3IQapgRW5uCSIWS3q1DgD657Oc1iY0ga1DRHvYLMhrMOCyDVx5IgKn5yEyaCTDfP9OY+A4uDrKyWabYY/KnSd5NHGBI7NYMmrTF3bZb3NtGh0=",
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0702"
+            ],
+            [
+              "title",
+              "Vault"
+            ],
+            [
+              "lock",
+              "2d4c01ab9c3f56431d59c1ea9e24877b6fdd97a1b12ba2066fcdf9971ceca36b",
+              "d92bb7cb9c5272f0601210adbde64c5512d077dfeeb92c5369f6e871624b10d6"
+            ],
+            [
+              "requires",
+              "the Brass Key"
+            ],
+            [
+              "-"
+            ],
+            [
+              "client",
+              "ONOSENDAI"
+            ]
+          ],
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "861de9bdcdf8960a9dad0eacaf91e0a1c99558c154bedb5b332edb02fee32940",
+          "sig": "b1f72c3a41ab979cd2ce1ccc7077d71d8f46624217d9b22c4dfaaea11308bac0759d19849270fd644a743d19a18652e095f22a9436c928749a4181c098630265"
+        }
+      ],
+      "contents": true,
+      "money": false,
+      "onosendai": [
+        [
+          "contents",
+          "shard",
+          "1"
+        ],
+        [
+          "contents",
+          "message",
+          "4"
+        ],
+        [
+          "contents",
+          "key",
+          "1"
+        ],
+        [
+          "contents",
+          "chest",
+          "1"
+        ],
+        [
+          "contents",
+          "cashu",
+          "1"
+        ],
+        [
+          "contents",
+          "nft",
+          "3"
+        ]
+      ]
+    },
+    {
+      "name": "everything",
+      "inners": [
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0380"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "A plain note.",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "605d44ea0b53a7a235a410a7596ae82da29309e4afdc80fc210fc33e6ff3056b"
+        },
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0382"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "For the finder: https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "be9a7e23ee3a280f73b3827ec236a7829d6160130320089fa8bdde43ff07c397"
+        },
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0390"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "cashuBo2FteBtodHRwczovL21pbnQubWluaWJpdHMuY2FzaC9CaXRjb2lu and https://nonfungible.cash/claim/0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a#b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-Q, https://nonfungible.cash/claim/0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a#b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-Q again, and Https://NonFungible.CASH/claim/c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3#Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z90",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "cbbbd144bee8555a82d2843c6f80d3d9ea7b06c68bd0d1abfd5a3cb95e3a31e7"
+        },
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0392"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB https://nonfungible.cash/claim/6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw http://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://www.nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/link/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw xhttps://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://a.example/?u=https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://a.example/https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw= https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw&x https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "5ed033d5e0cebbb5876a733036098425db27d62657246a9cf51bcba30da8b94e"
+        },
+        {
+          "kind": 3330,
+          "created_at": 1792600000,
+          "content": "{\"v\":2,\"name\":\"XOR stella octangula\",\"unit\":0,\"extent\":1,\"mode\":\"solid\",\"vertices\":[[1,1,-1],[1,-1,1],[-1,1,1],[-1,-1,-1],[1,1,1],[1,-1,-1],[-1,1,-1],[-1,-1,1]],\"ticks\":[-8],\"palette\":[[39,255,102],[170,68,255]],\"colors\":[0,0,0,0,1,1,1,1],\"faces\":[[1,3,2],[0,2,3],[0,3,1],[0,1,2],[5,6,7],[4,7,6],[4,5,7],[4,6,5]]}",
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0700"
+            ],
+            [
+              "-"
+            ],
+            [
+              "client",
+              "ONOSENDAI"
+            ]
+          ],
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "02b2f1bd35758427c20dde03098d2021fe1c0fc5acfce055b430156e544e2d74",
+          "sig": "6ad1d8b78b0c0f697cd6b469e8171ad0673d50d285b706038aef8699edaa483d5935d5430f0d47b126ddc3f9e3b77aae46a2c3fd7c77691c009b47ea06fd3e51"
+        },
+        {
+          "kind": 3340,
+          "created_at": 1792600000,
+          "content": "Opens the vault under the stop.",
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0700"
+            ],
+            [
+              "title",
+              "Brass Key"
+            ],
+            [
+              "item",
+              "2d4c01ab9c3f56431d59c1ea9e24877b6fdd97a1b12ba2066fcdf9971ceca36b"
+            ],
+            [
+              "secret",
+              "4c4c5dd840ad898e16068ef0ec6938a65e69e41619fd6f23826b19ef4d0273fb"
+            ],
+            [
+              "-"
+            ],
+            [
+              "client",
+              "ONOSENDAI"
+            ]
+          ],
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "e547407d93184be28f570daa24a67fad906cc9b4bddf642bb888dceeb981f270",
+          "sig": "6e75e28e4e905a88f3c22734912c7af50cbc8bb821d2a7c1c7426bfa7198ea3f66b800c37bec45ce2bb5a142b66f1974b7db4abe99cf36363ed5a0af8649c928"
+        },
+        {
+          "kind": 3341,
+          "created_at": 1792600000,
+          "content": "AvPEsOLbYrIQA40FOFJDmcIQgF3GM7rvbnlgcC9WNqJKiHIKeDKM1uaeU3A0JtjV8JHkxRRUPCspsn8dWLc2+AAkE3FAewlefbcmDQ49LHclq6nEhMk6/Uof5OokU/v/F3qbE9VDv8u674E9lveNd0H/jeKKkoR51mDsU0SB9/1tTZIz80O2EMjBzGmhaLM0sCbOT8OTRRur5u6+7T9JbDe1hGEp3oPlFp7o10zT+KcdtglV/XRWFeXtK0EE6swYThNdmGsT5KEJeKxeA9LbUwWeUMtVAe32UgDBSRziP6ByEVkFAeoykqSGBTth4PDl7kmMRs7QDZWECYu/PxUT9HN+KtqRHws2xy7oTokRihqxexlutoANrwfd4/8bHzFfnC+DzFMJsYULoIGAkCQfOprJsWQ/NdTsfz76OtNMhoP2xA5845rUKITt8x4zNENRdUdEEQl7FVi1mn0GG97SIqt52DCOdYU9dB6wvbgbatdIXOaghiXN3SPRZGNJrIWECgLfMF+ODCPJb0DhClsM8j9Os4ld9W31dps5BlG0sMomVztpmRlt1Ixjuy4xU/CuOo3IQapgRW5uCSIWS3q1DgD657Oc1iY0ga1DRHvYLMhrMOCyDVx5IgKn5yEyaCTDfP9OY+A4uDrKyWabYY/KnSd5NHGBI7NYMmrTF3bZb3NtGh0=",
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0702"
+            ],
+            [
+              "title",
+              "Vault"
+            ],
+            [
+              "lock",
+              "2d4c01ab9c3f56431d59c1ea9e24877b6fdd97a1b12ba2066fcdf9971ceca36b",
+              "d92bb7cb9c5272f0601210adbde64c5512d077dfeeb92c5369f6e871624b10d6"
+            ],
+            [
+              "requires",
+              "the Brass Key"
+            ],
+            [
+              "-"
+            ],
+            [
+              "client",
+              "ONOSENDAI"
+            ]
+          ],
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "861de9bdcdf8960a9dad0eacaf91e0a1c99558c154bedb5b332edb02fee32940",
+          "sig": "b1f72c3a41ab979cd2ce1ccc7077d71d8f46624217d9b22c4dfaaea11308bac0759d19849270fd644a743d19a18652e095f22a9436c928749a4181c098630265"
+        }
+      ],
+      "contents": false,
+      "money": true,
+      "onosendai": [
+        [
+          "contents",
+          "cashu"
+        ]
+      ]
+    },
+    {
+      "name": "everything",
+      "inners": [
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0380"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "A plain note.",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "605d44ea0b53a7a235a410a7596ae82da29309e4afdc80fc210fc33e6ff3056b"
+        },
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0382"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "For the finder: https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "be9a7e23ee3a280f73b3827ec236a7829d6160130320089fa8bdde43ff07c397"
+        },
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0390"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "cashuBo2FteBtodHRwczovL21pbnQubWluaWJpdHMuY2FzaC9CaXRjb2lu and https://nonfungible.cash/claim/0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a#b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-Q, https://nonfungible.cash/claim/0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a#b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-Q again, and Https://NonFungible.CASH/claim/c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3#Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z90",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "cbbbd144bee8555a82d2843c6f80d3d9ea7b06c68bd0d1abfd5a3cb95e3a31e7"
+        },
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0392"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB https://nonfungible.cash/claim/6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw http://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://www.nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/link/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw xhttps://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://a.example/?u=https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://a.example/https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw= https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw&x https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "5ed033d5e0cebbb5876a733036098425db27d62657246a9cf51bcba30da8b94e"
+        },
+        {
+          "kind": 3330,
+          "created_at": 1792600000,
+          "content": "{\"v\":2,\"name\":\"XOR stella octangula\",\"unit\":0,\"extent\":1,\"mode\":\"solid\",\"vertices\":[[1,1,-1],[1,-1,1],[-1,1,1],[-1,-1,-1],[1,1,1],[1,-1,-1],[-1,1,-1],[-1,-1,1]],\"ticks\":[-8],\"palette\":[[39,255,102],[170,68,255]],\"colors\":[0,0,0,0,1,1,1,1],\"faces\":[[1,3,2],[0,2,3],[0,3,1],[0,1,2],[5,6,7],[4,7,6],[4,5,7],[4,6,5]]}",
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0700"
+            ],
+            [
+              "-"
+            ],
+            [
+              "client",
+              "ONOSENDAI"
+            ]
+          ],
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "02b2f1bd35758427c20dde03098d2021fe1c0fc5acfce055b430156e544e2d74",
+          "sig": "6ad1d8b78b0c0f697cd6b469e8171ad0673d50d285b706038aef8699edaa483d5935d5430f0d47b126ddc3f9e3b77aae46a2c3fd7c77691c009b47ea06fd3e51"
+        },
+        {
+          "kind": 3340,
+          "created_at": 1792600000,
+          "content": "Opens the vault under the stop.",
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0700"
+            ],
+            [
+              "title",
+              "Brass Key"
+            ],
+            [
+              "item",
+              "2d4c01ab9c3f56431d59c1ea9e24877b6fdd97a1b12ba2066fcdf9971ceca36b"
+            ],
+            [
+              "secret",
+              "4c4c5dd840ad898e16068ef0ec6938a65e69e41619fd6f23826b19ef4d0273fb"
+            ],
+            [
+              "-"
+            ],
+            [
+              "client",
+              "ONOSENDAI"
+            ]
+          ],
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "e547407d93184be28f570daa24a67fad906cc9b4bddf642bb888dceeb981f270",
+          "sig": "6e75e28e4e905a88f3c22734912c7af50cbc8bb821d2a7c1c7426bfa7198ea3f66b800c37bec45ce2bb5a142b66f1974b7db4abe99cf36363ed5a0af8649c928"
+        },
+        {
+          "kind": 3341,
+          "created_at": 1792600000,
+          "content": "AvPEsOLbYrIQA40FOFJDmcIQgF3GM7rvbnlgcC9WNqJKiHIKeDKM1uaeU3A0JtjV8JHkxRRUPCspsn8dWLc2+AAkE3FAewlefbcmDQ49LHclq6nEhMk6/Uof5OokU/v/F3qbE9VDv8u674E9lveNd0H/jeKKkoR51mDsU0SB9/1tTZIz80O2EMjBzGmhaLM0sCbOT8OTRRur5u6+7T9JbDe1hGEp3oPlFp7o10zT+KcdtglV/XRWFeXtK0EE6swYThNdmGsT5KEJeKxeA9LbUwWeUMtVAe32UgDBSRziP6ByEVkFAeoykqSGBTth4PDl7kmMRs7QDZWECYu/PxUT9HN+KtqRHws2xy7oTokRihqxexlutoANrwfd4/8bHzFfnC+DzFMJsYULoIGAkCQfOprJsWQ/NdTsfz76OtNMhoP2xA5845rUKITt8x4zNENRdUdEEQl7FVi1mn0GG97SIqt52DCOdYU9dB6wvbgbatdIXOaghiXN3SPRZGNJrIWECgLfMF+ODCPJb0DhClsM8j9Os4ld9W31dps5BlG0sMomVztpmRlt1Ixjuy4xU/CuOo3IQapgRW5uCSIWS3q1DgD657Oc1iY0ga1DRHvYLMhrMOCyDVx5IgKn5yEyaCTDfP9OY+A4uDrKyWabYY/KnSd5NHGBI7NYMmrTF3bZb3NtGh0=",
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0702"
+            ],
+            [
+              "title",
+              "Vault"
+            ],
+            [
+              "lock",
+              "2d4c01ab9c3f56431d59c1ea9e24877b6fdd97a1b12ba2066fcdf9971ceca36b",
+              "d92bb7cb9c5272f0601210adbde64c5512d077dfeeb92c5369f6e871624b10d6"
+            ],
+            [
+              "requires",
+              "the Brass Key"
+            ],
+            [
+              "-"
+            ],
+            [
+              "client",
+              "ONOSENDAI"
+            ]
+          ],
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "861de9bdcdf8960a9dad0eacaf91e0a1c99558c154bedb5b332edb02fee32940",
+          "sig": "b1f72c3a41ab979cd2ce1ccc7077d71d8f46624217d9b22c4dfaaea11308bac0759d19849270fd644a743d19a18652e095f22a9436c928749a4181c098630265"
+        }
+      ],
+      "contents": true,
+      "money": true,
+      "onosendai": [
+        [
+          "contents",
+          "shard",
+          "1"
+        ],
+        [
+          "contents",
+          "message",
+          "4"
+        ],
+        [
+          "contents",
+          "key",
+          "1"
+        ],
+        [
+          "contents",
+          "chest",
+          "1"
+        ],
+        [
+          "contents",
+          "cashu",
+          "1"
+        ],
+        [
+          "contents",
+          "nft",
+          "3"
+        ]
+      ]
+    },
+    {
+      "name": "everything",
+      "inners": [
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0380"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "A plain note.",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "605d44ea0b53a7a235a410a7596ae82da29309e4afdc80fc210fc33e6ff3056b"
+        },
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0382"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "For the finder: https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "be9a7e23ee3a280f73b3827ec236a7829d6160130320089fa8bdde43ff07c397"
+        },
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0390"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "cashuBo2FteBtodHRwczovL21pbnQubWluaWJpdHMuY2FzaC9CaXRjb2lu and https://nonfungible.cash/claim/0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a#b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-Q, https://nonfungible.cash/claim/0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a#b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-b_-Q again, and Https://NonFungible.CASH/claim/c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3#Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z90",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "cbbbd144bee8555a82d2843c6f80d3d9ea7b06c68bd0d1abfd5a3cb95e3a31e7"
+        },
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0392"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB https://nonfungible.cash/claim/6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw http://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://www.nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/link/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw xhttps://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://a.example/?u=https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://a.example/https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw= https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw&x https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "5ed033d5e0cebbb5876a733036098425db27d62657246a9cf51bcba30da8b94e"
+        },
+        {
+          "kind": 3330,
+          "created_at": 1792600000,
+          "content": "{\"v\":2,\"name\":\"XOR stella octangula\",\"unit\":0,\"extent\":1,\"mode\":\"solid\",\"vertices\":[[1,1,-1],[1,-1,1],[-1,1,1],[-1,-1,-1],[1,1,1],[1,-1,-1],[-1,1,-1],[-1,-1,1]],\"ticks\":[-8],\"palette\":[[39,255,102],[170,68,255]],\"colors\":[0,0,0,0,1,1,1,1],\"faces\":[[1,3,2],[0,2,3],[0,3,1],[0,1,2],[5,6,7],[4,7,6],[4,5,7],[4,6,5]]}",
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0700"
+            ],
+            [
+              "-"
+            ],
+            [
+              "client",
+              "ONOSENDAI"
+            ]
+          ],
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "02b2f1bd35758427c20dde03098d2021fe1c0fc5acfce055b430156e544e2d74",
+          "sig": "6ad1d8b78b0c0f697cd6b469e8171ad0673d50d285b706038aef8699edaa483d5935d5430f0d47b126ddc3f9e3b77aae46a2c3fd7c77691c009b47ea06fd3e51"
+        },
+        {
+          "kind": 3340,
+          "created_at": 1792600000,
+          "content": "Opens the vault under the stop.",
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0700"
+            ],
+            [
+              "title",
+              "Brass Key"
+            ],
+            [
+              "item",
+              "2d4c01ab9c3f56431d59c1ea9e24877b6fdd97a1b12ba2066fcdf9971ceca36b"
+            ],
+            [
+              "secret",
+              "4c4c5dd840ad898e16068ef0ec6938a65e69e41619fd6f23826b19ef4d0273fb"
+            ],
+            [
+              "-"
+            ],
+            [
+              "client",
+              "ONOSENDAI"
+            ]
+          ],
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "e547407d93184be28f570daa24a67fad906cc9b4bddf642bb888dceeb981f270",
+          "sig": "6e75e28e4e905a88f3c22734912c7af50cbc8bb821d2a7c1c7426bfa7198ea3f66b800c37bec45ce2bb5a142b66f1974b7db4abe99cf36363ed5a0af8649c928"
+        },
+        {
+          "kind": 3341,
+          "created_at": 1792600000,
+          "content": "AvPEsOLbYrIQA40FOFJDmcIQgF3GM7rvbnlgcC9WNqJKiHIKeDKM1uaeU3A0JtjV8JHkxRRUPCspsn8dWLc2+AAkE3FAewlefbcmDQ49LHclq6nEhMk6/Uof5OokU/v/F3qbE9VDv8u674E9lveNd0H/jeKKkoR51mDsU0SB9/1tTZIz80O2EMjBzGmhaLM0sCbOT8OTRRur5u6+7T9JbDe1hGEp3oPlFp7o10zT+KcdtglV/XRWFeXtK0EE6swYThNdmGsT5KEJeKxeA9LbUwWeUMtVAe32UgDBSRziP6ByEVkFAeoykqSGBTth4PDl7kmMRs7QDZWECYu/PxUT9HN+KtqRHws2xy7oTokRihqxexlutoANrwfd4/8bHzFfnC+DzFMJsYULoIGAkCQfOprJsWQ/NdTsfz76OtNMhoP2xA5845rUKITt8x4zNENRdUdEEQl7FVi1mn0GG97SIqt52DCOdYU9dB6wvbgbatdIXOaghiXN3SPRZGNJrIWECgLfMF+ODCPJb0DhClsM8j9Os4ld9W31dps5BlG0sMomVztpmRlt1Ixjuy4xU/CuOo3IQapgRW5uCSIWS3q1DgD657Oc1iY0ga1DRHvYLMhrMOCyDVx5IgKn5yEyaCTDfP9OY+A4uDrKyWabYY/KnSd5NHGBI7NYMmrTF3bZb3NtGh0=",
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0702"
+            ],
+            [
+              "title",
+              "Vault"
+            ],
+            [
+              "lock",
+              "2d4c01ab9c3f56431d59c1ea9e24877b6fdd97a1b12ba2066fcdf9971ceca36b",
+              "d92bb7cb9c5272f0601210adbde64c5512d077dfeeb92c5369f6e871624b10d6"
+            ],
+            [
+              "requires",
+              "the Brass Key"
+            ],
+            [
+              "-"
+            ],
+            [
+              "client",
+              "ONOSENDAI"
+            ]
+          ],
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "861de9bdcdf8960a9dad0eacaf91e0a1c99558c154bedb5b332edb02fee32940",
+          "sig": "b1f72c3a41ab979cd2ce1ccc7077d71d8f46624217d9b22c4dfaaea11308bac0759d19849270fd644a743d19a18652e095f22a9436c928749a4181c098630265"
+        }
+      ],
+      "contents": false,
+      "money": false,
+      "onosendai": []
+    },
+    {
+      "name": "an NFT alone",
+      "inners": [
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0380"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "ed93fba65ee167794ffb7930bb47fb84cee4e1b76bb3460e77953656ad395a91"
+        }
+      ],
+      "contents": true,
+      "money": false,
+      "onosendai": [
+        [
+          "contents",
+          "message",
+          "1"
+        ],
+        [
+          "contents",
+          "nft",
+          "1"
+        ]
+      ]
+    },
+    {
+      "name": "an NFT alone",
+      "inners": [
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0380"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "ed93fba65ee167794ffb7930bb47fb84cee4e1b76bb3460e77953656ad395a91"
+        }
+      ],
+      "contents": false,
+      "money": true,
+      "onosendai": []
+    },
+    {
+      "name": "an NFT alone",
+      "inners": [
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0380"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "ed93fba65ee167794ffb7930bb47fb84cee4e1b76bb3460e77953656ad395a91"
+        }
+      ],
+      "contents": true,
+      "money": true,
+      "onosendai": [
+        [
+          "contents",
+          "message",
+          "1"
+        ],
+        [
+          "contents",
+          "nft",
+          "1"
+        ]
+      ]
+    },
+    {
+      "name": "an NFT alone",
+      "inners": [
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0380"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "ed93fba65ee167794ffb7930bb47fb84cee4e1b76bb3460e77953656ad395a91"
+        }
+      ],
+      "contents": false,
+      "money": false,
+      "onosendai": []
+    },
+    {
+      "name": "an NFT and a coin",
+      "inners": [
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0380"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "ed93fba65ee167794ffb7930bb47fb84cee4e1b76bb3460e77953656ad395a91"
+        },
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0382"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "Here is a coin: cashuBo2FteBtodHRwczovL21pbnQubWluaWJpdHMuY2FzaC9CaXRjb2lu",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "19d0de10e2323cc638e896ec08d144bfce4b179a57e2ba013ddb174e2bd7693b"
+        }
+      ],
+      "contents": true,
+      "money": false,
+      "onosendai": [
+        [
+          "contents",
+          "message",
+          "2"
+        ],
+        [
+          "contents",
+          "cashu",
+          "1"
+        ],
+        [
+          "contents",
+          "nft",
+          "1"
+        ]
+      ]
+    },
+    {
+      "name": "an NFT and a coin",
+      "inners": [
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0380"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "ed93fba65ee167794ffb7930bb47fb84cee4e1b76bb3460e77953656ad395a91"
+        },
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0382"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "Here is a coin: cashuBo2FteBtodHRwczovL21pbnQubWluaWJpdHMuY2FzaC9CaXRjb2lu",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "19d0de10e2323cc638e896ec08d144bfce4b179a57e2ba013ddb174e2bd7693b"
+        }
+      ],
+      "contents": false,
+      "money": true,
+      "onosendai": [
+        [
+          "contents",
+          "cashu"
+        ]
+      ]
+    },
+    {
+      "name": "an NFT and a coin",
+      "inners": [
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0380"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "ed93fba65ee167794ffb7930bb47fb84cee4e1b76bb3460e77953656ad395a91"
+        },
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0382"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "Here is a coin: cashuBo2FteBtodHRwczovL21pbnQubWluaWJpdHMuY2FzaC9CaXRjb2lu",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "19d0de10e2323cc638e896ec08d144bfce4b179a57e2ba013ddb174e2bd7693b"
+        }
+      ],
+      "contents": true,
+      "money": true,
+      "onosendai": [
+        [
+          "contents",
+          "message",
+          "2"
+        ],
+        [
+          "contents",
+          "cashu",
+          "1"
+        ],
+        [
+          "contents",
+          "nft",
+          "1"
+        ]
+      ]
+    },
+    {
+      "name": "an NFT and a coin",
+      "inners": [
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0380"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "ed93fba65ee167794ffb7930bb47fb84cee4e1b76bb3460e77953656ad395a91"
+        },
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0382"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "Here is a coin: cashuBo2FteBtodHRwczovL21pbnQubWluaWJpdHMuY2FzaC9CaXRjb2lu",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "19d0de10e2323cc638e896ec08d144bfce4b179a57e2ba013ddb174e2bd7693b"
+        }
+      ],
+      "contents": false,
+      "money": false,
+      "onosendai": []
+    },
+    {
+      "name": "nothing counted",
+      "inners": [
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0392"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB https://nonfungible.cash/claim/6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw http://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://www.nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/link/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw xhttps://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://a.example/?u=https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://a.example/https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw= https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw&x https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "5ed033d5e0cebbb5876a733036098425db27d62657246a9cf51bcba30da8b94e"
+        }
+      ],
+      "contents": true,
+      "money": false,
+      "onosendai": [
+        [
+          "contents",
+          "message",
+          "1"
+        ]
+      ]
+    },
+    {
+      "name": "nothing counted",
+      "inners": [
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0392"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB https://nonfungible.cash/claim/6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw http://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://www.nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/link/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw xhttps://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://a.example/?u=https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://a.example/https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw= https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw&x https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "5ed033d5e0cebbb5876a733036098425db27d62657246a9cf51bcba30da8b94e"
+        }
+      ],
+      "contents": false,
+      "money": true,
+      "onosendai": []
+    },
+    {
+      "name": "nothing counted",
+      "inners": [
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0392"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB https://nonfungible.cash/claim/6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw http://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://www.nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/link/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw xhttps://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://a.example/?u=https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://a.example/https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw= https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw&x https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "5ed033d5e0cebbb5876a733036098425db27d62657246a9cf51bcba30da8b94e"
+        }
+      ],
+      "contents": true,
+      "money": true,
+      "onosendai": [
+        [
+          "contents",
+          "message",
+          "1"
+        ]
+      ]
+    },
+    {
+      "name": "nothing counted",
+      "inners": [
+        {
+          "kind": 1,
+          "created_at": 1792600000,
+          "tags": [
+            [
+              "C",
+              "000000000000000000000000000000000e0000000000000000000000003f0392"
+            ],
+            [
+              "-"
+            ]
+          ],
+          "content": "https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB https://nonfungible.cash/claim/6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw http://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://www.nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/link/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw xhttps://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://a.example/?u=https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://a.example/https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw= https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw&x https://nonfungible.cash/claim/6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f",
+          "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+          "id": "5ed033d5e0cebbb5876a733036098425db27d62657246a9cf51bcba30da8b94e"
+        }
+      ],
+      "contents": false,
+      "money": false,
+      "onosendai": []
+    },
+    {
+      "name": "empty",
+      "inners": [],
+      "contents": true,
+      "money": false,
+      "onosendai": []
+    },
+    {
+      "name": "empty",
+      "inners": [],
+      "contents": false,
+      "money": true,
+      "onosendai": []
+    },
+    {
+      "name": "empty",
+      "inners": [],
+      "contents": true,
+      "money": true,
+      "onosendai": []
+    },
+    {
+      "name": "empty",
+      "inners": [],
+      "contents": false,
+      "money": false,
+      "onosendai": []
+    }
+  ],
+  "reads": [
+    {
+      "rows": [
+        [
+          "contents",
+          "nft",
+          "2"
+        ]
+      ],
+      "onosendai": {
+        "contents": true,
+        "money": false
+      }
+    },
+    {
+      "rows": [
+        [
+          "contents",
+          "nft"
+        ]
+      ],
+      "onosendai": {
+        "contents": false,
+        "money": false
+      }
+    },
+    {
+      "rows": [
+        [
+          "contents",
+          "nft",
+          "0"
+        ]
+      ],
+      "onosendai": {
+        "contents": false,
+        "money": false
+      }
+    },
+    {
+      "rows": [
+        [
+          "contents",
+          "nft",
+          "-1"
+        ]
+      ],
+      "onosendai": {
+        "contents": false,
+        "money": false
+      }
+    },
+    {
+      "rows": [
+        [
+          "contents",
+          "nft",
+          "1.5"
+        ]
+      ],
+      "onosendai": {
+        "contents": false,
+        "money": false
+      }
+    },
+    {
+      "rows": [
+        [
+          "contents",
+          "message",
+          "1"
+        ],
+        [
+          "contents",
+          "nft",
+          "1"
+        ]
+      ],
+      "onosendai": {
+        "contents": true,
+        "money": false
+      }
+    },
+    {
+      "rows": [
+        [
+          "contents",
+          "cashu"
+        ]
+      ],
+      "onosendai": {
+        "contents": false,
+        "money": true
+      }
+    },
+    {
+      "rows": [
+        [
+          "contents",
+          "cashu"
+        ],
+        [
+          "contents",
+          "nft",
+          "1"
+        ]
+      ],
+      "onosendai": {
+        "contents": true,
+        "money": true
+      }
+    },
+    {
+      "rows": [
+        [
+          "contents",
+          "gold",
+          "5"
+        ]
+      ],
+      "onosendai": {
+        "contents": false,
+        "money": false
+      }
+    }
+  ],
+  "ids": {
+    "plain": "605d44ea0b53a7a235a410a7596ae82da29309e4afdc80fc210fc33e6ff3056b",
+    "nft": "be9a7e23ee3a280f73b3827ec236a7829d6160130320089fa8bdde43ff07c397",
+    "coin": "19d0de10e2323cc638e896ec08d144bfce4b179a57e2ba013ddb174e2bd7693b",
+    "note": "An agent note."
+  },
+  "bags": {
+    "contentsOn": {
+      "kind": 33330,
+      "created_at": 1792600000,
+      "content": "",
+      "tags": [
+        [
+          "d",
+          "12f7ed457f29fd7e50038dcf4b9d9e30d779b543466c80bfc83bf2349f37709d"
+        ],
+        [
+          "encrypted",
+          "aes-256-gcm",
+          "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"
+        ],
+        [
+          "version",
+          "2"
+        ],
+        [
+          "H",
+          "8"
+        ],
+        [
+          "contents",
+          "shard",
+          "1"
+        ],
+        [
+          "contents",
+          "message",
+          "4"
+        ],
+        [
+          "contents",
+          "key",
+          "1"
+        ],
+        [
+          "contents",
+          "chest",
+          "1"
+        ],
+        [
+          "contents",
+          "cashu",
+          "1"
+        ],
+        [
+          "contents",
+          "nft",
+          "3"
+        ],
+        [
+          "client",
+          "ONOSENDAI"
+        ]
+      ],
+      "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+      "id": "3ab67e2109b3030b10baeae3864cff910f5725121c1be9ec7a25bcabbe02d99b",
+      "sig": "057a07a13cb8b1ba7e3a84d2f425bdf40c754de96f6262e88581d8e28cdd295f6247d16d960344ace1a98e9747bf4e7fd7be4da753b6030f869f6a331a92ce38"
+    },
+    "moneyAlone": {
+      "kind": 33330,
+      "created_at": 1792600000,
+      "content": "",
+      "tags": [
+        [
+          "d",
+          "6a11ccaac6491f0584f0f172f7073d108a5af571a3fe241e57290c6d212d2cdd"
+        ],
+        [
+          "encrypted",
+          "aes-256-gcm",
+          "p9sZtWQiHPAwV0XCP6+mn95TqsjVfRdeE/mxVgo4hbyeeXCdQfqCmzj/qOXyAJs2Mf1BFucRMY7Hf3wyst6Jevj7Gw75Ay+Eit1loArmkZlsYn5T1XuNgSC2R8OYgAzb/PxiVclmtAXxAI/WEAHS7jseiXWrZLmgE63QUGuDqj7+bm4+tg223Wb5G655vYjGn9uj5xFjk9YaNV58x4Ch89Umf7Nyq2HCWIU+bxawdU6xWaRQsrzWLsMFfNJnSQE3jMuPeCjeI97B71/ecljKCHvsj3A4t/yKlAFvmbaGWvmmuE3PULt+jcWEPXhKvOt+WjtmLjScL0OpE9EsCIp5Eotrs16hT1GE+MQfrtK0V2zHcbBw9IsoWFKHeHpkFUjgDul4lvFZ7JGLjKC+x3c9/h4IKot8X6cH+kR+bMlXdvMMDJ6UU5wyS1TOcnWw1gJtBm4w8qXrqYqv7w6c5BSPiKqUcZQirWI39WxupKp+N3gLGq+LVG7w6vYqnz3o9Nslaki5iB1TteuAT9RK8amppP4Yik7dl5JyO/UJRUvqd19QXVisYW/XnvD4AeoFpVAmVp1ItuMSFiJkOPQpLKo6xthv3tTynZwiOlc8jQ5+xB1Kld8Xz5E9gC9sDT36PmMF03YmPTjx5g8GR0gSAHmOm2Z7NVXi0HGdO3zSeU0igobkOJV9tb8xWshV3sxR12zV/uIIH1EzSYP0TRSGfdPhNp0+gYTO8aaEKXVrDhtr7s/HtuTTpuUJjormhDd1LTGcREXMJm3Vd2gTZ4B9Nz7HtgIDFcHdJZtPDcluc9BlbSy/Ao/zpBImvQfK+SYRMoElWwGDchlT81jthPd+i/Sfw+E1MdmZQlUoSsyOGqWuMUPEvhk0rW4h3r2QO+VlJw2bSlix2EQhP2ZhuvI5MdnMi70m2ka3C6XN7qLxp2qOLkd34SJX0qeS/Cap11eVcenz6uDpM/w7Vw1pCyDU2sU8FINIwe8FmF3Nu/+q8v08CX4jgkL562+dqJ7sbYnoB+aTc0IV+EvMr5hBzA=="
+        ],
+        [
+          "version",
+          "2"
+        ],
+        [
+          "H",
+          "3"
+        ],
+        [
+          "contents",
+          "cashu"
+        ],
+        [
+          "client",
+          "ONOSENDAI"
+        ]
+      ],
+      "pubkey": "55860bf003af7ef2504981103abf672f55abe85351214d26c461b77ef2c81165",
+      "id": "cbbb562ad55baa1d6931947b4372f3e7b32389191eeedb11d3a3aab739410bf1",
+      "sig": "71d60a05428d0a0fbcd07ac84b7ae3cf69c8cc57bbf5c0e182bbad405de6361c55de05411e320ed80650e2bac0d623c0c06cfb4edd4615430d2a08fdda466195"
+    }
+  },
+  "expected": {
+    "contentsOn": {
+      "sealed": [
+        [
+          "contents",
+          "shard",
+          "1"
+        ],
+        [
+          "contents",
+          "message",
+          "4"
+        ],
+        [
+          "contents",
+          "key",
+          "1"
+        ],
+        [
+          "contents",
+          "chest",
+          "1"
+        ],
+        [
+          "contents",
+          "cashu",
+          "1"
+        ],
+        [
+          "contents",
+          "nft",
+          "3"
+        ]
+      ],
+      "afterHide": [
+        [
+          "contents",
+          "shard",
+          "1"
+        ],
+        [
+          "contents",
+          "message",
+          "5"
+        ],
+        [
+          "contents",
+          "key",
+          "1"
+        ],
+        [
+          "contents",
+          "chest",
+          "1"
+        ],
+        [
+          "contents",
+          "cashu",
+          "1"
+        ],
+        [
+          "contents",
+          "nft",
+          "3"
+        ]
+      ],
+      "afterRemovePlain": [
+        [
+          "contents",
+          "shard",
+          "1"
+        ],
+        [
+          "contents",
+          "message",
+          "4"
+        ],
+        [
+          "contents",
+          "key",
+          "1"
+        ],
+        [
+          "contents",
+          "chest",
+          "1"
+        ],
+        [
+          "contents",
+          "cashu",
+          "1"
+        ],
+        [
+          "contents",
+          "nft",
+          "3"
+        ]
+      ],
+      "afterMoveNft": [
+        [
+          "contents",
+          "shard",
+          "1"
+        ],
+        [
+          "contents",
+          "message",
+          "4"
+        ],
+        [
+          "contents",
+          "key",
+          "1"
+        ],
+        [
+          "contents",
+          "chest",
+          "1"
+        ],
+        [
+          "contents",
+          "cashu",
+          "1"
+        ],
+        [
+          "contents",
+          "nft",
+          "3"
+        ]
+      ],
+      "afterRemoveNft": [
+        [
+          "contents",
+          "shard",
+          "1"
+        ],
+        [
+          "contents",
+          "message",
+          "3"
+        ],
+        [
+          "contents",
+          "key",
+          "1"
+        ],
+        [
+          "contents",
+          "chest",
+          "1"
+        ],
+        [
+          "contents",
+          "cashu",
+          "1"
+        ],
+        [
+          "contents",
+          "nft",
+          "2"
+        ]
+      ]
+    },
+    "moneyAlone": {
+      "sealed": [
+        [
+          "contents",
+          "cashu"
+        ]
+      ],
+      "afterHide": [
+        [
+          "contents",
+          "cashu"
+        ]
+      ],
+      "afterRemoveCoin": []
+    }
+  }
+}
