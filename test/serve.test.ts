@@ -203,4 +203,100 @@ describe('serve', () => {
     expect(answered()).toBe('received: hello agent')
     await until(() => logs.some((l) => l.includes('turn ended (exit 0)') && l.includes('answered 1 message(s)')))
   })
+
+  it('with a reply command, an order gets a quick reply turn, then a work turn that sees the open order in inbox (arkinox, 2026-10-22)', async () => {
+    const w = world()
+    const opSk = generateSecretKey()
+    const op = getPublicKey(opSk)
+    const agentSk = generateSecretKey()
+    const me = getPublicKey(agentSk)
+    w.general.seed(sign(opSk, 10050, [['relay', INBOX]]), sign(opSk, 3, [['p', me]]))
+    const dir = dirWithKey(agentSk)
+    const turns = join(dir, 'turns.jsonl')
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({
+      operator: nip19.npubEncode(op),
+      wake: {
+        command: [process.execPath, FAKE, 'tools:inbox', turns, '{prompt}'],
+        replyCommand: [process.execPath, FAKE, 'tools:inbox', turns, '{prompt}'],
+        pollSeconds: 0.2,
+      },
+    }))
+    const s = await serve(w, ['--state', dir])
+    await s.agent.identity({ name: 'courier' })
+    const c = await connect(s.http.url)
+    expect((await c.listTools()).tools.map((t) => t.name)).toEqual(expect.arrayContaining(['wake_again', 'work_done']))
+    await c.close()
+    w.inbox.seed(nip59.wrapEvent({ kind: 14, content: 'build a fountain by the disco floor', tags: [['p', me], ['agent', 'strategy']], created_at: nowSeconds() - 5 }, opSk, me) as NostrEvent)
+    type Line = { args?: string[]; tool?: string; text?: string }
+    const lines = (): Line[] => (existsSync(turns) ? readFileSync(turns, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Line) : [])
+    await until(() => lines().filter((l) => l.tool === 'inbox').length >= 2)
+    const prompts = lines().filter((l) => l.args).map((l) => l.args![0])
+    expect(prompts[0]).toContain('This is your quick reply turn')
+    expect(prompts[1]).toContain('Work turn from your waker')
+    const [replyInbox, workInbox] = lines().filter((l) => l.tool === 'inbox')
+    expect(replyInbox.text).toContain('STRATEGY build a fountain by the disco floor')
+    // The reply turn read it; the work turn still sees it, as open work.
+    expect(workInbox.text).toContain('Still open from an earlier turn')
+    expect(workInbox.text).toContain('build a fountain by the disco floor')
+    expect(s.waker!.openWork?.ids).toHaveLength(1)
+    // Nothing in the waker's file is the order's words.
+    expect(readFileSync(join(dir, 'wake-work.json'), 'utf8')).not.toContain('fountain')
+  })
+
+  it('a reply turn that calls work_done is the whole answer: no work turn', async () => {
+    const w = world()
+    const opSk = generateSecretKey()
+    const op = getPublicKey(opSk)
+    const agentSk = generateSecretKey()
+    const me = getPublicKey(agentSk)
+    w.general.seed(sign(opSk, 10050, [['relay', INBOX]]), sign(opSk, 3, [['p', me]]))
+    const dir = dirWithKey(agentSk)
+    const turns = join(dir, 'turns.jsonl')
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({
+      operator: nip19.npubEncode(op),
+      wake: {
+        command: [process.execPath, FAKE, 'log', turns, '{prompt}'],
+        replyCommand: [process.execPath, FAKE, 'tools:inbox,work_done', turns, '{prompt}'],
+        pollSeconds: 0.2,
+      },
+    }))
+    const s = await serve(w, ['--state', dir])
+    await s.agent.identity({ name: 'courier' })
+    w.inbox.seed(nip59.wrapEvent({ kind: 14, content: 'stand by', tags: [['p', me]], created_at: nowSeconds() - 5 }, opSk, me) as NostrEvent)
+    await until(() => existsSync(turns) && readFileSync(turns, 'utf8').includes('"tool":"work_done"'))
+    await new Promise((r) => setTimeout(r, 1000))
+    const modes = readFileSync(turns, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { mode: string; args?: string[] }).filter((l) => l.args).map((l) => l.mode)
+    expect(modes).toEqual(['tools:inbox,work_done'])
+    expect(s.waker!.openWork).toBeNull()
+  })
+
+  it('tells the operator once by DM when it stops resuming work whose turn failed', async () => {
+    const w = world()
+    const opSk = generateSecretKey()
+    const op = getPublicKey(opSk)
+    const agentSk = generateSecretKey()
+    const me = getPublicKey(agentSk)
+    w.general.seed(sign(opSk, 10050, [['relay', INBOX]]), sign(opSk, 3, [['p', me]]))
+    const dir = dirWithKey(agentSk)
+    const turns = join(dir, 'turns.jsonl')
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({
+      operator: nip19.npubEncode(op),
+      wake: { command: [process.execPath, FAKE, 'tools-fail:inbox', turns, '{prompt}'], pollSeconds: 0.2, maxResumes: 0, resumeDelaySeconds: 0.1 },
+    }))
+    const s = await serve(w, ['--state', dir])
+    await s.agent.identity({ name: 'courier' })
+    w.inbox.seed(nip59.wrapEvent({ kind: 14, content: 'sweep the plaza', tags: [['p', me]], created_at: nowSeconds() - 5 }, opSk, me) as NostrEvent)
+    const told = (): string[] => w.inbox.published.filter((x) => x.kind === 1059 && x.tags.some((t) => t[0] === 'p' && t[1] === op)).flatMap((e) => {
+      try {
+        const rumor = nip59.unwrapEvent(e, opSk)
+        return rumor.kind === 14 ? [rumor.content] : []
+      } catch { return [] }
+    })
+    await until(() => told().length > 0)
+    await new Promise((r) => setTimeout(r, 800))
+    expect(told()).toHaveLength(1)
+    expect(told()[0]).toContain('I stopped working on your orders')
+    expect(told()[0]).toContain('it exited with code 3')
+    expect(s.waker!.openWork).toBeNull()
+  })
 })

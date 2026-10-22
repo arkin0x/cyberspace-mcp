@@ -146,6 +146,11 @@ const MAX_SWEEP_CANDIDATES = 1 << 16
 /** The objects opened this session that render can draw by id; the oldest is forgotten past this. */
 const OBJECTS_REMEMBERED = 64
 
+/** What the agent is told when the server switched its follow watch off (arkinox, 2026-10-22). */
+function followOffWords(reason: string): string {
+  return `Follow watch switched off: ${reason}. If your STRATEGY asks you to follow or meet your operator, call follow_operator with on: true; otherwise leave it off, and do not message your operator about it.`
+}
+
 /** A person the agent's avatar must not overlap (space/personalSpace.ts). */
 interface Occupant extends Body {
   pubkey: string
@@ -302,6 +307,8 @@ export class Agent {
       relays: this.relays, dir,
       operator: () => (this.operatorProblem() ? null : this.operatorOfProfile()),
       follows: () => this.operatorChannel.operatorFollows(),
+      // Following belongs to the STRATEGY current when it was turned on (arkinox, 2026-10-22).
+      strategy: () => this.operatorChannel.strategy()?.id ?? null,
       now: nowSeconds, log: this.log,
     })
     this.roaming = new Roam(dir, config.roamClock ?? nowSeconds)
@@ -1004,8 +1011,16 @@ export class Agent {
     // so an unreachable DM inbox never hides a move.
     this.follow.refresh()
     const moved = this.follow.unseen()
-    const operatorMoved = moved ? this.moveData(moved) : null
-    const movedWords = operatorMoved ? ` Your operator moved: ${operatorMoved.action} to ${operatorMoved.to} (${operatorMoved.distance} from you). Call follow_operator to see the way there.` : ''
+    // Quiet: still out of reach, and the one note about it was already invited under this STRATEGY (arkinox, 2026-10-22), so the waker lets it be.
+    const quiet = moved !== null && this.follow.unreachableNoted() !== null && this.reachOf(moved) !== null
+    const operatorMoved = moved ? { ...this.moveData(moved), quiet } : null
+    const movedWords = operatorMoved
+      ? quiet
+        ? ` Your operator moved: ${operatorMoved.action} to ${operatorMoved.to} (${operatorMoved.distance} from you), still out of your reach; they were already told.`
+        : ` Your operator moved: ${operatorMoved.action} to ${operatorMoved.to} (${operatorMoved.distance} from you). Call follow_operator to see the way there.`
+      : ''
+    const off = this.follow.pendingOff()
+    const followSwitchedOff = off ? { at: off.at, reason: off.reason } : null
     // Whether a roam step is due (arkinox, 2026-10-11): from memory, and
     // never while a ride or a move holds the head, so the waker wakes the
     // agent only for a step it can take. Kept, like a move, when the DM
@@ -1023,7 +1038,7 @@ export class Agent {
     try {
       result = await this.operatorChannel.ordersWaiting()
     } catch (err) {
-      if ((!operatorMoved && !roamDue && chatHeard.wake === null) || !(err instanceof Refusal)) throw err
+      if ((!operatorMoved && !roamDue && chatHeard.wake === null && !followSwitchedOff) || !(err instanceof Refusal)) throw err
       result = { text: `Could not count orders: ${err.message}`, data: { orders: null, ordersError: err.message } }
     }
     // The ride's state rides along (arkinox, 2026-10-11), so the waker that
@@ -1040,7 +1055,23 @@ export class Agent {
       awaiting_payment: `awaiting payment to HOSAKA (${ride.reason})`,
     }
     const words = ride.state === null ? '' : ` A ride to block ${ride.to} is ${said[ride.state]}.`
-    return { text: `${result.text}${words}${movedWords}${roamWords}${chatWords}`, data: { ...result.data, ride, operatorMoved, roamDue, chatHeard } }
+    const offWords = followSwitchedOff ? ` ${followOffWords(followSwitchedOff.reason)}` : ''
+    return { text: `${result.text}${words}${movedWords}${roamWords}${chatWords}${offWords}`, data: { ...result.data, ride, operatorMoved, roamDue, chatHeard, followSwitchedOff } }
+  }
+
+  /**
+   * Whether the operator's position is out of reach from where the agent
+   * stands, from memory and cheap: 'ride' across a wall no hop crosses,
+   * 'caps' when the next step toward them is refused by the caps, null
+   * otherwise. follow_operator's own answer weighs the landing too; this is
+   * only for keeping quiet about a move.
+   */
+  private reachOf(m: OperatorMove): 'ride' | 'caps' | null {
+    const me = this.keeper.place()
+    const there = placeFromHex(m.coordHex)
+    if (this.routeRefusal(me, there) !== null) return 'ride'
+    const step = priceNextStep(me, there, this.ceilings(), this.calibration)
+    return step && this.stepRefusal(step, there) ? 'caps' : null
   }
 
   /** A verified operator move as orders_waiting and follow_operator show it, with the distance from where the agent stands (from memory). */
@@ -1063,13 +1094,20 @@ export class Agent {
       this.follow.setOn(false)
       return { text: 'Follow watch off: your operator\'s moves are no longer watched, and orders_waiting no longer reports them.', data: { on: false } }
     }
+    // Any call says why the server switched the watch off, so it is told once.
+    this.follow.refresh()
+    const off = this.follow.pendingOff()
+    if (off) this.follow.markOffShown()
     const problem = this.operatorProblem()
     if (problem) throw new Refusal(problem)
     const op = this.operatorOfProfile()
     if (!op) throw new Refusal('Your profile names no operator, so there is nobody to follow. Call identity with operator (your human\'s npub), or have the server started with --operator.')
     if (input.on === true) this.follow.setOn(true)
     const on = this.follow.on
-    if (!on) return { text: 'Follow watch off. Call follow_operator with on: true to watch your operator\'s moves and see where they are.', data: { on: false } }
+    if (!on) {
+      const why = off ? `Follow watch off: ${off.reason}.` : 'Follow watch off.'
+      return { text: `${why} Call follow_operator with on: true to watch your operator's moves and see where they are, when your STRATEGY asks you to follow or meet them.`, data: { on: false, switchedOff: off ? { at: off.at, reason: off.reason } : null } }
+    }
     const watchWords = 'Follow watch on: when your operator moves, orders_waiting reports it and your waker wakes you.'
     // Their avatar's size is read alongside, never waited for: by the time the chain read answers it is usually in.
     this.avatars.want([op, this.pubkey])
@@ -1096,13 +1134,19 @@ export class Agent {
     const besideAlready = beside.hex === me.hex
     const plan = besideAlready ? null : await this.planFrom(me, beside)
     const needsRide = this.routeRefusal(me, placeFromHex(target.hex)) !== null
+    // Out of reach: the one note to the operator, once per STRATEGY while it lasts (arkinox, 2026-10-22).
+    const reachKind = besideAlready ? null : needsRide ? 'ride' : plan!.data.refused ? 'caps' : null
+    const reach = this.follow.noteReach(reachKind)
+    const why = needsRide
+      ? 'Too far to hop: a coordinate that distant is reached by riding the line to the stop nearest it (station, board, ride).'
+      : `Not within your caps: ${plan?.data.refused as string}`
     const advice = besideAlready
       ? 'You already stand just outside your operator\'s avatar: no move is needed.'
-      : needsRide
-        ? 'Too far to hop: a coordinate that distant is reached by riding the line to the stop nearest it (station, board, ride). Follow your STRATEGY; if you cannot reach them, tell your operator with message_operator.'
-        : plan!.data.refused
-          ? `Not within your caps: ${plan!.data.refused as string} Follow your STRATEGY; tell your operator with message_operator if you cannot follow.`
-          : `Within your caps: hop with target ${target.hex} to stand just outside their avatar (one step per hop call; plan_hop says how many remain). Moving is your decision, guided by your STRATEGY.`
+      : reach === 'first'
+        ? `${why} Only if your STRATEGY asks you to follow or meet your operator, tell them once, in one line with message_operator, what it would take. This is the only note about it: while they stay out of your reach, your waker does not wake you for their moves, and you send no other message about following.`
+        : reach === 'already'
+          ? `${why} Your operator was already told under this STRATEGY that you cannot reach them: do not message them about it again. While they stay out of your reach, your waker does not wake you for their moves.`
+          : `Within your caps: hop with target ${target.hex} to stand just outside their avatar (one step per hop call; plan_hop says how many remain). Moving is your decision, guided by your STRATEGY. Following is silent: no message to your operator about it.`
     const text = [
       watchWords,
       `Your operator is at ${latest.coordHex} (${move.planeName}), by a ${latest.action} signed ${new Date(latest.at * 1000).toISOString()} (event ${latest.eventId.slice(0, 8)}..., verified on their chain). From you: ${move.distance}.`,
@@ -1116,6 +1160,7 @@ export class Agent {
       data: {
         on, operator: nip19.npubEncode(op), position: { ...move, where: describePlace(there) }, beside: target, besideAlready, needsRide,
         plan: plan ? { refused: plan.data.refused, plan: plan.data.plan } : null, notes,
+        unreachableNote: reach === 'first' ? 'invited' : reach === 'already' ? 'sent' : null,
       },
     }
   }
@@ -1273,8 +1318,18 @@ export class Agent {
   }
 
 
-  inbox(): Promise<ToolResult> {
-    return this.operatorChannel.inbox()
+  /**
+   * The inbox, and, when the STRATEGY it read switched the follow watch off
+   * (or the server did so earlier and nobody was told), the line that says
+   * so and how to turn it on again (arkinox, 2026-10-22).
+   */
+  async inbox(): Promise<ToolResult> {
+    const result = await this.operatorChannel.inbox()
+    this.follow.refresh()
+    const off = this.follow.pendingOff()
+    if (!off) return result
+    this.follow.markOffShown()
+    return { ...result, text: `${result.text}\n${followOffWords(off.reason)}`, data: { ...result.data, followSwitchedOff: { at: off.at, reason: off.reason } } }
   }
 
   /** The wallet: connected or not, the balance when the wallet tells, today's spend and the limits. Read only; never the connection string. */

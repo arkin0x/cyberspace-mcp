@@ -64,7 +64,7 @@ export async function startServe(argv: string[], deps: ServeDeps): Promise<Servi
       log,
       createServer: () => createServer(agent, log, {
         onActivity: () => waker?.noteActivity(),
-        ...(waker ? { wakeAgain: () => waker!.requestAgain() } : {}),
+        ...(waker ? { wakeAgain: () => waker!.requestAgain(), workDone: () => waker!.markDone(), onInbox: (r) => waker!.onInbox(r) } : {}),
       }),
     })
   } catch (err) {
@@ -76,6 +76,7 @@ export async function startServe(argv: string[], deps: ServeDeps): Promise<Servi
       ordersWaiting: async () => (await agent.ordersWaiting()).data as WakeData,
       stateDir,
       log: (line) => log(line),
+      messageOperator: (text) => agent.messageOperator({ text }),
       env: {
         CYBERSPACE_MCP_URL: http.url,
         CYBERSPACE_MCP_STATE: stateDir,

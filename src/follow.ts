@@ -22,6 +22,21 @@
 //     orders_waiting reads the newest move from memory.
 //   - A move is unseen until follow_operator reports it. It never moves the
 //     agent: moving stays the model's decision, guided by STRATEGY.
+//   - Following belongs to a STRATEGY (arkinox, 2026-10-22: the STRATEGY
+//     said "follow me", the next one said to build things, and the watch
+//     stayed on). Turning the watch on records the STRATEGY current then; when
+//     a different STRATEGY is current, the watch switches itself off and
+//     records why, and the next inbox says so, so the agent turns it on again
+//     when the new STRATEGY asks it to follow or meet the operator. A watch
+//     left on by a version that recorded no STRATEGY is switched off the same
+//     way once a STRATEGY is known.
+//   - Out of reach, once (arkinox, 2026-10-22: five identical "I can't reach
+//     you without a hyperjump" DMs, one per move). The first time
+//     follow_operator finds the operator out of reach under a STRATEGY, it
+//     invites the one note to the operator and records that it did; until a
+//     call finds them within reach again, it says not to send another, and
+//     orders_waiting marks their moves quiet so the waker does not wake the
+//     agent for them. Kept in follow.json, so a restart keeps it.
 
 import type { Filter } from 'nostr-tools/filter'
 import { getEventHash } from 'nostr-tools/pure'
@@ -59,6 +74,25 @@ export interface FollowNote {
   text: string
 }
 
+/** Why the server switched the watch off, and whether the agent has been told. */
+export interface FollowOff {
+  at: number
+  reason: string
+  /** Whether an inbox or follow_operator answer has said so. */
+  shown: boolean
+}
+
+/** The operator found out of reach while following under a STRATEGY. */
+export interface Unreachable {
+  /** The STRATEGY current when it began (rumor id), or null when there was none. */
+  strategyId: string | null
+  since: number
+  /** A ride is needed, or the step is over the caps. */
+  kind: 'ride' | 'caps'
+  /** Whether follow_operator has invited the one note to the operator already. */
+  noted: boolean
+}
+
 interface FollowFile {
   version: 1
   on: boolean
@@ -67,9 +101,14 @@ interface FollowFile {
   latest: OperatorMove | null
   /** The move follow_operator last reported. */
   ackedId: string | null
+  /** The STRATEGY (rumor id) current when the watch was turned on; null when there was none; absent in a file from before it was kept. */
+  onFor?: string | null
+  off?: FollowOff | null
+  unreachable?: Unreachable | null
 }
 
-const EMPTY: FollowFile = { version: 1, on: false, operator: null, latest: null, ackedId: null }
+// No onFor here: a file without it is from before it was kept (see checkStrategy).
+const EMPTY: FollowFile = { version: 1, on: false, operator: null, latest: null, ackedId: null, off: null, unreachable: null }
 
 export interface FollowDeps {
   relays: Relays
@@ -78,6 +117,8 @@ export interface FollowDeps {
   operator: () => string | null
   /** Whether that operator's newest kind 3 follows the agent; null when it could not be told. */
   follows: () => Promise<boolean | null>
+  /** The current STRATEGY's rumor id, or null when none is known (none set, or no operator to tell). */
+  strategy?: () => string | null
   now: () => number
   log: (line: string) => void
   retryMs?: number
@@ -153,13 +194,83 @@ export class OperatorWatch {
     this.save()
   }
 
-  /** Turn the watch on or off, and keep the choice. */
+  /** Turn the watch on or off, and keep the choice; on belongs to the STRATEGY current now. */
   setOn(on: boolean): void {
-    if (this.state.on !== on) {
-      this.state.on = on
+    const onFor = on ? (this.deps.strategy?.() ?? null) : null
+    if (this.state.on !== on || (on && this.state.onFor !== onFor) || this.state.off) {
+      this.state = { ...this.state, on, onFor, off: null, unreachable: on && this.state.on && this.state.onFor === onFor ? this.state.unreachable ?? null : null }
       this.save()
     }
     this.refresh()
+  }
+
+  /**
+   * Switch the watch off when the current STRATEGY is not the one it was
+   * turned on for. Only a STRATEGY that is known counts: none known (no
+   * operator yet, a problem with the profile) changes nothing, and a
+   * STRATEGY is only ever replaced, never removed.
+   */
+  private checkStrategy(): void {
+    if (!this.state.on) return
+    const current = this.deps.strategy?.() ?? null
+    if (current === null) return
+    const legacy = this.state.onFor === undefined
+    if (!legacy && this.state.onFor === current) return
+    const reason = legacy
+      ? 'it was on from before this server kept which STRATEGY asked for it'
+      : 'a new STRATEGY from your operator arrived, and following belongs to the STRATEGY that asked for it'
+    this.state = { ...this.state, on: false, onFor: null, unreachable: null, off: { at: this.deps.now(), reason, shown: false } }
+    this.save()
+    this.deps.log(`follow: watch switched off: ${reason}`)
+  }
+
+  /** Why the server switched the watch off, when the agent has not been told yet. */
+  pendingOff(): FollowOff | null {
+    const off = this.state.off
+    return off && !off.shown ? { ...off } : null
+  }
+
+  /** The agent has been told why the watch is off (inbox said so, or it called follow_operator). */
+  markOffShown(): void {
+    if (!this.state.off || this.state.off.shown) return
+    this.state = { ...this.state, off: { ...this.state.off, shown: true } }
+    this.save()
+  }
+
+  /**
+   * What follow_operator found: the operator out of reach ('ride' or
+   * 'caps') or within reach (null). Returns 'first' when this begins an
+   * out-of-reach situation under the current STRATEGY (the one note to the
+   * operator is invited, and recorded as invited), 'already' when the note
+   * was invited before in this situation, and null when within reach.
+   */
+  noteReach(kind: 'ride' | 'caps' | null): 'first' | 'already' | null {
+    if (kind === null) {
+      if (this.state.unreachable) {
+        this.state = { ...this.state, unreachable: null }
+        this.save()
+      }
+      return null
+    }
+    const strategyId = this.deps.strategy?.() ?? null
+    const u = this.state.unreachable
+    if (u && u.noted && u.strategyId === strategyId) {
+      if (u.kind !== kind) {
+        this.state = { ...this.state, unreachable: { ...u, kind } }
+        this.save()
+      }
+      return 'already'
+    }
+    this.state = { ...this.state, unreachable: { strategyId, since: this.deps.now(), kind, noted: true } }
+    this.save()
+    return 'first'
+  }
+
+  /** The out-of-reach situation whose note was already invited under the current STRATEGY, or null. */
+  unreachableNoted(): Unreachable | null {
+    const u = this.state.unreachable
+    if (!u || !u.noted || !this.state.on) return null
+    return u.strategyId === (this.deps.strategy?.() ?? null) ? { ...u } : null
   }
 
   /**
@@ -169,6 +280,7 @@ export class OperatorWatch {
    */
   refresh(): void {
     if (this.stopped) return
+    this.checkStrategy()
     const op = this.state.on ? this.deps.operator() : null
     if (op && this.state.operator !== op) {
       this.state = { ...this.state, operator: op, latest: null, ackedId: null }
@@ -307,8 +419,8 @@ export class OperatorWatch {
   }
 
   /** The watch's state for the follow tool. */
-  status(): { on: boolean; operator: string | null; subscribed: boolean } {
-    return { on: this.state.on, operator: this.state.operator, subscribed: this.subscribedFor !== null }
+  status(): { on: boolean; operator: string | null; subscribed: boolean; onFor: string | null; off: FollowOff | null } {
+    return { on: this.state.on, operator: this.state.operator, subscribed: this.subscribedFor !== null, onFor: this.state.onFor ?? null, off: this.state.off ?? null }
   }
 
   stop(): void {
