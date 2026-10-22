@@ -33,7 +33,7 @@ interface Fixture {
   ids: { plain: string; nft: string; coin: string; note: string }
   bags: { contentsOn: NostrEvent; moneyAlone: NostrEvent }
   expected: {
-    contentsOn: Record<'sealed' | 'afterHide' | 'afterRemovePlain' | 'afterMoveNft' | 'afterRemoveNft', string[][]>
+    contentsOn: Record<'sealed' | 'afterHide' | 'afterRemovePlain' | 'afterMoveNft' | 'afterMoveNftAcross', string[][]>
     moneyAlone: Record<'sealed' | 'afterHide' | 'afterRemoveCoin', string[][]>
   }
 }
@@ -114,7 +114,7 @@ describe('a rewrite of a bag ONOSENDAI sealed keeps its contents rows as ONOSEND
   // z mod 256 is 100 at BASE, so +6 stays in the h8 cube; z mod 8 is 4, so +2 stays in the h3 cube.
   const at = (dz: bigint) => ({ x: BASE.toString(), y: BASE.toString(), z: (BASE + dz).toString(), plane: 0 })
 
-  it('contents on: hide, remove_placed and move_placed recompute the rows, nft included', async () => {
+  it('contents on: hide (a note with a link), remove_placed and move_placed (in the bag, across the edge) recompute the rows, nft included', async () => {
     const { call, mine } = await setup()
     const k = regionKeyAt({ x: BASE, y: BASE, z: BASE }, 8, 20)
     expect(rowsOn(mine, k.lookupId)).toEqual(fx.expected.contentsOn.sealed)
@@ -122,6 +122,9 @@ describe('a rewrite of a bag ONOSENDAI sealed keeps its contents rows as ONOSEND
     expect(hid.isError, hid.text).toBe(false)
     expect(hid.data.carried).toBe(7)
     expect(rowsOn(mine, k.lookupId)).toEqual(fx.expected.contentsOn.afterHide)
+    // The note the agent hid carries a link of its own, so the count it wrote went up by one.
+    const nftOf = (rows: string[][]): number => Number(rows.find((r) => r[1] === 'nft')?.[2] ?? 0)
+    expect(nftOf(fx.expected.contentsOn.afterHide)).toBe(nftOf(fx.expected.contentsOn.sealed) + 1)
     const removed = await call('remove_placed', { target: fx.ids.plain })
     expect(removed.isError, removed.text).toBe(false)
     expect(rowsOn(mine, k.lookupId)).toEqual(fx.expected.contentsOn.afterRemovePlain)
@@ -129,10 +132,15 @@ describe('a rewrite of a bag ONOSENDAI sealed keeps its contents rows as ONOSEND
     expect(moved.isError, moved.text).toBe(false)
     expect(moved.data.sameBag).toBe(true)
     expect(rowsOn(mine, k.lookupId)).toEqual(fx.expected.contentsOn.afterMoveNft)
-    // By its lineage: the move signed it again under a new id.
-    const gone = await call('remove_placed', { target: fx.ids.nft })
-    expect(gone.isError, gone.text).toBe(false)
-    expect(rowsOn(mine, k.lookupId)).toEqual(fx.expected.contentsOn.afterRemoveNft)
+    // Across the cube's edge (z mod 256 goes from 102 past 255), by its lineage: the move signed it again under a new id.
+    const across = await call('move_placed', { target: fx.ids.nft, by: { dz: 200 } })
+    expect(across.isError, across.text).toBe(false)
+    expect(across.data.sameBag).toBe(false)
+    expect(rowsOn(mine, k.lookupId)).toEqual(fx.expected.contentsOn.afterMoveNftAcross)
+    // The bag it lands in had none before, so it starts with contents off, as a first hide there would.
+    const there = regionKeyAt({ x: BASE, y: BASE, z: BASE + 202n }, 8, 20)
+    expect(there.lookupId).not.toBe(k.lookupId)
+    expect(rowsOn(mine, there.lookupId)).toEqual([])
   }, 60_000)
 
   it('money alone: an NFT never shows, and the cashu row goes when the coin does', async () => {

@@ -50,6 +50,7 @@ const A = `https://nonfungible.cash/claim/${hex('6f')}#${'A'.repeat(42)}w`
 const B = `https://nonfungible.cash/claim/${hex('0a')}#${'b_-'.repeat(14)}Q`
 const C = `Https://NonFungible.CASH/claim/${hex('c3')}#${'Z9'.repeat(21)}0`
 const D = `https://nonfungible.cash/claim/${hex('d4')}#${'k'.repeat(42)}E`
+const E = `https://nonfungible.cash/claim/${hex('e5')}#${'Agent_'.repeat(7)}c`
 const TOKEN = 'cashuBo2FteBtodHRwczovL21pbnQubWluaWJpdHMuY2FzaC9CaXRjb2lu'
 const lookalikes = [
   `https://nonfungible.cash/claim/${hex('6f')}#${'A'.repeat(43)}w`, // a 44 character key
@@ -122,9 +123,11 @@ const reads = [
 
 // Two bags ONOSENDAI sealed with the test agent's key, and the rows it would
 // write after each rewrite the test makes through the agent's tools: hide a
-// note, remove the plain note, move the NFT message (counts unchanged),
-// remove the NFT message; and, with money alone, hide a note, then remove the coin.
-const note = message('An agent note.', 6n)
+// note that carries a link, remove the plain note, move the NFT message inside
+// its bag (counts unchanged), then across the cube's edge (out of this bag);
+// and, with money alone, hide the note, then remove the coin.
+const NOTE = `An agent note: ${E}`
+const note = message(NOTE, 6n)
 const after = (inners: unknown[], contents: boolean, money: boolean) => ono.bagContentsTags(inners as never, { contents, money })
 const contentsOn = finalizeEvent(attributed(await ono.bagTemplate(all, region8.key, region8.lookupId, 8, T, ono.HIDDEN_KIND, settings(true, false))), agentSk)
 const moneyAlone = finalizeEvent(attributed(await ono.bagTemplate([...nftOnly, coin], region3.key, region3.lookupId, 3, T, ono.HIDDEN_KIND, settings(false, true))), agentSk)
@@ -133,14 +136,14 @@ for (const [bag, key, h, n] of [[contentsOn, region8.key, 8, all.length], [money
 }
 const withNote = [...all, note]
 const noPlain = withNote.filter((e) => e !== things.plain)
-const noNft = noPlain.filter((e) => e !== things.nft)
+const nftGone = noPlain.filter((e) => e !== things.nft)
 const expected = {
   contentsOn: {
     sealed: rowsOf(contentsOn),
     afterHide: after(withNote, true, false),
     afterRemovePlain: after(noPlain, true, false),
     afterMoveNft: after(noPlain, true, false),
-    afterRemoveNft: after(noNft, true, false),
+    afterMoveNftAcross: after(nftGone, true, false),
   },
   moneyAlone: {
     sealed: rowsOf(moneyAlone),
@@ -157,7 +160,7 @@ writeFileSync(OUT, JSON.stringify({
   recognizer,
   cases,
   reads,
-  ids: { plain: things.plain.id, nft: things.nft.id, coin: coin.id, note: 'An agent note.' },
+  ids: { plain: things.plain.id, nft: things.nft.id, coin: coin.id, note: NOTE },
   bags: { contentsOn, moneyAlone },
   expected,
 }, null, 2) + '\n')
