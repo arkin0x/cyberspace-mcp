@@ -16,7 +16,7 @@
 import { v2 as nip44 } from 'nostr-tools/nip44'
 import { generateSecretKey, getEventHash, getPublicKey } from 'nostr-tools/pure'
 import { bytesToHex, hexToBytes, isAuthentic, type NostrEvent } from '../nostr/event.js'
-import { MESSAGE_KIND, isReference, readItem, type BagEntry, type ChestItem, type ItemBody, type KeyItem } from './bags.js'
+import { isReference, readItem, sealedAsRumor, type BagEntry, type ChestItem, type ItemBody, type KeyItem } from './bags.js'
 
 /** A new key item: a fresh keypair under a name (B1 3.1). */
 export function forgeKey(name: string, about = ''): KeyItem {
@@ -107,7 +107,8 @@ export function readContents(entries: BagEntry[], sealer?: string): ChestEntry[]
       const plain = { pubkey: ev.pubkey, created_at: ev.created_at, kind: ev.kind, tags: ev.tags, content: ev.content }
       if (signed && !isAuthentic({ ...plain, id: ev.id, sig: ev.sig })) continue
       const hash = signed ? ev.id : getEventHash(plain)
-      const vouched = !signed && ev.kind === MESSAGE_KIND && sealer !== undefined && ev.pubkey === sealer && ev.id === hash
+      // A message or hidden audio written as a rumor by the chest's own signer (RUMOR_KINDS).
+      const vouched = !signed && sealedAsRumor(ev.kind) && sealer !== undefined && ev.pubkey === sealer && ev.id === hash
       const body = readItem({ ...plain, id: hash })
       if (!body) continue
       out.push({ id: hash, event: { ...plain, id: hash, sig: signed ? ev.sig : '' }, verified: signed || vouched, body })

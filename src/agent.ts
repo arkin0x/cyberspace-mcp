@@ -35,7 +35,7 @@ import { avatarThreads, mineAvatar } from './avatarMine.js'
 import { Chat, type ChatLine } from './chat.js'
 import {
   HIDDEN_KIND, MAX_ABOUT, MAX_ITEM_NAME, carriedTags, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, REFERENCE_THRESHOLD_BYTES, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
-  itemLineage, keyInnerTemplate, messageInnerTemplate, messagePreview, objectTemplate, referenceCount, referenceTo, rumorOf, shardInnerTemplate, unbag, wantsReference, entryKey,
+  audioLabel, itemLineage, keyInnerTemplate, messageInnerTemplate, messagePreview, objectTemplate, referenceCount, referenceTo, rumorOf, shardInnerTemplate, unbag, wantsReference, entryKey,
   type BagEntry, type Hidden, type HiddenType, type KeyItem, type Reference, type Rumor,
 } from './hidden/bags.js'
 import { MAX_COMMENT_LENGTH, itemKind, sealedComment, type CommentParent, type CommentSubject } from './hidden/comments.js'
@@ -1480,7 +1480,7 @@ export class Agent {
    * item it holds is opened now.
    */
   private summarize(h: Hidden, foundIn: string): EntrySummary {
-    const label = h.type === 'message' ? messagePreview(h.text ?? '', 80) : h.type === 'shard' ? (h.shard?.name ?? 'shard') : h.type === 'key' ? (h.key?.name ?? 'key') : (h.chest?.name ?? 'chest')
+    const label = h.type === 'message' ? messagePreview(h.text ?? '', 80) : h.type === 'shard' ? (h.shard?.name ?? 'shard') : h.type === 'key' ? (h.key?.name ?? 'key') : h.type === 'audio' ? (h.audio ? audioLabel(h.audio) : 'audio') : (h.chest?.name ?? 'chest')
     const summary: EntrySummary = {
       type: h.type, eventId: h.eventId, author: h.inner.pubkey, at: { x: h.at.x.toString(), y: h.at.y.toString(), z: h.at.z.toString() }, plane: h.plane, createdAt: h.createdAt, label,
       ...(h.type === 'message' && CASHU_TOKEN.test(h.text ?? '') ? { coin: true } : {}),
@@ -1512,7 +1512,7 @@ export class Agent {
             lock: h.chest.lockPubkey, requires: requiresLabel(h.chest), opened: true, openedWith: opener.by === 'key' ? 'held item' : 'own key',
             contents: contents.map((c) => ({
               type: c.body.type,
-              label: c.body.type === 'message' ? messagePreview(c.body.text ?? '', 80) : c.body.type === 'shard' ? (c.body.shard?.name ?? 'shard') : c.body.type === 'key' ? (c.body.key?.name ?? 'key') : (c.body.chest?.name ?? 'chest'),
+              label: c.body.type === 'message' ? messagePreview(c.body.text ?? '', 80) : c.body.type === 'shard' ? (c.body.shard?.name ?? 'shard') : c.body.type === 'key' ? (c.body.key?.name ?? 'key') : c.body.type === 'audio' ? (c.body.audio ? audioLabel(c.body.audio) : 'audio') : (c.body.chest?.name ?? 'chest'),
               author: c.event.pubkey, verified: c.verified,
             })),
           }

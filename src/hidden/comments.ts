@@ -20,7 +20,7 @@
 // Pure: signing and publishing happen in the agent.
 
 import { CLIENT_NAME, type EventTemplate, type NostrEvent } from '../nostr/event.js'
-import { CHEST_KIND, HIDDEN_KIND, KEY_KIND, MESSAGE_KIND, SHARD_KIND, type HiddenType } from './bags.js'
+import { AUDIO_KIND, CHEST_KIND, HIDDEN_KIND, KEY_KIND, MESSAGE_KIND, SHARD_KIND, type HiddenType } from './bags.js'
 import { decryptForRegion, encryptForRegion } from './crypto.js'
 
 export const COMMENT_KIND = 1111
@@ -51,7 +51,7 @@ export function bagAddress(subject: CommentSubject): string {
 
 /** The kind an item of this type is (ONOSENDAI itemKind). */
 export function itemKind(type: HiddenType): number {
-  return type === 'shard' ? SHARD_KIND : type === 'key' ? KEY_KIND : type === 'chest' ? CHEST_KIND : MESSAGE_KIND
+  return type === 'shard' ? SHARD_KIND : type === 'key' ? KEY_KIND : type === 'chest' ? CHEST_KIND : type === 'audio' ? AUDIO_KIND : MESSAGE_KIND
 }
 
 /**
