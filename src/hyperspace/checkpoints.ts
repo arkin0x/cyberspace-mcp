@@ -1,7 +1,8 @@
 // checkpoints.ts: mainnet block hashes this build knows on its own.
 //
 // Ported from ONOSENDAI src/lib/hyperspace/checkpoints.ts at commit 18eded9
-// (branch v2): verbatim.
+// (branch v2): verbatim. The 971,999 entry matches ONOSENDAI#467 and
+// hosaka-core#8, added the same day.
 
 /**
  * checkpoints.ts: block hashes this build KNOWS, independent of any server.
@@ -51,4 +52,9 @@ export const EMBEDDED_CHECKPOINTS: Checkpoint[] = [
   { height: 849999, blockHash: '000000000000000000026b072f9347d86942f6786dd1fc362acfd9522715b313' },
   { height: 899999, blockHash: '0000000000000000000196400396be46d0816dc462df4c3450972f589f4d7d24' },
   { height: 949999, blockHash: '00000000000000000000df842728edc58cf64288ca21433257700f3d5b45f286' },
+  // The headers-v1 head blob's checkpoint, pinned 2026-10-23 (the same entry as
+  // hosaka-core's): derived from headers verified from genesis, cross-checked
+  // against blockstream.info and blockchain.info. Head-blob checkpoints sit one
+  // every 1,000 blocks (h % 1000 == 999), as every older one does too.
+  { height: 971999, blockHash: '00000000000000000000d5c8611c63c98822c10b9ff61cec2d728429a2fd2d82' },
 ]
