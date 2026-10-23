@@ -1,7 +1,8 @@
 // checkpoints.ts: mainnet block hashes this build knows on its own.
 //
 // Ported from ONOSENDAI src/lib/hyperspace/checkpoints.ts at commit 18eded9
-// (branch v2): verbatim.
+// (branch v2): verbatim. The 971,999 entry matches ONOSENDAI#467 and
+// hosaka-core#8, added the same day.
 
 /**
  * checkpoints.ts: block hashes this build KNOWS, independent of any server.
