@@ -271,7 +271,7 @@ export interface AudioMeta {
   loop: boolean
   /** A one-shot's trigger: the first entry into its sphere only, or every entry. */
   retrigger: 'once' | 'auto'
-  /** Radius in gibsons of its full-volume sphere; absent: as large as fits in its region. */
+  /** Radius in gibsons of its full-volume sphere; absent: half the way to its region's nearest wall. */
   fade?: number
   /** Heard only in first person (ONOSENDAI's WALK mode). */
   walkOnly: boolean
@@ -287,15 +287,26 @@ function countOf(v: string | undefined): number | undefined {
   return Number.isSafeInteger(n) ? n : undefined
 }
 
+/** A host a found item may never point at (DECK-0007 §2.3, as ONOSENDAI privateHost): an IP literal, localhost, a dotless or local-only name. */
+function privateHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/\.$/, '')
+  if (h.startsWith('[') || h.includes(':')) return true
+  if (/^\d+(\.\d+){0,3}$/.test(h) || /^0x[0-9a-f]+$/.test(h)) return true
+  if (!h.includes('.') || h === 'localhost') return true
+  return /\.(local|localhost|internal|lan|home\.arpa)$/.test(h)
+}
+
 /**
  * Whether a file URL is one a reader may fetch (DECK-0007 §2.3, as
- * ONOSENDAI fetchableUrl reads it in use): https, and a last path segment
- * that is the file's hash, optionally with an extension.
+ * ONOSENDAI fetchableUrl reads it in use): https to a public host name, no
+ * user, query or fragment, and a last path segment that is the file's
+ * hash, optionally with an extension.
  */
 function fetchableUrl(url: string, hash: string): boolean {
   try {
     const u = new URL(url)
-    if (u.protocol !== 'https:') return false
+    if (u.protocol !== 'https:' || privateHost(u.hostname)) return false
+    if (u.search !== '' || u.hash !== '' || u.username !== '' || u.password !== '' || /[?#]/.test(url)) return false
     const last = (u.pathname.split('/').pop() ?? '').toLowerCase()
     return last === hash || (last.startsWith(`${hash}.`) && /^[a-z0-9]{1,8}$/.test(last.slice(hash.length + 1)))
   } catch {

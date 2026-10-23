@@ -45,6 +45,10 @@ const readings = [
   variant('not audio', swap('m', 'image/png')),
   variant('short nonce', swap('decryption-nonce', '01'.repeat(8))),
   variant('fade not a count', swap('fade', '09')),
+  variant('url on a private address', swap('url', `https://192.168.1.1/${hash}`)),
+  variant('url with a query', swap('url', `https://blossom.example/${hash}?cmd=reboot`)),
+  variant('url with a user', swap('url', `https://user:pw@blossom.example/${hash}`)),
+  variant('url on a local name', swap('url', `https://router.local/${hash}`)),
 ]
 const rumor = ono.rumorOf(template, hider)
 const lockSk = generateSecretKey()

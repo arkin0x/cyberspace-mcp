@@ -44,7 +44,7 @@ describe('hidden audio, against ONOSENDAI #463', () => {
 
   it('reads every item ONOSENDAI reads, refuses every one it refuses, and keeps neither the URL nor the key', () => {
     // What the fixture pins, so a regenerated one that lost a case fails here.
-    expect(fx.readings.filter((r) => r.onosendai === null).map((r) => r.name)).toEqual(['url not by its hash', 'http url', 'not encrypted', 'not audio', 'short nonce'])
+    expect(fx.readings.filter((r) => r.onosendai === null).map((r) => r.name)).toEqual(['url not by its hash', 'http url', 'not encrypted', 'not audio', 'short nonce', 'url on a private address', 'url with a query', 'url with a user', 'url on a local name'])
     for (const r of fx.readings) {
       const mine = audioItemOf({ kind: AUDIO_KIND, content: fx.template.content, tags: r.tags })
       expect(meta(mine), r.name).toEqual(meta(r.onosendai))
