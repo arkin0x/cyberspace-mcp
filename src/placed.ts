@@ -34,7 +34,7 @@
 
 import { coordToXyz, hexToCoord, type Plane } from 'cyberspace-core'
 import {
-  HIDDEN_KIND, MESSAGE_KIND, OBJECT_KIND, PROTECTED_TAG, bagSettingsOf, bagTemplate, ciphertextOf, editedTemplate, entryKey, isReference, itemLineage, messagePreview, resealedObject, rumorOf, unbag,
+  HIDDEN_KIND, OBJECT_KIND, PROTECTED_TAG, bagSettingsOf, bagTemplate, ciphertextOf, editedTemplate, entryKey, isReference, itemLineage, messagePreview, resealedObject, rumorOf, sealedAsRumor, unbag,
   type BagEntry, type BagSettings, type Hidden, type HiddenType, type Reference, type Rumor,
 } from './hidden/bags.js'
 import { decryptForRegion } from './hidden/crypto.js'
@@ -54,7 +54,7 @@ const LAST_WORDS = new Set(['last', 'latest', 'newest', 'recent', 'most recent',
 /** The most of the agent's bags one listing asks a relay for: what strfry gives at most by default; a full answer is read as possibly cut short. */
 const MAX_OWN_BAGS = 500
 /** The kinds a target's type names, for "the shard", "the message". */
-const TYPE_WORDS: Record<string, HiddenType> = { shard: 'shard', object: 'shard', message: 'message', note: 'message', key: 'key', item: 'key', chest: 'chest' }
+const TYPE_WORDS: Record<string, HiddenType> = { shard: 'shard', object: 'shard', message: 'message', note: 'message', key: 'key', item: 'key', chest: 'chest', audio: 'audio', sound: 'audio' }
 /** How long a put-back waits between its tries, in ms. */
 const PUT_BACK_RETRY_MS = [500, 1500]
 
@@ -181,7 +181,7 @@ function entryPoint(e: BagEntry): { position: Position; plane: Plane } | null {
 }
 
 function labelOf(h: Hidden): string {
-  return h.type === 'message' ? messagePreview(h.text ?? '', 60) : h.type === 'shard' ? (h.shard?.name ?? 'shard') : h.type === 'key' ? (h.key?.name ?? 'key') : (h.chest?.name ?? 'chest')
+  return h.type === 'message' ? messagePreview(h.text ?? '', 60) : h.type === 'shard' ? (h.shard?.name ?? 'shard') : h.type === 'key' ? (h.key?.name ?? 'key') : h.type === 'audio' ? (h.audio?.title ?? 'audio') : (h.chest?.name ?? 'chest')
 }
 
 function words(p: { x: string; y: string; z: string }): string {
@@ -727,10 +727,12 @@ export class Placements {
       if (!isReference(was)) {
         const inner = was as Rumor
         // The moved version carries `-` (a version from before 2026-10-20
-        // gains it once), and a message goes out as a rumor, never signed,
-        // as when it was hidden (ONOSENDAI #409).
+        // gains it once), and a message or hidden audio goes out as a rumor,
+        // never signed, as when it was hidden (ONOSENDAI #409, DECK-0007 §3):
+        // a signed hidden audio item would be a playable file post under
+        // this key.
         const next = editedTemplate({ kind: inner.kind, created_at: now, content: inner.content, tags: [['C', dest.hex], [...PROTECTED_TAG]] }, inner)
-        moved = inner.kind === MESSAGE_KIND ? rumorOf(attributed(next), this.host.pubkey) : this.host.sign(next)
+        moved = sealedAsRumor(inner.kind) ? rumorOf(attributed(next), this.host.pubkey) : this.host.sign(next)
       } else {
         const ref = was as Reference
         if (sealedOwn && !sameBag) {

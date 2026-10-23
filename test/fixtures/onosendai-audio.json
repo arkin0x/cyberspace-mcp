@@ -1,0 +1,1143 @@
+{
+  "hider": "0577219d1994ce557b15ffbbea23bcea77e7233757190936086b0eea7e5dec45",
+  "height": 6,
+  "regionKeyHex": "216bf1c374d2d8ccc55650ee52f7da2cc3d32a98c4a56321724ce187a643b1f8",
+  "lockSecretHex": "9d00fdd9cdae4b76b10419c84b2861e07c88834d5a41cc8b0dd0d6789e451f94",
+  "template": {
+    "kind": 1063,
+    "created_at": 1792600000,
+    "content": "Listen by the altar.",
+    "tags": [
+      [
+        "C",
+        "0000000000000000028400000000000000000000000000000000000201308956"
+      ],
+      [
+        "title",
+        "Temple bell"
+      ],
+      [
+        "url",
+        "https://blossom.example/abababababababababababababababababababababababababababababababab"
+      ],
+      [
+        "m",
+        "audio/mpeg"
+      ],
+      [
+        "x",
+        "abababababababababababababababababababababababababababababababab"
+      ],
+      [
+        "ox",
+        "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+      ],
+      [
+        "size",
+        "4096"
+      ],
+      [
+        "encryption-algorithm",
+        "aes-gcm"
+      ],
+      [
+        "decryption-key",
+        "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+      ],
+      [
+        "decryption-nonce",
+        "010101010101010101010101"
+      ],
+      [
+        "autoplay"
+      ],
+      [
+        "retrigger",
+        "auto"
+      ],
+      [
+        "fade",
+        "9"
+      ],
+      [
+        "walk"
+      ],
+      [
+        "-"
+      ]
+    ]
+  },
+  "rumor": {
+    "kind": 1063,
+    "created_at": 1792600000,
+    "tags": [
+      [
+        "C",
+        "0000000000000000028400000000000000000000000000000000000201308956"
+      ],
+      [
+        "title",
+        "Temple bell"
+      ],
+      [
+        "url",
+        "https://blossom.example/abababababababababababababababababababababababababababababababab"
+      ],
+      [
+        "m",
+        "audio/mpeg"
+      ],
+      [
+        "x",
+        "abababababababababababababababababababababababababababababababab"
+      ],
+      [
+        "ox",
+        "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+      ],
+      [
+        "size",
+        "4096"
+      ],
+      [
+        "encryption-algorithm",
+        "aes-gcm"
+      ],
+      [
+        "decryption-key",
+        "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+      ],
+      [
+        "decryption-nonce",
+        "010101010101010101010101"
+      ],
+      [
+        "autoplay"
+      ],
+      [
+        "retrigger",
+        "auto"
+      ],
+      [
+        "fade",
+        "9"
+      ],
+      [
+        "walk"
+      ],
+      [
+        "-"
+      ]
+    ],
+    "content": "Listen by the altar.",
+    "pubkey": "0577219d1994ce557b15ffbbea23bcea77e7233757190936086b0eea7e5dec45",
+    "id": "f2d9ec1809b1de0613c545ac7890aece767b2d8e492a9fe7c36f45f169ee1231"
+  },
+  "readings": [
+    {
+      "name": "as written",
+      "tags": [
+        [
+          "C",
+          "0000000000000000028400000000000000000000000000000000000201308956"
+        ],
+        [
+          "title",
+          "Temple bell"
+        ],
+        [
+          "url",
+          "https://blossom.example/abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "m",
+          "audio/mpeg"
+        ],
+        [
+          "x",
+          "abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "ox",
+          "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        ],
+        [
+          "size",
+          "4096"
+        ],
+        [
+          "encryption-algorithm",
+          "aes-gcm"
+        ],
+        [
+          "decryption-key",
+          "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+        ],
+        [
+          "decryption-nonce",
+          "010101010101010101010101"
+        ],
+        [
+          "autoplay"
+        ],
+        [
+          "retrigger",
+          "auto"
+        ],
+        [
+          "fade",
+          "9"
+        ],
+        [
+          "walk"
+        ],
+        [
+          "-"
+        ]
+      ],
+      "onosendai": {
+        "title": "Temple bell",
+        "about": "Listen by the altar.",
+        "mime": "audio/mpeg",
+        "size": 4096,
+        "autoplay": true,
+        "loop": false,
+        "retrigger": "auto",
+        "fade": 9,
+        "walkOnly": true
+      }
+    },
+    {
+      "name": "a loop",
+      "tags": [
+        [
+          "C",
+          "0000000000000000028400000000000000000000000000000000000201308956"
+        ],
+        [
+          "title",
+          "Temple bell"
+        ],
+        [
+          "url",
+          "https://blossom.example/abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "m",
+          "audio/mpeg"
+        ],
+        [
+          "x",
+          "abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "ox",
+          "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        ],
+        [
+          "size",
+          "4096"
+        ],
+        [
+          "encryption-algorithm",
+          "aes-gcm"
+        ],
+        [
+          "decryption-key",
+          "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+        ],
+        [
+          "decryption-nonce",
+          "010101010101010101010101"
+        ],
+        [
+          "autoplay"
+        ],
+        [
+          "fade",
+          "9"
+        ],
+        [
+          "walk"
+        ],
+        [
+          "-"
+        ],
+        [
+          "loop"
+        ]
+      ],
+      "onosendai": {
+        "title": "Temple bell",
+        "about": "Listen by the altar.",
+        "mime": "audio/mpeg",
+        "size": 4096,
+        "autoplay": true,
+        "loop": true,
+        "retrigger": "once",
+        "fade": 9,
+        "walkOnly": true
+      }
+    },
+    {
+      "name": "no fade, no walk, no autoplay",
+      "tags": [
+        [
+          "C",
+          "0000000000000000028400000000000000000000000000000000000201308956"
+        ],
+        [
+          "title",
+          "Temple bell"
+        ],
+        [
+          "url",
+          "https://blossom.example/abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "m",
+          "audio/mpeg"
+        ],
+        [
+          "x",
+          "abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "ox",
+          "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        ],
+        [
+          "size",
+          "4096"
+        ],
+        [
+          "encryption-algorithm",
+          "aes-gcm"
+        ],
+        [
+          "decryption-key",
+          "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+        ],
+        [
+          "decryption-nonce",
+          "010101010101010101010101"
+        ],
+        [
+          "retrigger",
+          "auto"
+        ],
+        [
+          "-"
+        ]
+      ],
+      "onosendai": {
+        "title": "Temple bell",
+        "about": "Listen by the altar.",
+        "mime": "audio/mpeg",
+        "size": 4096,
+        "autoplay": false,
+        "loop": false,
+        "retrigger": "auto",
+        "walkOnly": false
+      }
+    },
+    {
+      "name": "url with an extension",
+      "tags": [
+        [
+          "C",
+          "0000000000000000028400000000000000000000000000000000000201308956"
+        ],
+        [
+          "title",
+          "Temple bell"
+        ],
+        [
+          "url",
+          "https://cdn.example/media/abababababababababababababababababababababababababababababababab.mp3"
+        ],
+        [
+          "m",
+          "audio/mpeg"
+        ],
+        [
+          "x",
+          "abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "ox",
+          "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        ],
+        [
+          "size",
+          "4096"
+        ],
+        [
+          "encryption-algorithm",
+          "aes-gcm"
+        ],
+        [
+          "decryption-key",
+          "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+        ],
+        [
+          "decryption-nonce",
+          "010101010101010101010101"
+        ],
+        [
+          "autoplay"
+        ],
+        [
+          "retrigger",
+          "auto"
+        ],
+        [
+          "fade",
+          "9"
+        ],
+        [
+          "walk"
+        ],
+        [
+          "-"
+        ]
+      ],
+      "onosendai": {
+        "title": "Temple bell",
+        "about": "Listen by the altar.",
+        "mime": "audio/mpeg",
+        "size": 4096,
+        "autoplay": true,
+        "loop": false,
+        "retrigger": "auto",
+        "fade": 9,
+        "walkOnly": true
+      }
+    },
+    {
+      "name": "url not by its hash",
+      "tags": [
+        [
+          "C",
+          "0000000000000000028400000000000000000000000000000000000201308956"
+        ],
+        [
+          "title",
+          "Temple bell"
+        ],
+        [
+          "url",
+          "https://blossom.example/upload"
+        ],
+        [
+          "m",
+          "audio/mpeg"
+        ],
+        [
+          "x",
+          "abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "ox",
+          "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        ],
+        [
+          "size",
+          "4096"
+        ],
+        [
+          "encryption-algorithm",
+          "aes-gcm"
+        ],
+        [
+          "decryption-key",
+          "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+        ],
+        [
+          "decryption-nonce",
+          "010101010101010101010101"
+        ],
+        [
+          "autoplay"
+        ],
+        [
+          "retrigger",
+          "auto"
+        ],
+        [
+          "fade",
+          "9"
+        ],
+        [
+          "walk"
+        ],
+        [
+          "-"
+        ]
+      ],
+      "onosendai": null
+    },
+    {
+      "name": "http url",
+      "tags": [
+        [
+          "C",
+          "0000000000000000028400000000000000000000000000000000000201308956"
+        ],
+        [
+          "title",
+          "Temple bell"
+        ],
+        [
+          "url",
+          "http://blossom.example/abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "m",
+          "audio/mpeg"
+        ],
+        [
+          "x",
+          "abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "ox",
+          "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        ],
+        [
+          "size",
+          "4096"
+        ],
+        [
+          "encryption-algorithm",
+          "aes-gcm"
+        ],
+        [
+          "decryption-key",
+          "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+        ],
+        [
+          "decryption-nonce",
+          "010101010101010101010101"
+        ],
+        [
+          "autoplay"
+        ],
+        [
+          "retrigger",
+          "auto"
+        ],
+        [
+          "fade",
+          "9"
+        ],
+        [
+          "walk"
+        ],
+        [
+          "-"
+        ]
+      ],
+      "onosendai": null
+    },
+    {
+      "name": "not encrypted",
+      "tags": [
+        [
+          "C",
+          "0000000000000000028400000000000000000000000000000000000201308956"
+        ],
+        [
+          "title",
+          "Temple bell"
+        ],
+        [
+          "url",
+          "https://blossom.example/abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "m",
+          "audio/mpeg"
+        ],
+        [
+          "x",
+          "abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "ox",
+          "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        ],
+        [
+          "size",
+          "4096"
+        ],
+        [
+          "decryption-key",
+          "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+        ],
+        [
+          "decryption-nonce",
+          "010101010101010101010101"
+        ],
+        [
+          "autoplay"
+        ],
+        [
+          "retrigger",
+          "auto"
+        ],
+        [
+          "fade",
+          "9"
+        ],
+        [
+          "walk"
+        ],
+        [
+          "-"
+        ]
+      ],
+      "onosendai": null
+    },
+    {
+      "name": "not audio",
+      "tags": [
+        [
+          "C",
+          "0000000000000000028400000000000000000000000000000000000201308956"
+        ],
+        [
+          "title",
+          "Temple bell"
+        ],
+        [
+          "url",
+          "https://blossom.example/abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "m",
+          "image/png"
+        ],
+        [
+          "x",
+          "abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "ox",
+          "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        ],
+        [
+          "size",
+          "4096"
+        ],
+        [
+          "encryption-algorithm",
+          "aes-gcm"
+        ],
+        [
+          "decryption-key",
+          "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+        ],
+        [
+          "decryption-nonce",
+          "010101010101010101010101"
+        ],
+        [
+          "autoplay"
+        ],
+        [
+          "retrigger",
+          "auto"
+        ],
+        [
+          "fade",
+          "9"
+        ],
+        [
+          "walk"
+        ],
+        [
+          "-"
+        ]
+      ],
+      "onosendai": null
+    },
+    {
+      "name": "short nonce",
+      "tags": [
+        [
+          "C",
+          "0000000000000000028400000000000000000000000000000000000201308956"
+        ],
+        [
+          "title",
+          "Temple bell"
+        ],
+        [
+          "url",
+          "https://blossom.example/abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "m",
+          "audio/mpeg"
+        ],
+        [
+          "x",
+          "abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "ox",
+          "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        ],
+        [
+          "size",
+          "4096"
+        ],
+        [
+          "encryption-algorithm",
+          "aes-gcm"
+        ],
+        [
+          "decryption-key",
+          "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+        ],
+        [
+          "decryption-nonce",
+          "0101010101010101"
+        ],
+        [
+          "autoplay"
+        ],
+        [
+          "retrigger",
+          "auto"
+        ],
+        [
+          "fade",
+          "9"
+        ],
+        [
+          "walk"
+        ],
+        [
+          "-"
+        ]
+      ],
+      "onosendai": null
+    },
+    {
+      "name": "fade not a count",
+      "tags": [
+        [
+          "C",
+          "0000000000000000028400000000000000000000000000000000000201308956"
+        ],
+        [
+          "title",
+          "Temple bell"
+        ],
+        [
+          "url",
+          "https://blossom.example/abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "m",
+          "audio/mpeg"
+        ],
+        [
+          "x",
+          "abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "ox",
+          "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        ],
+        [
+          "size",
+          "4096"
+        ],
+        [
+          "encryption-algorithm",
+          "aes-gcm"
+        ],
+        [
+          "decryption-key",
+          "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+        ],
+        [
+          "decryption-nonce",
+          "010101010101010101010101"
+        ],
+        [
+          "autoplay"
+        ],
+        [
+          "retrigger",
+          "auto"
+        ],
+        [
+          "fade",
+          "09"
+        ],
+        [
+          "walk"
+        ],
+        [
+          "-"
+        ]
+      ],
+      "onosendai": {
+        "title": "Temple bell",
+        "about": "Listen by the altar.",
+        "mime": "audio/mpeg",
+        "size": 4096,
+        "autoplay": true,
+        "loop": false,
+        "retrigger": "auto",
+        "walkOnly": true
+      }
+    },
+    {
+      "name": "url on a private address",
+      "tags": [
+        [
+          "C",
+          "0000000000000000028400000000000000000000000000000000000201308956"
+        ],
+        [
+          "title",
+          "Temple bell"
+        ],
+        [
+          "url",
+          "https://192.168.1.1/abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "m",
+          "audio/mpeg"
+        ],
+        [
+          "x",
+          "abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "ox",
+          "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        ],
+        [
+          "size",
+          "4096"
+        ],
+        [
+          "encryption-algorithm",
+          "aes-gcm"
+        ],
+        [
+          "decryption-key",
+          "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+        ],
+        [
+          "decryption-nonce",
+          "010101010101010101010101"
+        ],
+        [
+          "autoplay"
+        ],
+        [
+          "retrigger",
+          "auto"
+        ],
+        [
+          "fade",
+          "9"
+        ],
+        [
+          "walk"
+        ],
+        [
+          "-"
+        ]
+      ],
+      "onosendai": null
+    },
+    {
+      "name": "url with a query",
+      "tags": [
+        [
+          "C",
+          "0000000000000000028400000000000000000000000000000000000201308956"
+        ],
+        [
+          "title",
+          "Temple bell"
+        ],
+        [
+          "url",
+          "https://blossom.example/abababababababababababababababababababababababababababababababab?cmd=reboot"
+        ],
+        [
+          "m",
+          "audio/mpeg"
+        ],
+        [
+          "x",
+          "abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "ox",
+          "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        ],
+        [
+          "size",
+          "4096"
+        ],
+        [
+          "encryption-algorithm",
+          "aes-gcm"
+        ],
+        [
+          "decryption-key",
+          "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+        ],
+        [
+          "decryption-nonce",
+          "010101010101010101010101"
+        ],
+        [
+          "autoplay"
+        ],
+        [
+          "retrigger",
+          "auto"
+        ],
+        [
+          "fade",
+          "9"
+        ],
+        [
+          "walk"
+        ],
+        [
+          "-"
+        ]
+      ],
+      "onosendai": null
+    },
+    {
+      "name": "url with a user",
+      "tags": [
+        [
+          "C",
+          "0000000000000000028400000000000000000000000000000000000201308956"
+        ],
+        [
+          "title",
+          "Temple bell"
+        ],
+        [
+          "url",
+          "https://user:pw@blossom.example/abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "m",
+          "audio/mpeg"
+        ],
+        [
+          "x",
+          "abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "ox",
+          "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        ],
+        [
+          "size",
+          "4096"
+        ],
+        [
+          "encryption-algorithm",
+          "aes-gcm"
+        ],
+        [
+          "decryption-key",
+          "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+        ],
+        [
+          "decryption-nonce",
+          "010101010101010101010101"
+        ],
+        [
+          "autoplay"
+        ],
+        [
+          "retrigger",
+          "auto"
+        ],
+        [
+          "fade",
+          "9"
+        ],
+        [
+          "walk"
+        ],
+        [
+          "-"
+        ]
+      ],
+      "onosendai": null
+    },
+    {
+      "name": "url on a local name",
+      "tags": [
+        [
+          "C",
+          "0000000000000000028400000000000000000000000000000000000201308956"
+        ],
+        [
+          "title",
+          "Temple bell"
+        ],
+        [
+          "url",
+          "https://router.local/abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "m",
+          "audio/mpeg"
+        ],
+        [
+          "x",
+          "abababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "ox",
+          "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        ],
+        [
+          "size",
+          "4096"
+        ],
+        [
+          "encryption-algorithm",
+          "aes-gcm"
+        ],
+        [
+          "decryption-key",
+          "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+        ],
+        [
+          "decryption-nonce",
+          "010101010101010101010101"
+        ],
+        [
+          "autoplay"
+        ],
+        [
+          "retrigger",
+          "auto"
+        ],
+        [
+          "fade",
+          "9"
+        ],
+        [
+          "walk"
+        ],
+        [
+          "-"
+        ]
+      ],
+      "onosendai": null
+    }
+  ],
+  "bag": {
+    "kind": 33330,
+    "created_at": 1792600001,
+    "content": "",
+    "tags": [
+      [
+        "d",
+        "8e5e1c7d5d55d4f4506c1a5a442e8416201f60b89e3faece563c3e87c450a11a"
+      ],
+      [
+        "encrypted",
+        "aes-256-gcm",
+        "Taa6z8obFh3/qlg7ScnTcAaB2CNWkH6dxu7I+dlL84754e5DAlcG5vrBbysjSyUoKhsaMfY014EXwlkZggybIiZHkT3Nq0cTkx2AKz5ZuBo2AOfn/1e6HiuBdMRK1GAATk233q+ENKglUy4iRAMCPCfLO9bGr+kKfNu32MeefXmGV9YCHzwa81CWY9O5VPNM6Haeh1yJPv3sPyQO6j7dnFYygM/RrAZtOXL+aHrLQwKjzF8DPj3ltV7Kvf64a9WohPgaPcuJ5bUIBMGayS8+po39RNNhT5qKQCLSQi8HnxTFp+2jnoOcYZJB0Ww3/6x+4dPTt6lEhiBrn//e+xkdEj8Jh0J4eQIAtDdBQJ+k2/Rt/cbgJzk0y0Smj65F3TfKzrcdKAr9ISZEOMe8QFbF/i6atJYlMwYyt+iUBUn7zp6igxBvoQopknzLTXwOqPfyl0d+MwmhTMqy1hJ1tX28qN2p7h1Snm14opu7Z+LmEhvGyS7b7CYSc5OeuB+nhmJIjatoEFxs9ObGBfhQePlWtS29I39KiKO53PbEWcC96NXISaHFn/kz3GbBKx2oMsZfi1OGGEwM4lQPklkkzlOabI1TasFI3iBPfk9ghCuT5Wq5zVu5HM06FADL09VM7sn3W4GW6PPZYzu6SREFsGcpUgBGr/LsP7JbeGnwcN2AzJ1c5xhWFl8zGHBbemeJn3Vfp4DqrbQjCWB1fbd5WxfRHWCOntFp2zcyu2oyxMGqDJPhwpeMozEE8rRI7t6bkI0BH7/yO3u2pWjd4eIoyuwNnctLvunJ+TlCsVPQ3+BJ3fjCuHYmtHD42a+Mm8HQmJS5RV5bLcFqncnlPhEqDLH0+xXnW9E8xvrsB2S3cc5lVjjoEfc0rAvHqUXHRA1d7fAoMkHqKu4sy7rncOucqK6OtUh7yHrxfSTJdXmOD39UqfWdU5YuOXZkpbT9/IS3YP4f2tMNGYvwiRoI1JjM0q9Mk5fBP7MNnntgAINIsYj6yOg3zn9xHTebGKXecWXQk4WCmFcvbULrnrAaGkZnnIs0ToxtknEr1bCmonynBf/SbCRV5tbHqUYkVnmhzkTrYXkGqIFUEvJI4O+0MygNXu7pAToTFF5UGQHFXvDsQkdT9w4ehVDejJ0a5uRXBntLiPMT3NDomWh0OApEhMJxU2Og7wdAQGsmD643EJKo8fgwdPoQUEFviq4YYfQ1jEtcNO88JTDyvVdOwLa2bjquw7Nrv7SCyC/hE3fQVVzWzYJYNRZVcuKylX+G7tTkgziixpgfubaM6luXuzStPAsLHR9TwR1Ije6RYPgaoPUSEUqxh1bJl/wofp9uLgPvWFh9DaUqtY/TOwE4ygagGrK+Jq1tYtb9xTnGCXHB+z8HnGA65g6usa70GYd48jaTv7X3fa2SUr8YOe93W4RRjwHnQyv9j1UtqcbaT5B7RMLHx+Pr4nW4aZCyBgWeN/J/vSyXHate8ZxjOqyt/8Tdp+MO5PQCpmUTMt/hCNd3rOgeveB7S3KHxTuUjLagYpisGhJQW551VGuxEmqzI0T16NC8ahFhLOhZ8u4TZGtgCik7T+m1DvfFoc4d+PsgT8Om4sCT5LHi7/H6X36a6mG8ksiRBvVdJm2hw9KE84w9lCuggLcNDDkFEU/xeZuqOHSb7SGpg+QYQqwp59djU3GW2cLycxe4lBF5L4rkhBccX+JZlnM234188rjVvsWO+LNgidoea3qKEoSiMmoMkCfP7AU9D2aDr7J0R88UYiT+xpsRk2eIV3R7BS/ThcYk3mndUYadexYbSWdW27dGDgnebNZhLzNi809CeVhBV++946BEVL1crjBiqjCxzKBNCspy0F0pxlrV5U6R+wmkx2dP42Y1X94yXLrg+d6qamPPUX/gt3YeZR9s/bjHFWoSe2CyKDQ0wIeZD2r8+qIbz/jr40tMdOcEKkJQ4kGPfGIXESRLwnMDSv6wsbR8Sp5vHKIyx5GhIHh7QpR5IccdOuBCRtk1P/yyUTfQpBKII9rkJFb9/9CVvde32N7IdlgKv0hWfF+9AWO4z60ZJazveHxu3i1w0pS6gzbU8UOsQ3//1Gwe0lTaEH0UbTCc0a9pcUvg2p4rMrfbtrNUtfSnbgdB5kIqfH6tfqNrvQl7W7ivRUsKTus8axy0iT89ppCCIkoS8FCD5eIHVYNxZBiJDMuCOvh6Rul5gmJDzfXBbjvVz+DH2JwuqRb0zpgyWhcfS87CJgaU9knXCU8cFbp13iSHkZX7QO0BFQA/xAo5p0dTs08j850J6ZezngG8bD1jTEa4hm6VdvIijBsx7MjCtTNmnYByJCGjQS+at2sExgz8gsq7zoKGzVUlM/gRztcHo4SzX52bXMH3peK6KvZvBSqCuyxh9ai7tbmM11fk3BTNIu7LsGjMm8apx6Nq87kpyI0OTSiR9Q5gqZ4+H+35OodwcV48o7cmJJI8bvn32ZHt5zNqPXhu9FfstwPh3PrtjgzO3NEogmg8Xpn/7Uo3v/BpExX4uPXlBnuT/YWhFak6WNMnQdfNs9tjM18eH33czgTVOwRXnQbm44vVXE+fMiPXO5s3KgRDxLlgZ7FUVI3JKxSrjmHLbBsLAQ7/gYlJ6G9Bu+f03pH6er4aCFNCc+9SSOeYxUJ/37CqwwV/CrTP3M3esTxaiOzjM0US4coreCU+MNL8H46caujdd1/3Ouk+S/xP7D3LJBENOq9KnIy+I5dOcz/GUwVQ0xWMWEpZcQtcsNTuk0rbrktTTztJsMUHtRQSejFVbbReBF3SaOnPDoM1WU1mDtfNIzmDXGxyXIG8L3ZnvRWyXiIWlzTSA5MKfN7+GVfHxu5jzw+RD200jRVXmEPJyZZ1bYifq9FI15tbBODVPswVHT35moOYnAcajmOQUyKFm3o8HtRUNO1uouBdI83WTNrDeNADD/luZqGqrLd+nlAbhNO6+LM/Q5dW2T9XZS/ZDmIIC8j1QmPGQcfFB+kASJ6mFw8eMg9Lx2pJZghFFmgDteGm335DDcpt6K9O/cLju5ILHhFAi8Gv0nyl5lqMkoDWVzab4eOLG4TcxOfGny0n1x693MqDRpIWV6jniG1N/y5vO9O+qpgPouGR03ElpMoN2rsRrjhlk5wb8GfNVUWstX3sgpb4b1N0H5/O0LZZVI5SFJtPqNKPATbOgDGMV0fxkoF+Zn/IMxnKiL5tZu1Fv2p/yUQbvERiseb57Wo41hA86a3EbquES8q6Ae7AZ++hZSieWpRomJumR26C9o41Pee6NykEPrhziNe8kGuU65UHhi36l6tjKxrdDmQuGH9YzKdUe+2eBMxsBCUC5lEqF6ET/4DdSAjDFfNAu23aaN8mhb5WecNhMgQbg0EffR8i6BUrfpLbKMAVnbUHjLBwWfrikvi5Y29SR2UAH+Y26cbl8bkaSP0KsUK+YI1vzGfBoSpzUUEQ2KwDNEOW8jnyYhO/b3357QA15AVMa4PcfQAmTv3Sxx5n8ljikiSM8kKf8qC2rNJaJ1fimziz4lbCmLzV/2LGlhHW1gXGLk6uu3/0ANWQr9+RJK397opdfHeMB2XXCUrJb2c2SircG3dO0jTQTgQDU9lsANkASrh5qPW4XB2GpkloXOtVCuXA+fvDwxlRMye43zZzJh2aUaaStZEJhW8LsN2XW7g1LjvJFYLf8Y0+FQ=="
+      ],
+      [
+        "version",
+        "2"
+      ],
+      [
+        "H",
+        "6"
+      ],
+      [
+        "contents",
+        "chest",
+        "1"
+      ],
+      [
+        "contents",
+        "audio",
+        "1"
+      ]
+    ],
+    "pubkey": "0577219d1994ce557b15ffbbea23bcea77e7233757190936086b0eea7e5dec45",
+    "id": "2fa08653987c7388208ff96c3263f928429da067ffdfabdc048ac970526e273c",
+    "sig": "c4d50325d411f03b438d88bbe4b98a2b360e377ab25a44534a96963da608479af599aee7a8dc8e316ad73d75b3e80ce77cb74ef8a512d73e53987655305d14c7"
+  },
+  "contentsRows": [
+    [
+      "contents",
+      "chest",
+      "1"
+    ],
+    [
+      "contents",
+      "audio",
+      "1"
+    ]
+  ],
+  "onosendaiRead": [
+    {
+      "type": "audio",
+      "id": "f2d9ec1809b1de0613c545ac7890aece767b2d8e492a9fe7c36f45f169ee1231",
+      "author": "0577219d1994ce557b15ffbbea23bcea77e7233757190936086b0eea7e5dec45",
+      "audio": {
+        "title": "Temple bell",
+        "about": "Listen by the altar.",
+        "mime": "audio/mpeg",
+        "size": 4096,
+        "autoplay": true,
+        "loop": false,
+        "retrigger": "auto",
+        "fade": 9,
+        "walkOnly": true
+      }
+    },
+    {
+      "type": "chest",
+      "id": "3926563718287d2750cc13cc9cd262306986ef4ce8dd1d54f48bfe5a35da67c7",
+      "author": "0577219d1994ce557b15ffbbea23bcea77e7233757190936086b0eea7e5dec45",
+      "audio": null
+    }
+  ],
+  "onosendaiChest": [
+    {
+      "type": "audio",
+      "verified": true,
+      "audio": {
+        "title": "Dripping water",
+        "about": "Listen by the altar.",
+        "mime": "audio/mpeg",
+        "size": 4096,
+        "autoplay": true,
+        "loop": true,
+        "retrigger": "once",
+        "fade": 9,
+        "walkOnly": true
+      }
+    }
+  ]
+}

@@ -55,6 +55,12 @@ export const MESSAGE_KIND = 1
 export const KEY_KIND = 3340
 /** A chest, inside the envelope (B1 2.2): a list of entries sealed to a public key. */
 export const CHEST_KIND = 3341
+/**
+ * Hidden audio, inside the envelope (DECK-0007, ONOSENDAI #463): a NIP-94
+ * file event naming an encrypted file on Blossom, with its key. This server
+ * reads what it is and how it is heard, and never fetches or plays it.
+ */
+export const AUDIO_KIND = 1063
 /** Longest name a key or a chest carries: a label for a row, not a letter. The requires label is capped the same. */
 export const MAX_ITEM_NAME = 64
 /** Longest about a key carries: a sentence. */
@@ -153,7 +159,7 @@ export function referenceTo(object: NostrEvent, at: Position, plane: Plane, rela
   return ['a', `${object.kind}:${object.pubkey}:${d}`, relayHint, positionHex(at, plane)]
 }
 
-export type HiddenType = 'shard' | 'message' | 'key' | 'chest'
+export type HiddenType = 'shard' | 'message' | 'key' | 'chest' | 'audio'
 
 /** What a key item carries (B1 2.1). */
 export interface KeyItem {
@@ -249,6 +255,100 @@ export function chestItemOf(ev: Pick<NostrEvent, 'kind' | 'content' | 'tags'>): 
   return { name: nameOf(ev.tags, 'chest'), lockPubkey: lock[1], senderPubkey: lock[2], requires: capped(ev.tags, 'requires', MAX_ITEM_NAME), payload: ev.content }
 }
 
+/**
+ * What hidden audio is, as this server reads it (DECK-0007 §2): its name,
+ * caption, type and size, and how it is heard where it is hidden. Never its
+ * URL or its key: an agent cannot hear it, and the key is the file, so it is
+ * not something an agent should ever hold or repeat.
+ */
+export interface AudioMeta {
+  title: string
+  about: string
+  mime: string
+  /** Bytes of the encrypted file, or 0 when the item does not say. */
+  size: number
+  autoplay: boolean
+  loop: boolean
+  /** A one-shot's trigger: the first entry into its sphere only, or every entry. */
+  retrigger: 'once' | 'auto'
+  /** Radius in gibsons of its full-volume sphere; absent: half the way to its region's nearest wall. */
+  fade?: number
+  /** Heard only in first person (ONOSENDAI's WALK mode). */
+  walkOnly: boolean
+}
+
+const HEX_24 = /^[0-9a-f]{24}$/
+const DECIMAL = /^(0|[1-9][0-9]*)$/
+
+/** A decimal count, or undefined when absent, malformed or past what a number holds exactly. */
+function countOf(v: string | undefined): number | undefined {
+  if (v === undefined || !DECIMAL.test(v)) return undefined
+  const n = Number(v)
+  return Number.isSafeInteger(n) ? n : undefined
+}
+
+/** A host a found item may never point at (DECK-0007 §2.3, as ONOSENDAI privateHost): an IP literal, localhost, a dotless or local-only name. */
+function privateHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/\.$/, '')
+  if (h.startsWith('[') || h.includes(':')) return true
+  if (/^\d+(\.\d+){0,3}$/.test(h) || /^0x[0-9a-f]+$/.test(h)) return true
+  if (!h.includes('.') || h === 'localhost') return true
+  return /\.(local|localhost|internal|lan|home\.arpa)$/.test(h)
+}
+
+/**
+ * Whether a file URL is one a reader may fetch (DECK-0007 §2.3, as
+ * ONOSENDAI fetchableUrl reads it in use): https to a public host name, no
+ * user, query or fragment, and a last path segment that is the file's
+ * hash, optionally with an extension.
+ */
+function fetchableUrl(url: string, hash: string): boolean {
+  try {
+    const u = new URL(url)
+    if (u.protocol !== 'https:' || privateHost(u.hostname)) return false
+    if (u.search !== '' || u.hash !== '' || u.username !== '' || u.password !== '' || /[?#]/.test(url)) return false
+    const last = (u.pathname.split('/').pop() ?? '').toLowerCase()
+    return last === hash || (last.startsWith(`${hash}.`) && /^[a-z0-9]{1,8}$/.test(last.slice(hash.length + 1)))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Hidden audio out of its event, or null when it is not one (DECK-0007
+ * §2.3, as ONOSENDAI audioItemOf reads it): audio, encrypted with AES-GCM
+ * under a well-formed key and nonce, at a URL a reader may fetch.
+ */
+export function audioItemOf(ev: Pick<NostrEvent, 'kind' | 'content' | 'tags'>): AudioMeta | null {
+  if (ev.kind !== AUDIO_KIND || !wellShaped(ev)) return null
+  const url = tagValue(ev.tags, 'url')?.trim()
+  const mime = tagValue(ev.tags, 'm')?.trim().toLowerCase()
+  const x = tagValue(ev.tags, 'x')?.trim().toLowerCase()
+  if (!url || !mime || !mime.startsWith('audio/') || !x || !HEX_64.test(x) || !fetchableUrl(url, x)) return null
+  if (tagValue(ev.tags, 'encryption-algorithm') !== 'aes-gcm') return null
+  if (!HEX_64.test(tagValue(ev.tags, 'decryption-key')?.trim().toLowerCase() ?? '') || !HEX_24.test(tagValue(ev.tags, 'decryption-nonce')?.trim().toLowerCase() ?? '')) return null
+  const has = (name: string): boolean => ev.tags.some((t) => Array.isArray(t) && t[0] === name)
+  const loop = has('loop')
+  const fade = countOf(tagValue(ev.tags, 'fade'))
+  return {
+    title: capped(ev.tags, 'title', MAX_ITEM_NAME) || 'audio',
+    about: ev.content.trim().replace(/\s+/g, ' ').slice(0, MAX_ABOUT),
+    mime,
+    size: countOf(tagValue(ev.tags, 'size')) ?? 0,
+    autoplay: has('autoplay'),
+    loop,
+    retrigger: !loop && tagValue(ev.tags, 'retrigger') === 'auto' ? 'auto' : 'once',
+    ...(fade !== undefined ? { fade } : {}),
+    walkOnly: has('walk'),
+  }
+}
+
+/** Hidden audio in a few words, for a row: its name, then how it is heard. */
+export function audioLabel(a: AudioMeta): string {
+  const how = [a.loop ? 'loop' : 'one-shot', a.autoplay ? (a.loop ? 'autoplay' : a.retrigger === 'auto' ? 'every entry' : 'first entry') : 'on tap', ...(a.walkOnly ? ['walk only'] : [])]
+  return `${a.title} (${how.join(', ')})`
+}
+
 /** What an inline item is, by its kind. */
 export interface ItemBody {
   type: HiddenType
@@ -256,6 +356,7 @@ export interface ItemBody {
   text?: string
   key?: KeyItem
   chest?: ChestItem
+  audio?: AudioMeta
 }
 
 /** Read an inline item by its kind, or null for a kind this server does not know or an item that does not parse. */
@@ -276,6 +377,10 @@ export function readItem(inner: Pick<NostrEvent, 'kind' | 'content' | 'tags' | '
   if (inner.kind === CHEST_KIND) {
     const chest = chestItemOf(inner)
     return chest ? { type: 'chest', chest } : null
+  }
+  if (inner.kind === AUDIO_KIND) {
+    const audio = audioItemOf(inner)
+    return audio ? { type: 'audio', audio } : null
   }
   return null
 }
@@ -312,6 +417,7 @@ export interface Hidden {
   text?: string
   key?: KeyItem
   chest?: ChestItem
+  audio?: AudioMeta
   /** Set when the item was hidden by reference: the entry itself. */
   ref?: Reference
 }
@@ -480,10 +586,22 @@ export function rumorHolds(ev: Partial<Rumor>): boolean {
 }
 
 /**
+ * The kinds written as rumors, and so the only unsigned kinds a bag or a
+ * chest vouches for (spec 7.6 Rumors; ONOSENDAI RUMOR_KINDS): a message,
+ * and hidden audio since DECK-0007 (2026-10-23).
+ */
+export const RUMOR_KINDS: ReadonlySet<number> = new Set([MESSAGE_KIND, AUDIO_KIND])
+
+/** Whether a kind is written as a rumor (RUMOR_KINDS). */
+export function sealedAsRumor(kind: number): boolean {
+  return RUMOR_KINDS.has(kind)
+}
+
+/**
  * Whether an inline item of a bag is authentic for the key that signed the
  * bag (ONOSENDAI innerAuthentic, #409; arkinox, 2026-10-20). Its `pubkey`
- * must be the bag's signer, always. Then a message (kind 1) with no `sig`
- * is a rumor, accepted when its id is its hash, its author vouched for by
+ * must be the bag's signer, always. Then a message (kind 1), or hidden
+ * audio (kind 1063), with no `sig` is a rumor, accepted when its id is its hash, its author vouched for by
  * the bag's signature; anything that carries a `sig` must verify, so a
  * signed message from before 2026-10-20 still reads; any other kind without
  * a `sig` is dropped.
@@ -491,7 +609,7 @@ export function rumorHolds(ev: Partial<Rumor>): boolean {
 export function innerAuthentic(inner: Partial<Rumor>, signer: string): boolean {
   if (!inner || typeof inner !== 'object' || Array.isArray(inner) || typeof inner.kind !== 'number' || inner.pubkey !== signer) return false
   // No `sig`, or an empty one, is unsigned (spec 7.6), as the chest reader has it.
-  if (inner.sig === undefined || inner.sig === '') return inner.kind === MESSAGE_KIND && rumorHolds(inner)
+  if (inner.sig === undefined || inner.sig === '') return sealedAsRumor(inner.kind) && rumorHolds(inner)
   return isAuthentic(inner as NostrEvent)
 }
 
@@ -550,8 +668,8 @@ const DEFAULT_BAG_SETTINGS: BagSettings = { heightTag: true, hint: null, riddle:
 /** A Cashu token as written, as ONOSENDAI counts them (lib/cashu.ts TOKEN). */
 const CASHU_AS_WRITTEN = /cashu[AB][A-Za-z0-9_\-+/=]{16,}/g
 
-/** The order a bag's `contents` tags are written in (ONOSENDAI CONTENTS_KINDS, `nft` after `cashu` since #441). */
-const CONTENTS_KINDS = ['shard', 'message', 'key', 'chest', 'cashu', 'nft'] as const
+/** The order a bag's `contents` tags are written in (ONOSENDAI CONTENTS_KINDS, `nft` after `cashu` since #441, `audio` last since DECK-0007). */
+const CONTENTS_KINDS = ['shard', 'message', 'key', 'chest', 'cashu', 'nft', 'audio'] as const
 type ContentsKind = typeof CONTENTS_KINDS[number]
 
 /**
@@ -561,13 +679,14 @@ type ContentsKind = typeof CONTENTS_KINDS[number]
  * sealed, so a chest counts as a chest and nothing inside it is counted.
  */
 function bagContents(entries: readonly (BagEntry | ChatRumor)[]): Record<ContentsKind, number> {
-  const out: Record<ContentsKind, number> = { shard: 0, message: 0, key: 0, chest: 0, cashu: 0, nft: 0 }
+  const out: Record<ContentsKind, number> = { shard: 0, message: 0, key: 0, chest: 0, cashu: 0, nft: 0, audio: 0 }
   for (const e of entries) {
     if (isReference(e)) { out.shard++; continue }
     if (e.kind === SHARD_KIND) out.shard++
     else if (e.kind === MESSAGE_KIND) { out.message++; out.cashu += (typeof e.content === 'string' ? e.content.match(CASHU_AS_WRITTEN) ?? [] : []).length; out.nft += nftLinkCount(e.content) }
     else if (e.kind === KEY_KIND) out.key++
     else if (e.kind === CHEST_KIND) out.chest++
+    else if (e.kind === AUDIO_KIND) out.audio++
   }
   return out
 }

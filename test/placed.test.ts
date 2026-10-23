@@ -586,6 +586,32 @@ describe('what the agent hides and moves follows the rules of 2026-10-20 (`-`, m
     if (process.env.PROTECT_INTEROP_DUMP) writeFileSync(process.env.PROTECT_INTEROP_DUMP, JSON.stringify({ bag: bagsOn(s.mine, s.a.pubkey).get(k.lookupId)!, keyHex: bytesToHex(k.key), height: 8 }))
   }, 60_000)
 
+  it('placed lists hidden audio (DECK-0007), and move_placed keeps it a rumor: a signed copy would be a playable file post', async () => {
+    await s.call('hide', { contents: { message: 'a note beside it' }, ...at(0n), height: 8 })
+    const k = key(BASE, 8)
+    const current = bagsOn(s.mine, s.a.pubkey).get(k.lookupId)!
+    const entries = await entriesOf(current, k.key)
+    const C = (entries[0] as NostrEvent).tags.find((t) => t[0] === 'C')![1].replace(/.$/, (c) => (c === '0' ? '1' : '0'))
+    const hash = 'ab'.repeat(32)
+    const sound = rumorOf({ kind: 1063, created_at: current.created_at, content: '', tags: [['C', C], ['title', 'Temple bell'], ['url', `https://blossom.example/${hash}`], ['m', 'audio/mpeg'], ['x', hash], ['encryption-algorithm', 'aes-gcm'], ['decryption-key', 'ef'.repeat(32)], ['decryption-nonce', '01'.repeat(12)], ['autoplay'], ['loop'], ['-']] }, s.a.pubkey)
+    const withSound = signEvent(await bagTemplate([...entries, sound], k.key, k.lookupId, 8, current.created_at + 5, HIDDEN_KIND), s.sk)
+    s.mine.seed(withSound)
+    s.canonical.seed(withSound)
+    const list = await s.call('placed', {})
+    const row = rowsOf(list).find((r) => r.type === 'audio')!
+    expect(row.label).toBe('Temple bell')
+    expect(list.text).not.toContain('ef'.repeat(32))
+    const r = await s.call('move_placed', { target: 'Temple bell', type: 'audio', by: { dx: 1 } })
+    expect(r.isError, r.text).toBe(false)
+    const now = bagsOn(s.mine, s.a.pubkey).get(k.lookupId)!
+    const moved = (await entriesOf(now, k.key) as Array<Record<string, unknown> & { kind: number; tags: string[][] }>).find((e) => e.kind === 1063)!
+    expect('sig' in moved).toBe(false)
+    expect(moved.tags.find((t) => t[0] === 'd')).toEqual(['d', sound.id])
+    expect(moved.tags.filter((t) => t[0] === '-')).toHaveLength(1)
+    expect(moved.tags).toContainEqual(['decryption-key', 'ef'.repeat(32)])
+    expect((await unbag(now, k.key, undefined, undefined, 8)).some((h) => h.type === 'audio' && h.audio?.title === 'Temple bell' && h.author === s.a.pubkey)).toBe(true)
+  }, 60_000)
+
   it('a chest inside a chest vouches for its rumors only when its own author is a fact', async () => {
     const lock = await s.call('forge_item', { name: 'Iron Key', height: 5 })
     expect(lock.isError).toBe(false)

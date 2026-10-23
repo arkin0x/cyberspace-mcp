@@ -379,7 +379,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   /** How a placed thing is named, said once for the three tools that take one (arkinox, 2026-10-20). */
   const targetWords = 'Which thing (required): "last" (the newest thing you placed or moved, of any type unless you give type; also "this" or "it"), its exact name as placed lists it (a shard\'s name, a message\'s first words, a key\'s or chest\'s name; never part of a name), or its id (at least 8 hex characters, as placed, hide or move_placed gave it). When a name fits several things the call is refused with the candidates and their ids; nothing is changed.'
-  const typeWords = z.enum(['shard', 'message', 'key', 'chest']).optional().describe('Only things of this type: "last" with type "shard" is the newest shard you placed. Use it when your operator names the kind of thing ("delete the shard").')
+  const typeWords = z.enum(['shard', 'message', 'key', 'chest', 'audio']).optional().describe('Only things of this type: "last" with type "shard" is the newest shard you placed. Use it when your operator names the kind of thing ("delete the shard").')
 
   server.registerTool('placed', {
     title: 'What you placed',
