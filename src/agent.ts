@@ -147,6 +147,14 @@ const MAX_SWEEP_CANDIDATES = 1 << 16
 const OBJECTS_REMEMBERED = 64
 
 /** What the agent is told when the server switched its follow watch off (arkinox, 2026-10-22). */
+/**
+ * The fields of an agent's payload that were left out because this tool does
+ * not know them (sno.ts `ignored`), in words; empty when there were none.
+ */
+function ignoredNote(ignored: string[]): string {
+  return ignored.length ? ` Left out, not fields this tool knows (DECK-0003 section 1.1): ${ignored.map((k) => JSON.stringify(k)).join(', ')}.` : ''
+}
+
 function followOffWords(reason: string): string {
   return `Follow watch switched off: ${reason}. If your STRATEGY asks you to follow or meet your operator, call follow_operator with on: true; otherwise leave it off, and do not message your operator about it.`
 }
@@ -2351,8 +2359,8 @@ export class Agent {
     this.dir.writeJson(PUBLISHED_FILE, { posts: [...recent, now] } satisfies PublishedFile)
     const left = Math.max(0, limit - recent.length - 1)
     return {
-      text: `Published "${v.shard.name}" to the feed${replacing ? ` under d "${d}" (it replaces any earlier version there)` : ''}: kind 33331 ${event.id.slice(0, 8)}..., ${v.vertices} vertices, ${v.faces} faces, ${v.bytes} bytes. Accepted by ${entry.accepted.join(', ')}.${refusedWords} Address ${address} (naddr ${naddr}). This publishes the object; it does not place it in the world. To hide it at a place, call place with this address. To change it later, publish again with d "${d}". ${left} more today.`,
-      data: { eventId: event.id, address, naddr, d, name: v.shard.name, replaced: replacing, accepted: entry.accepted, refused: entry.refused ?? {}, publishedToday: recent.length + 1, maxPerDay: limit },
+      text: `Published "${v.shard.name}" to the feed${replacing ? ` under d "${d}" (it replaces any earlier version there)` : ''}: kind 33331 ${event.id.slice(0, 8)}..., ${v.vertices} vertices, ${v.faces} faces, ${v.bytes} bytes. Accepted by ${entry.accepted.join(', ')}.${refusedWords} Address ${address} (naddr ${naddr}). This publishes the object; it does not place it in the world. To hide it at a place, call place with this address. To change it later, publish again with d "${d}". ${left} more today.${ignoredNote(v.ignored)}`,
+      data: { eventId: event.id, address, naddr, d, name: v.shard.name, replaced: replacing, accepted: entry.accepted, refused: entry.refused ?? {}, publishedToday: recent.length + 1, maxPerDay: limit, ignored: v.ignored },
     }
   }
 
@@ -2366,8 +2374,8 @@ export class Agent {
     if (!v.ok) return { text: `Not valid: ${v.errors.join(' ')}`, data: { valid: false, errors: v.errors } }
     const byReference = v.bytes > REFERENCE_THRESHOLD_BYTES
     return {
-      text: `Valid SNO: "${v.shard.name}", ${v.vertices} vertices, ${v.faces} faces, mode ${v.shard.mode}, unit 2^${v.shard.unit} gibsons, ${v.bytes} bytes on the wire${byReference ? ' (large: it would be hidden by reference)' : ' (small: it would be carried inline)'}.`,
-      data: { valid: true, name: v.shard.name, vertices: v.vertices, faces: v.faces, mode: v.shard.mode, unit: v.shard.unit, bytes: v.bytes, byReference },
+      text: `Valid SNO: "${v.shard.name}", ${v.vertices} vertices, ${v.faces} faces, mode ${v.shard.mode}, unit 2^${v.shard.unit} gibsons, ${v.bytes} bytes on the wire${byReference ? ' (large: it would be hidden by reference)' : ' (small: it would be carried inline)'}.${ignoredNote(v.ignored)}`,
+      data: { valid: true, name: v.shard.name, vertices: v.vertices, faces: v.faces, mode: v.shard.mode, unit: v.shard.unit, bytes: v.bytes, byReference, ignored: v.ignored },
     }
   }
 
