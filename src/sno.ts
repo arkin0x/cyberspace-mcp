@@ -4,10 +4,25 @@
 // of 1.9 are restated here to name the reason, and fromPayload has the last
 // word.
 
-import { fromPayload, toPayload, type ShardModel, type ShardPayload } from 'sno-core/shards'
+import { blankName, fromPayload, toPayload, type ShardModel, type ShardPayload } from 'sno-core/shards'
 
 export type Validation =
-  | { ok: true; shard: ShardModel; payload: ShardPayload; bytes: number; vertices: number; faces: number }
+  | {
+      ok: true
+      shard: ShardModel
+      payload: ShardPayload
+      bytes: number
+      vertices: number
+      faces: number
+      /**
+       * Top-level fields the payload carried that this tool does not know,
+       * left out of `shard` and `payload`. sno-core (0.1.17) would carry them
+       * through; an agent's tools publish only what they can validate, so an
+       * invented or unknown field is named back to the agent instead of being
+       * signed into a public event.
+       */
+      ignored: string[]
+    }
   | { ok: false; errors: string[] }
 
 const MODES = new Set(['solid', 'points', 'lines'])
@@ -27,6 +42,10 @@ export function validateSnoPayload(raw: unknown): Validation {
   const p = raw as Record<string, unknown>
   if (p.v !== 1 && p.v !== 2) errors.push(`v must be 1 or 2; got ${JSON.stringify(p.v)} (1.9 rule 1).`)
   if (typeof p.name !== 'string') errors.push('name must be a string (1.1).')
+  else if (blankName(p.name)) errors.push('name must not be blank (1.9 rule 1a).')
+  for (const k of ['ticks', 'palette', 'facecolors', 'up', 'spin', 'refs', 'parts']) {
+    if (p[k] === null) errors.push(`${k}, if present, must not be null: leave it out instead (1.1).`)
+  }
   if (!Array.isArray(p.vertices)) errors.push('vertices must be an array (1.9 rule 2).')
   if (!Array.isArray(p.colors)) errors.push('colors must be an array (1.9 rule 2).')
   if (!Array.isArray(p.faces)) errors.push('faces must be an array (1.9 rule 2).')
@@ -75,6 +94,13 @@ export function validateSnoPayload(raw: unknown): Validation {
       errors.push('palette, if present, must be a name, an nevent or naddr, or 2 to 256 entries of three integers 0..255 (1.9 rule 8a).')
     }
   }
+  if (p.facecolors !== undefined && p.facecolors !== null) {
+    const fc = p.facecolors
+    let count = 0
+    const ok = Array.isArray(fc) && fc.every((e, i) => isInt(e) && (e >= 0 ? (count += 1, true) : i > 0 && (count += -e, true)))
+    if (!ok) errors.push('facecolors, if present, must be palette indices and negative run counts, starting with an index (1.9 rule 8c).')
+    else if (count !== faces.length) errors.push(`facecolors expands to ${count} entries for ${faces.length} faces; it must expand to exactly one per face (1.9 rule 8c).`)
+  }
   if (p.up !== undefined && typeof p.up !== 'boolean') errors.push('up, if present, must be a boolean (1.9 rule 10).')
   if (p.spin !== undefined && (!isInt(p.spin) || p.spin < 0 || p.spin > 359)) errors.push('spin, if present, must be an integer from 0 to 359 (1.9 rule 10).')
   if (p.refs !== undefined) {
@@ -100,8 +126,10 @@ export function validateSnoPayload(raw: unknown): Validation {
     }
   }
   if (errors.length > 0) return { ok: false, errors }
-  const shard = fromPayload(raw, 'validate')
-  if (!shard) return { ok: false, errors: ['sno-core refuses this payload for a reason the checks above do not name; compare it with DECK-0003 section 1.'] }
+  const read = fromPayload(raw, 'validate')
+  if (!read) return { ok: false, errors: ['sno-core refuses this payload for a reason the checks above do not name; compare it with DECK-0003 section 1.'] }
+  const { extra, ...shard } = read
+  const ignored = Object.keys(extra ?? {})
   const payload = toPayload(shard)
-  return { ok: true, shard, payload, bytes: new TextEncoder().encode(JSON.stringify(payload)).length, vertices: shard.vertices.length, faces: shard.faces.length }
+  return { ok: true, shard, payload, bytes: new TextEncoder().encode(JSON.stringify(payload)).length, vertices: shard.vertices.length, faces: shard.faces.length, ignored }
 }
