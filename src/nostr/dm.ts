@@ -25,6 +25,9 @@
 //     can see the state"): the same private kind 7, from the agent, on the
 //     operator's order, with the state as its content: 👀 seen, ⚙️ working,
 //     ✅ done, ⚠️ given up, ⏹️ stopped. The newest one is the order's state.
+//     An order from local chat gets its status the same way, privately, with
+//     e = the chat line's id and ["k", "23333"] marking the channel: never a
+//     public reaction (v2 content stays sealed).
 //   - A STOP (arkinox, 2026-10-25: HOLD becomes a real control) is a kind 14
 //     from the operator carrying ["agent", "stop"], and an ["e", <rumor id>]
 //     per order it stops; with no e tag it stops every open job. It is a
@@ -122,8 +125,8 @@ export function wrapSeal(seal: NostrEvent, recipient: string, createdAt: number,
  * `eventId` written by `recipient`: kind 7, the content the reaction, and
  * exactly the two tags ONOSENDAI reads, the e tag first.
  */
-export function createReactionRumor(input: { senderPubkey: string; recipient: string; eventId: string; content?: string; createdAt: number }): Rumor {
-  const unsigned = { pubkey: input.senderPubkey, created_at: input.createdAt, kind: REACTION_KIND, tags: [['e', input.eventId], ['p', input.recipient]], content: input.content ?? SEEN_REACTION }
+export function createReactionRumor(input: { senderPubkey: string; recipient: string; eventId: string; content?: string; extraTags?: string[][]; createdAt: number }): Rumor {
+  const unsigned = { pubkey: input.senderPubkey, created_at: input.createdAt, kind: REACTION_KIND, tags: [['e', input.eventId], ['p', input.recipient], ...(input.extraTags ?? [])], content: input.content ?? SEEN_REACTION }
   return { id: getEventHash(unsigned), ...unsigned }
 }
 
@@ -147,9 +150,9 @@ export function wrapMessage(input: { senderSk: Uint8Array; recipient: string; te
 }
 
 /** A private reaction to the message `eventId` from `recipient`, ready to send, wrapped exactly as a message is (arkinox, 2026-10-12). */
-export function wrapReaction(input: { senderSk: Uint8Array; recipient: string; eventId: string; content?: string; now: number; random?: () => number }): WrappedMessage {
+export function wrapReaction(input: { senderSk: Uint8Array; recipient: string; eventId: string; content?: string; extraTags?: string[][]; now: number; random?: () => number }): WrappedMessage {
   const sender = getPublicKey(input.senderSk)
-  const rumor = createReactionRumor({ senderPubkey: sender, recipient: input.recipient, eventId: input.eventId, content: input.content, createdAt: input.now })
+  const rumor = createReactionRumor({ senderPubkey: sender, recipient: input.recipient, eventId: input.eventId, content: input.content, extraTags: input.extraTags, createdAt: input.now })
   return wrapRumor(rumor, input.senderSk, input.recipient, input.now, input.random)
 }
 

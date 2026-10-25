@@ -177,8 +177,10 @@ async function run(log: (line: string) => void, fn: () => Promise<ToolResult> | 
  */
 export interface ServerHooks {
   onActivity?: () => void
-  /** A tool call ended: its name, whether it succeeded, and whether the tool is marked read-only. */
-  onTool?: (name: string, ok: boolean, readOnly: boolean) => void
+  /** A tool call ended: its name, whether it succeeded, its arguments and its structured answer. */
+  onTool?: (name: string, ok: boolean, args: Record<string, unknown>, data: Record<string, unknown>) => void
+  /** Before a tool runs: a refusal when it may not run now (a turn the operator's STOP killed, while it dies), or null. */
+  gate?: (name: string, readOnly: boolean) => string | null
   wakeAgain?: () => string
   workDone?: () => string
   onInbox?: (result: ToolResult) => ToolResult
@@ -186,15 +188,21 @@ export interface ServerHooks {
 
 export function createServer(agent: Agent, log: (line: string) => void = () => {}, hooks: ServerHooks = {}): McpServer {
   const server = new McpServer({ name: 'cyberspace-mcp', version: '0.0.1' })
-  // Every tool's end is heard by onTool, with its name and read-only mark, wrapped once here rather than at each registration.
-  if (hooks.onTool) {
-    const heard = hooks.onTool
-    const register = server.registerTool.bind(server) as (name: string, config: { annotations?: { readOnlyHint?: boolean } }, cb: (...args: never[]) => Promise<CallToolResult>) => unknown
-    server.registerTool = ((name: string, config: { annotations?: { readOnlyHint?: boolean } }, cb: (...args: never[]) => Promise<CallToolResult>) => register(name, config, async (...args: never[]) => {
+  // Every tool call passes the gate first and its end is heard by onTool, wrapped once here rather than at each registration.
+  if (hooks.onTool || hooks.gate) {
+    const { onTool: heard, gate } = hooks
+    type Handler = (...args: never[]) => Promise<CallToolResult>
+    const register = server.registerTool.bind(server) as (name: string, config: { annotations?: { readOnlyHint?: boolean } }, cb: Handler) => unknown
+    server.registerTool = ((name: string, config: { annotations?: { readOnlyHint?: boolean } }, cb: Handler) => register(name, config, (async (...args: never[]) => {
+      const readOnly = config.annotations?.readOnlyHint === true
+      let why: string | null = null
+      try { why = gate?.(name, readOnly) ?? null } catch { why = null }
+      if (why) return refused(why)
       const result = await cb(...args)
-      try { heard(name, result.isError !== true, config.annotations?.readOnlyHint === true) } catch { /* the waker's bookkeeping never fails a tool */ }
+      const input = args[0] && typeof args[0] === 'object' ? args[0] as Record<string, unknown> : {}
+      try { heard?.(name, result.isError !== true, input, (result.structuredContent ?? {}) as Record<string, unknown>) } catch { /* the waker's bookkeeping never fails a tool */ }
       return result
-    })) as typeof server.registerTool
+    }) as Handler)) as typeof server.registerTool
   }
   const activity = (): void => { try { hooks.onActivity?.() } catch { /* the watchdog's bookkeeping never fails a tool */ } }
   // Every tool's answer ends with the notices: unread orders and an operator's tag in chat.
@@ -323,6 +331,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
       hint_heights: hintHeights.optional(),
       riddle: z.string().max(280).optional(),
     },
+    annotations: { readOnlyHint: false, destructiveHint: false },
   }, async (args) => call(() => agent.hide(args)))
 
   server.registerTool('items', {
@@ -390,6 +399,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     title: 'Place an object',
     description: 'Validate an SNO payload (DECK-0003 1.9) and hide it as an object at a coordinate and height: inline when small, by reference as a hidden kind 33331 when large. Or place a published public object by its address (33331:<pubkey>:<d> or naddr) as a reference. Or place an object find or open_chest listed, or one you took from a chest, by its id.',
     inputSchema: { object: snoPayload.optional(), address: z.string().optional(), id: z.string().optional().describe('An object\'s id as find, open_chest or items lists it (at least 8 hex characters).'), coordinate, height: z.number().int().min(0).max(MAX_KEY_HEIGHT) },
+    annotations: { readOnlyHint: false, destructiveHint: false },
   }, async (args) => call(() => agent.place(args)))
 
   /** How a placed thing is named, said once for the three tools that take one (arkinox, 2026-10-20). */
@@ -558,7 +568,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     const again = hooks.wakeAgain
     server.registerTool('wake_again', {
       title: 'Wake again',
-      description: 'Ask your waker for one more turn right after this one ends, for work under way that needs another turn (a long build, a sweep you must come back to). The next turn starts about half a minute after this one ends and begins with inbox, as every turn does. At most a dozen in a row; after that the waker waits for a new event. Not needed for a ride: the waker wakes you when a ride is ready or stops. It counts as progress on your open orders. Only present when this server runs a waker.',
+      description: 'Ask your waker for one more turn right after this one ends, for work under way that needs another turn (a long build, a sweep you must come back to). The next turn starts about half a minute after this one ends and begins with inbox, as every turn does. At most a dozen in a row, and on your operator\'s open orders it is not progress by itself: turns that change nothing end the job after a couple of turns, and every job ends after a dozen work turns. Not needed for a ride: the waker wakes you when a ride is ready or stops. Only present when this server runs a waker.',
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     }, async () => call(() => ({ text: again(), data: { wakeAgain: true } })))
   }
@@ -567,7 +577,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     const done = hooks.workDone
     server.registerTool('work_done', {
       title: 'Work done',
-      description: 'Tell your waker that your operator\'s open orders (DM and chat) are carried out, or that nothing more can be done until your operator or a ride answers; each gets ✅. Until you call it, every order stays open: a work turn that ends without it is resumed for as long as your turns make progress (a tool call that changes something, or wake_again), and given up, with one DM to your operator, after a few turns in a row that make none. A question answered or "stand by" needs nothing more: call it at once. Refused in a quick reply turn: only your work turn closes orders. Only present when this server runs a waker.',
+      description: 'Tell your waker that your operator\'s open orders (DM and chat) are carried out, or that nothing more can be done until your operator or a ride answers; each gets ✅. Until you call it, every order stays open: a work turn that ends without it is resumed while your turns make progress (a tool call that changes something in the world or in what you hold: a hop, a ride started or signed, something hidden, placed, moved, removed, sealed, forged, taken, opened, commented or published, a new avatar), and given up, with one DM to your operator, after a couple of turns in a row that make none, after a dozen work turns, or a day after the order came. A question answered or "stand by" needs nothing more: call it at once. Refused in a quick reply turn: only your work turn closes orders. Only present when this server runs a waker.',
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     }, async () => call(() => ({ text: done(), data: { workDone: true } })))
   }

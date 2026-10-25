@@ -45,10 +45,16 @@
 //     rumor id in the state directory (each STOP acts once, ever), and hands
 //     its targets (its e tags; none means every open job) to onStop, which
 //     stops the turn, pauses the ride and closes the jobs. inbox never
-//     returns it and it wakes no turn.
+//     returns it and it wakes no turn. A STOP halts everything (the
+//     coordinator's ruling, 2026-10-25): halted() holds until the operator's
+//     next message of any kind, and an order it names, or for a STOP that
+//     names none, any order written before it, is read and dropped unread,
+//     never counted, so no turn starts for it. A fresh state directory does
+//     not act on a STOP older than the read window, as it sends no 👀 there.
 //   - Job status (arkinox, 2026-10-25). status() sends the operator the same
 //     private kind 7 as the 👀, with the job's state as its content (⚙️, ✅,
-//     ⚠️, ⏹️); the waker decides when and sends each once.
+//     ⚠️, ⏹️), for chat orders too (with ["k", "23333"]); the waker decides
+//     when and sends each once.
 //   - The poll (arkinox, 2026-10-12: "Anything we can do to improve the
 //     performance of the chat and responsiveness of the agent"). While an
 //     operator may give orders, the server itself checks for new orders every
@@ -124,9 +130,15 @@ interface DmsFile {
   reacted: Record<string, number>
   /** STOPs acted on, by rumor id, with our clock: each acts once, ever (arkinox, 2026-10-25). */
   stops: Record<string, number>
+  /** Orders a STOP named, by rumor id, with our clock: read and dropped unread. */
+  stoppedOrders: Record<string, number>
+  /** The newest STOP that named no order, its rumor created_at: every order written up to then is dropped unread. */
+  stoppedBefore: number | null
+  /** Our clock when a STOP halted everything, until the operator's next message; null when not halted. */
+  haltedAt: number | null
 }
 
-const EMPTY: DmsFile = { version: 1, strategy: null, seen: {}, waiting: {}, lastReadAt: null, ignoredTotal: 0, published: null, renewals: {}, reacted: {}, stops: {} }
+const EMPTY: DmsFile = { version: 1, strategy: null, seen: {}, waiting: {}, lastReadAt: null, ignoredTotal: 0, published: null, renewals: {}, reacted: {}, stops: {}, stoppedOrders: {}, stoppedBefore: null, haltedAt: null }
 /** How long a 👀 mark is kept: longer than any read can return the message (a follow is waited for 30 days), plus a day. */
 const REACTED_KEPT_S = WAITING_KEPT_S + REREAD_WINDOW_S + 24 * 60 * 60
 /** How many 👀 marks are kept at most, newest first. */
@@ -196,9 +208,11 @@ export interface OperatorChannelDeps {
   /** Renew the session budget for the operator's CONTINUE; returns the sentence that says what was renewed. */
   renew?: () => string
   /** Wrap a reaction (the 👀, or a job's status emoji) to the operator's message `eventId` with the agent's key, to them and to the agent itself; without it no reaction is sent. */
-  wrapReaction?: (recipient: string, eventId: string, content?: string) => WrappedMessage
+  wrapReaction?: (recipient: string, eventId: string, content?: string, extraTags?: string[][]) => WrappedMessage
   /** The operator's STOP, once per STOP: the orders it names (empty: every open job). Called after the read marks are saved. */
   onStop?: (targets: string[], stopId: string) => void
+  /** Unread orders a STOP dropped, by rumor id, so they can show ⏹️. */
+  onStoppedUnread?: (ids: string[]) => void
   /** How long a failed reaction waits before its one retry; for tests. */
   reactionRetryMs?: number
 }
@@ -239,6 +253,37 @@ export class OperatorChannel {
     this.state = saved?.version === 1 ? { ...EMPTY, ...saved } : { ...EMPTY }
     this.state.reacted ??= {}
     this.state.stops ??= {}
+    this.state.stoppedOrders ??= {}
+    this.state.stoppedBefore ??= null
+    this.state.haltedAt ??= null
+  }
+
+  /** Whether a STOP halted everything and no message from the operator has come since. */
+  halted(): boolean {
+    return this.state.haltedAt !== null
+  }
+
+  /** The operator spoke again (an order from local chat): the halt is over. */
+  clearHalt(): void {
+    if (this.state.haltedAt === null) return
+    this.state.haltedAt = null
+    this.save()
+    this.deps.log('STOP: the halt is over (a new message from the operator)')
+  }
+
+  /**
+   * Whether the operator follows the agent by the newest check, the rule an
+   * order needs (kind 3), read from memory for callers that cannot wait:
+   * the operator's chat lines are orders only while this holds.
+   */
+  followedNow(): boolean {
+    const c = this.lastCheck
+    return !!c && !this.deps.operatorProblem?.() && c.facts.operator === this.deps.operator() && c.facts.follows === true
+  }
+
+  /** Whether a STOP dropped this order before it was read. */
+  private stoppedOrder(rumor: { id: string; created_at: number }): boolean {
+    return this.state.stoppedOrders[rumor.id] !== undefined || (this.state.stoppedBefore !== null && rumor.created_at <= this.state.stoppedBefore)
   }
 
   private save(): void {
@@ -347,8 +392,8 @@ export class OperatorChannel {
   }
 
   /** One reaction: to the operator's DM relays, retried once on failure, then the agent's own copy. Logs ids and relay words, never a message. */
-  private async sendReaction(operator: string, rumorId: string, inbox: string[], selfRelays: string[], content: string = SEEN_REACTION): Promise<void> {
-    const wrapped = this.deps.wrapReaction!(operator, rumorId, content)
+  private async sendReaction(operator: string, rumorId: string, inbox: string[], selfRelays: string[], content: string = SEEN_REACTION, extraTags: string[][] = []): Promise<void> {
+    const wrapped = this.deps.wrapReaction!(operator, rumorId, content, extraTags)
     for (let attempt = 1; attempt <= 2; attempt++) {
       if (this.stopped) return
       let why: string
@@ -374,12 +419,12 @@ export class OperatorChannel {
    * operator's DM relays with a copy to the agent. The caller sends each
    * state once; this sends it now, in the background, and never throws.
    */
-  status(rumorId: string, emoji: string): Promise<void> {
+  status(rumorId: string, emoji: string, extraTags: string[][] = []): Promise<void> {
     const p = (async () => {
       if (!this.deps.wrapReaction || this.stopped || this.deps.operatorProblem?.()) return
       const facts = await this.cachedFacts()
       if (!facts || facts.inbox.length === 0) { this.deps.log(`${emoji} for ${rumorId.slice(0, 8)}... not sent: no DM inbox known for the operator`); return }
-      await this.sendReaction(facts.operator, rumorId, facts.inbox, facts.mine.length ? facts.mine : facts.inbox, emoji)
+      await this.sendReaction(facts.operator, rumorId, facts.inbox, facts.mine.length ? facts.mine : facts.inbox, emoji, extraTags)
     })().catch((err) => { this.deps.log(`${emoji} for ${rumorId.slice(0, 8)}... failed: ${err instanceof Error ? err.message : String(err)}`) })
     this.sending.add(p)
     void p.finally(() => this.sending.delete(p))
@@ -393,7 +438,21 @@ export class OperatorChannel {
   private claimStop(rumor: Rumor, now: number): boolean {
     if (this.state.stops[rumor.id] !== undefined) return false
     this.state.stops[rumor.id] = now
+    // The 👀 path's age rule: a fresh state directory reading old history acts on no STOP.
+    if (this.state.lastReadAt === null && rumor.created_at < now - REREAD_WINDOW_S) return false
+    const targets = stopTargets(rumor)
+    for (const id of targets) this.state.stoppedOrders[id] = now
+    if (targets.length === 0) this.state.stoppedBefore = Math.max(this.state.stoppedBefore ?? 0, rumor.created_at)
+    this.state.haltedAt = now
     return true
+  }
+
+  /** The orders a STOP dropped unread, each once, for their ⏹️. */
+  private droppedByStop(rumors: Rumor[]): void {
+    const ids = [...new Set(rumors.map((r) => r.id))]
+    if (ids.length === 0) return
+    this.deps.log(`STOP: ${ids.length} unread order(s) dropped`)
+    try { this.deps.onStoppedUnread?.(ids) } catch (err) { this.deps.log(`STOP: could not mark the dropped orders: ${err instanceof Error ? err.message : String(err)}`) }
   }
 
   /** Hand each STOP claimed to onStop, after its record is saved. Logs ids, never words. */
@@ -521,6 +580,7 @@ export class OperatorChannel {
     const orders: OperatorMessage[] = []
     const reactTo: string[] = []
     const stopping: Rumor[] = []
+    const droppedStopped: Rumor[] = []
     let ignored = 0
     let waiting = 0
     for (const wrap of mergeAnswers(answers)) {
@@ -541,10 +601,15 @@ export class OperatorChannel {
       if (this.claimReaction(rumor, now)) reactTo.push(rumor.id)
       // A STOP is a control the server carries out, never an order the model reads.
       if (isStop(rumor)) { if (this.claimStop(rumor, now)) stopping.push(rumor); continue }
+      if (this.stoppedOrder(rumor)) { droppedStopped.push(rumor); continue }
       orders.push({ id: rumor.id, at: rumor.created_at, text: rumor.content, strategy: isStrategy(rumor), continue: isContinue(rumor) })
     }
+    // A STOP read in this same batch drops the orders it covers, wherever they came in it.
+    for (const o of orders.filter((m) => this.stoppedOrder({ id: m.id, created_at: m.at }))) droppedStopped.push({ id: o.id, created_at: o.at } as Rumor)
     // The same rumor can come in more than one wrap; it is one order.
-    const unique = [...new Map(orders.map((o) => [o.id, o])).values()].sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : 1))
+    const unique = [...new Map(orders.filter((m) => !this.stoppedOrder({ id: m.id, created_at: m.at })).map((o) => [o.id, o])).values()].sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : 1))
+    // Any message from the operator ends a STOP's halt.
+    if (unique.length > 0 && this.state.haltedAt !== null) { this.state.haltedAt = null; this.deps.log('STOP: the halt is over (a new message from the operator)') }
     const newestStrategy = unique.filter((o) => o.strategy).at(-1)
     const current = this.strategy()
     if (newestStrategy && (!current || newestStrategy.at > current.at || (newestStrategy.at === current.at && newestStrategy.id !== current.id && newestStrategy.id > current.id))) {
@@ -561,6 +626,7 @@ export class OperatorChannel {
     this.save()
     this.react(facts, [...new Set(reactTo)])
     this.actOnStops(stopping)
+    this.droppedByStop(droppedStopped)
     const renewed = renewing.length > 0 ? this.deps.renew!() : null
     for (const m of unique) this.remember(m.text)
 
@@ -667,6 +733,7 @@ export class OperatorChannel {
     let marked = false
     const reactTo: string[] = []
     const stopping: Rumor[] = []
+    const seenOrders: Array<{ wrap: NostrEvent; rumor: Rumor }> = []
     const now = this.deps.now()
     // From here to the save nothing is awaited, so inbox and this check never both claim one 👀.
     for (const wrap of mergeAnswers(answers)) {
@@ -685,15 +752,27 @@ export class OperatorChannel {
         marked = true
         continue
       }
+      seenOrders.push({ wrap, rumor })
+      if (following && this.claimReaction(rumor, now)) reactTo.push(rumor.id)
+    }
+    // An order a STOP covers (one it names, or any written before a STOP that names none) is read now and dropped: no count, no turn.
+    const droppedStopped: Rumor[] = []
+    for (const { wrap, rumor } of seenOrders) {
+      if (following && this.stoppedOrder(rumor)) {
+        this.state.seen[wrap.id] = wrap.created_at
+        droppedStopped.push(rumor)
+        marked = true
+        continue
+      }
       found.set(wrap.id, rumor.id)
       if (isStrategy(rumor)) strategy = true
       if (isContinue(rumor) && this.state.renewals[rumor.id] === undefined) keepGoing = true
-      if (following && this.claimReaction(rumor, now)) reactTo.push(rumor.id)
     }
     if (reactTo.length > 0 || marked) {
       this.save()
       this.react(facts, [...new Set(reactTo)])
       this.actOnStops(stopping)
+      this.droppedByStop(droppedStopped)
     }
     const result: OrdersCheck = following
       ? { orders: found, strategy, keepGoing, held: 0, facts }
@@ -718,6 +797,7 @@ export class OperatorChannel {
     const reacted = Object.entries(this.state.reacted).filter(([, at]) => at >= reactedFloor).sort((a, b) => b[1] - a[1]).slice(0, REACTED_MAX)
     this.state.reacted = Object.fromEntries(reacted)
     this.state.stops = Object.fromEntries(Object.entries(this.state.stops).filter(([, at]) => at >= reactedFloor).sort((a, b) => b[1] - a[1]).slice(0, REACTED_MAX))
+    this.state.stoppedOrders = Object.fromEntries(Object.entries(this.state.stoppedOrders).filter(([, at]) => at >= reactedFloor).sort((a, b) => b[1] - a[1]).slice(0, REACTED_MAX))
   }
 
   /** Where the next read of the inbox starts: the read window before the last read, or the oldest message still waiting. Null before the first read. */

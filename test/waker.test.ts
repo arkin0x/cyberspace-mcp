@@ -26,7 +26,7 @@ function setup(mode: string, overrides: Partial<WakeSettings> = {}, replyMode?: 
     replyCommand: replyMode ? [process.execPath, FAKE, replyMode, log, '{prompt}'] : null,
     pollSeconds: 3600, idleKillMinutes: 10, maxTurnMinutes: 60, chatStrangerMinutes: 5, roamRewakeMinutes: 5,
     ordersRewakeMinutes: 10, maxContinuations: 12, continueDelaySeconds: 0.01, followSettleSeconds: 12, cwd: dir,
-    activityPaths: [], maxIdleTurns: 2, resumeDelaySeconds: 60,
+    activityPaths: [], maxIdleTurns: 2, maxJobTurns: 12, resumeDelaySeconds: 60,
     ...overrides,
   }
   let data: WakeData = { orders: 0 }
@@ -104,7 +104,7 @@ describe('the waker', () => {
     const t = setup('log', {}, 'slow')
     t.set({ orders: 1 })
     let said = ''
-    const done = setTimeout(() => { t.waker.onInbox(inboxWith({ id: 'c3'.repeat(32), text: 'plant flowers around the disco floor' })); said = t.waker.markDone() }, 100)
+    const done = setTimeout(() => { t.waker.onInbox(inboxWith({ id: 'c3'.repeat(32), text: 'plant flowers around the disco floor' })); try { t.waker.markDone() } catch (err) { said = (err as Error).message } }, 100)
     await t.waker.tick()
     clearTimeout(done)
     expect(said).toContain('Not closed: this is your quick reply turn')

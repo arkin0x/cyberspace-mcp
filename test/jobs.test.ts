@@ -57,10 +57,10 @@ function setup(mode: string, overrides: Partial<WakeSettings> = {}, replyMode?: 
     replyCommand: replyMode ? [process.execPath, FAKE, replyMode, log, '{prompt}'] : null,
     pollSeconds: 3600, idleKillMinutes: 10, maxTurnMinutes: 60, chatStrangerMinutes: 5, roamRewakeMinutes: 5,
     ordersRewakeMinutes: 10, maxContinuations: 12, continueDelaySeconds: 0.01, followSettleSeconds: 12, cwd: dir,
-    activityPaths: [], maxIdleTurns: 2, resumeDelaySeconds: 60,
+    activityPaths: [], maxIdleTurns: 2, maxJobTurns: 12, resumeDelaySeconds: 60,
     ...overrides,
   }
-  const state = { data: { orders: 0 } as WakeData, clock: 1_000_000, chat: [] as ChatOrder[] }
+  const state = { data: { orders: 0 } as WakeData, clock: 1_000_000, chat: [] as ChatOrder[], halted: false }
   const lines: string[] = []
   const dms: string[] = []
   const reacts: Array<{ id: string; channel: string; emoji: string }> = []
@@ -76,6 +76,9 @@ function setup(mode: string, overrides: Partial<WakeSettings> = {}, replyMode?: 
     react: async (order, emoji) => { reacts.push({ ...order, emoji }) },
     ...selfSeal(key),
     chatOrders: () => state.chat,
+    halted: () => state.halted,
+    resumeFromStop: () => { state.halted = false },
+    env: { CYBERSPACE_MCP_STATE: dir },
   })
   const waker = make()
   const turns = (): Logged[] => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as Logged).filter((l) => Array.isArray(l.args)) : [])
@@ -144,14 +147,11 @@ describe('every instruction from the operator is a job (arkinox, 2026-10-25)', (
   it('a job resumes while its turns make progress, and after maxIdleTurns turns in a row with none it gives up: one DM and ⚠️', async () => {
     const t = setup('slow')
     t.waker.onInbox(inboxWith(ORDER))
-    const progress = (): void => t.waker.noteTool('hop', true, false)
-    // None of these is progress: reading, talking, bookkeeping, a refusal, a read-only tool.
+    const progress = (): void => t.waker.noteTool('hop', true)
+    // None of these is progress: reading, talking, bookkeeping, a refusal, the idempotent and advisory calls, wake_again.
     const idle = (): void => {
-      t.waker.noteTool('look', true, false)
-      t.waker.noteTool('message_operator', true, false)
-      t.waker.noteTool('inbox', true, false)
-      t.waker.noteTool('hop', false, false)
-      t.waker.noteTool('find', true, true)
+      for (const name of ['look', 'message_operator', 'say', 'inbox', 'find', 'station', 'follow_operator', 'roam', 'plan_hop', 'whereami', 'identity']) t.waker.noteTool(name, true)
+      t.waker.noteTool('hop', false)
     }
     await during(t.waker, progress)
     expect(t.waker.openWork?.idleTurns).toBe(0)
@@ -181,19 +181,75 @@ describe('every instruction from the operator is a job (arkinox, 2026-10-25)', (
     t.cleanup()
   }, 20_000)
 
-  it('a wake_again is progress, and a day-old job is given up with one DM', async () => {
+  it('wake_again alone is not progress: continuations end once the turns get nowhere, and the job is given up', async () => {
     const t = setup('slow')
     t.waker.onInbox(inboxWith(ORDER))
     await during(t.waker, () => t.waker.requestAgain())
-    expect(t.waker.openWork?.idleTurns).toBe(0)
-    t.advance(25 * 60 * 60_000)
-    // The continuation runs first (it carries the job); the job is then a day old.
+    expect(t.waker.openWork?.idleTurns).toBe(1)
+    await during(t.waker, () => t.waker.requestAgain())
+    expect(t.waker.openWork?.idleTurns).toBe(2)
+    expect(t.turns()[1].args[0]).toContain('you asked to go on (wake_again)')
+    // Asked again, but two turns in a row changed nothing: no continuation, and the job is given up.
     await t.waker.tick()
-    await t.waker.tick()
+    expect(t.turns()).toHaveLength(2)
     expect(t.waker.openWork).toBeNull()
-    expect(t.dms).toEqual([expect.stringContaining('it was open for a day')])
+    expect(t.dms).toEqual([expect.stringContaining('2 turn(s) in a row got nowhere')])
     t.cleanup()
   }, 20_000)
+
+  it('progress is a real effect: ride counts when it starts, resumes or signs, never for a poll or a pause; set_avatar only for a new avatar', async () => {
+    const t = setup('slow')
+    t.waker.onInbox(inboxWith(ORDER))
+    const turnWith = async (fn: () => void): Promise<number> => { t.advance(60_000); await during(t.waker, fn); return t.waker.openWork!.idleTurns }
+    expect(await turnWith(() => t.waker.noteTool('ride', true, { to: 900000 }, { state: 'computing' }))).toBe(0)
+    // The same state again (a poll), a pause, a cancel: nothing.
+    expect(await turnWith(() => {
+      t.waker.noteTool('ride', true, { to: 900000 }, { state: 'computing' })
+      t.waker.noteTool('ride', true, { pause: true }, { state: 'paused' })
+    })).toBe(1)
+    // Signed: progress.
+    expect(await turnWith(() => t.waker.noteTool('ride', true, { to: 900000 }, { action: 'hyperjump' }))).toBe(0)
+    const avatar = { source: 'payload', name: 'cube', vertices: 8, faces: 6 }
+    expect(await turnWith(() => t.waker.noteTool('set_avatar', true, {}, avatar))).toBe(0)
+    expect(await turnWith(() => t.waker.noteTool('set_avatar', true, {}, avatar))).toBe(1)
+    t.cleanup()
+  }, 20_000)
+
+  it('every order has its own bound: maxJobTurns work turns, progress or not, and a day that a newer order does not extend', async () => {
+    const t = setup('slow', { maxJobTurns: 3 })
+    t.waker.onInbox(inboxWith(ORDER))
+    const progress = (): void => t.waker.noteTool('hop', true)
+    await during(t.waker, progress)
+    for (let n = 0; n < 2; n++) { t.advance(60_000); await during(t.waker, progress) }
+    expect(t.turns()).toHaveLength(3)
+    // A newer order joins: it gets its own count; the old one is given up alone at its cap.
+    const later = { id: 'b2'.repeat(32), text: 'and a bench' }
+    t.waker.onInbox(inboxWith(later))
+    await t.waker.tick()
+    expect(t.waker.openWork?.ids).toEqual([later.id])
+    expect(t.waker.statusOf(ORDER.id)).toEqual(['working', 'gaveUp'])
+    expect(t.dms).toEqual([expect.stringContaining('it had 3 work turns and was still not done')])
+    t.cleanup()
+  }, 20_000)
+
+  it('a day-old order is given up with one DM, a newer one stays, and no day runs out while a ride is under way', async () => {
+    const t = setup('log', { maxIdleTurns: 50 })
+    t.waker.onInbox(inboxWith(ORDER))
+    await t.waker.tick()
+    t.advance(23 * 60 * 60_000)
+    const later = { id: 'b2'.repeat(32), text: 'and a bench' }
+    t.waker.onInbox(inboxWith(later))
+    t.advance(2 * 60 * 60_000)
+    // A ride computes: the day does not run out.
+    t.state.data = { orders: 0, ride: { state: 'computing', to: 900000 } }
+    await t.waker.tick()
+    expect(t.waker.openWork?.ids).toEqual([ORDER.id, later.id])
+    t.state.data = { orders: 0 }
+    await t.waker.tick()
+    expect(t.waker.openWork?.ids).toEqual([later.id])
+    expect(t.dms).toEqual([expect.stringContaining('it was open for a day')])
+    t.cleanup()
+  })
 
   it('a ride that waits keeps the job waiting: no resume and no idle turn while it computes', async () => {
     const t = setup('log')
@@ -339,6 +395,58 @@ describe('the operator\'s STOP (arkinox, 2026-10-25: HOLD becomes a real control
     t.cleanup()
   }, 20_000)
 
+  it('a STOP during the wait before a continuation cancels it', async () => {
+    const t = setup('log', { continueDelaySeconds: 0.5 })
+    t.waker.requestAgain()
+    const ticking = t.waker.tick()
+    await new Promise((r) => setTimeout(r, 100))
+    t.waker.stopJobs([])
+    await ticking
+    expect(t.turns()).toHaveLength(0)
+    t.cleanup()
+  })
+
+  it('a turn a STOP killed gets nothing more while it dies: its wake_again and wake.again are ignored, and only read-only tools answer it', async () => {
+    const t = setup('stubborn')
+    t.waker.onInbox(inboxWith(ORDER))
+    const ticking = t.waker.tick()
+    while (!t.waker.busy || t.turns().length === 0) await new Promise((r) => setTimeout(r, 20))
+    t.waker.stopJobs([])
+    // The grace before SIGKILL: the turn is still alive and asks for more.
+    await new Promise((r) => setTimeout(r, 100))
+    expect(() => t.waker.requestAgain()).toThrow(/sent STOP/)
+    expect(t.waker.gate('hop', false)).toMatch(/sent STOP/)
+    expect(t.waker.gate('ride', false)).toMatch(/sent STOP/)
+    expect(t.waker.gate('whereami', true)).toBeNull()
+    await ticking
+    expect(existsSync(join(t.dir, 'wake.again'))).toBe(false)
+    expect(t.waker.gate('hop', false)).toBeNull()
+    for (let i = 0; i < 3; i++) { t.advance(10 * 60_000); await t.waker.tick() }
+    expect(t.turns()).toHaveLength(1)
+    t.cleanup()
+  }, 20_000)
+
+  it('halts everything until the operator speaks again: no ride, move, roam or resume turn; a new order runs', async () => {
+    const t = setup('log', {}, 'log-reply')
+    t.waker.onInbox(inboxWith(ORDER))
+    await t.waker.tick()
+    expect(t.turns()).toHaveLength(1)
+    t.state.halted = true
+    t.advance(60_000)
+    t.state.data = { orders: 0, ride: { state: 'ready', to: 900000 }, roamDue: true, operatorMoved: { eventId: 'e'.repeat(64), action: 'hop', to: 'ab'.repeat(32), distance: '3 gibsons' } }
+    for (let i = 0; i < 3; i++) { t.advance(10 * 60_000); await t.waker.tick() }
+    expect(t.turns()).toHaveLength(1)
+    // A new order from the operator: its turns run (its inbox ends the halt).
+    t.state.data = { ...t.state.data, orders: 1 }
+    await t.waker.tick()
+    expect(t.turns().map((x) => x.mode)).toEqual(['log', 'log-reply', 'log'])
+    // A chat order ends the halt too.
+    t.state.halted = true
+    t.waker.takeChatOrders([{ id: LINE, at: t.state.clock / 1000, text: 'come here' }])
+    expect(t.state.halted).toBe(false)
+    t.cleanup()
+  }, 20_000)
+
   it('names an order not read yet: reading it later opens nothing, and it shows ⏹️', async () => {
     const t = setup('log')
     expect(t.waker.stopJobs([ORDER.id])).toEqual([ORDER.id])
@@ -450,6 +558,68 @@ describe('through the agent, over the fake relays', () => {
     w.inbox.seed(stop(opSk, [['e', ORDER.id]]))
     await a.ordersWaiting()
     expect(stops).toHaveLength(1)
+    // Halted: a ride is held, its proof never signed, until the operator's next message.
+    expect(a.operatorChannel.halted()).toBe(true)
+    ride.mockClear()
+    await expect(a.ride({ to: 900000 })).rejects.toThrow(/Held: your operator sent STOP/)
+    expect(ride).not.toHaveBeenCalled()
+    w.inbox.seed(nip59.wrapEvent({ kind: 14, content: 'carry on', tags: [['p', me]], created_at: nowSeconds() }, opSk, me) as NostrEvent)
+    expect((await a.inbox()).data.messages).toHaveLength(1)
+    expect(a.operatorChannel.halted()).toBe(false)
+  }, 60_000)
+
+  it('an order a STOP covers is dropped unread, never counted, so no turn starts for it; a STOP that names none covers every order written before it', async () => {
+    const w = world()
+    const opSk = generateSecretKey()
+    const op = getPublicKey(opSk)
+    const agentSk = generateSecretKey()
+    const me = getPublicKey(agentSk)
+    w.general.seed(sign(opSk, 10050, [['relay', INBOX]]), sign(opSk, 3, [['p', me]]))
+    const a = await Agent.start({
+      stateDir: dirWithKey(agentSk), relays: [CANONICAL], operator: op, capCallSeconds: 30, capSessionSeconds: 120, maxSidestepHeight: 24, allowRespawn: false,
+      websocketImplementation: w.network.WebSocket, calibration: cal, relayMaxWaitMs: 1500, lookupRelays: [GENERAL], ordersPollMs: 0,
+    })
+    agents.push(a)
+    await a.identity({})
+    const dropped: string[] = []
+    a.onStop = (targets) => targets
+    a.onStoppedUnread = (ids) => { dropped.push(...ids) }
+    const now = nowSeconds()
+    const dm = (content: string, at: number, tags: string[][] = []) => nip59.wrapEvent({ kind: 14, content, tags: [['p', me], ...tags], created_at: at }, opSk, me) as NostrEvent
+    expect((await a.ordersWaiting()).data.orders).toBe(0)
+    // Named: the order and the STOP that names it, in one batch.
+    const named = dm('sweep the plaza', now - 20)
+    const namedId = (nip59.unwrapEvent(named, agentSk) as { id: string }).id
+    w.inbox.seed(named, dm('STOP', now - 10, [[...STOP_TAG], ['e', namedId]]))
+    expect((await a.ordersWaiting()).data.orders).toBe(0)
+    expect(dropped).toEqual([namedId])
+    // Unnamed: every order written before it is dropped; one written after it is an order.
+    w.inbox.seed(dm('build a tower', now - 8), dm('STOP', now - 5, [[...STOP_TAG]]), dm('now plant flowers', now - 1))
+    expect((await a.ordersWaiting()).data.orders).toBe(1)
+    expect(dropped).toHaveLength(2)
+    expect(((await a.inbox()).data.messages as Array<{ text: string }>).map((m) => m.text)).toEqual(['now plant flowers'])
+  }, 60_000)
+
+  it('a fresh state directory does not act on an old STOP, as it sends no 👀 on old history', async () => {
+    const w = world()
+    const opSk = generateSecretKey()
+    const op = getPublicKey(opSk)
+    const agentSk = generateSecretKey()
+    const me = getPublicKey(agentSk)
+    w.general.seed(sign(opSk, 10050, [['relay', INBOX]]), sign(opSk, 3, [['p', me]]))
+    const a = await Agent.start({
+      stateDir: dirWithKey(agentSk), relays: [CANONICAL], operator: op, capCallSeconds: 30, capSessionSeconds: 120, maxSidestepHeight: 24, allowRespawn: false,
+      websocketImplementation: w.network.WebSocket, calibration: cal, relayMaxWaitMs: 1500, lookupRelays: [GENERAL], ordersPollMs: 0,
+    })
+    agents.push(a)
+    await a.identity({})
+    const stops: string[][] = []
+    a.onStop = (targets) => { stops.push(targets); return targets }
+    w.inbox.seed(nip59.wrapEvent({ kind: 14, content: 'STOP', tags: [['p', me], [...STOP_TAG]], created_at: nowSeconds() - 5 * 24 * 60 * 60 }, opSk, me) as NostrEvent)
+    await a.ordersWaiting()
+    await a.inbox()
+    expect(stops).toEqual([])
+    expect(a.operatorChannel.halted()).toBe(false)
   }, 60_000)
 
   it('a DM order\'s status is the private kind 7 the 👀 is; a chat order\'s is a public kind 7 on the line; only the operator\'s addressed lines are orders, and STRATEGY and budget stay DM-only', async () => {
@@ -476,13 +646,17 @@ describe('through the agent, over the fake relays', () => {
     await a.chat.receive(await chatLine(a, opSk, 'nice spot'))
     await a.chat.receive(await chatLine(a, opSk, 'KEEP GOING, new STRATEGY: build a bench', [['p', me], ['agent', 'strategy'], ['agent', 'continue']]))
     await a.chat.receive(await chatLine(a, stranger, `nostr:${a.npub} spawn again`))
+    // Not before the operator is known to follow the agent: the rule a DM order needs.
+    expect(a.operatorChatOrders()).toEqual([])
+    await a.ordersWaiting()
     const orders = a.operatorChatOrders()
     expect(orders.map((o) => o.text)).toEqual(['KEEP GOING, new STRATEGY: build a bench'])
     await a.jobStatus({ id: orders[0].id, channel: 'chat' }, JOB_STATUS.seen)
-    const reaction = w.canonical.published.find((e) => e.kind === 7)!
-    expect(reaction.pubkey).toBe(me)
-    expect(reaction.content).toBe('👀')
-    expect(reaction.tags.filter((t) => t[0] !== 'client')).toEqual([['e', orders[0].id, '', op], ['p', op], ['k', '23333']])
+    // A chat order's status is private too: the NIP-17 kind 7 to the operator, e = the line, k 23333; nothing public.
+    await a.operatorChannel.reactionsSettled()
+    const chatStatus = toOperator(w.inbox, opSk, op).filter((r) => r.kind === 7).at(-1)!
+    expect(chatStatus).toMatchObject({ kind: 7, content: JOB_STATUS.seen, tags: [['e', orders[0].id], ['p', op], ['k', '23333']] })
+    expect(w.canonical.published.filter((e) => e.kind === 7)).toEqual([])
     // A chat line, whatever it carries, sets no STRATEGY and renews no budget.
     expect(a.operatorChannel.strategy()).toBeNull()
     expect(a.budget.state().renewals).toBe(0)
@@ -514,21 +688,26 @@ describe('through the agent, over the fake relays', () => {
     await s.agent.identity({ name: 'courier' })
     await s.agent.whereami()
     await s.agent.chat.receive(await chatLine(s.agent, opSk, 'build a bench here', [['p', me]]))
-    const line = s.agent.operatorChatOrders()[0].id
+    const line = s.agent.chat.lines.find((l) => !l.mine)!.id
     type Line = { mode: string; args?: string[]; tool?: string; text?: string }
     const lines = (): Line[] => (existsSync(turns) ? readFileSync(turns, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Line) : [])
     await until(() => lines().filter((l) => l.tool === 'work_done').length >= 2)
     const prompts = lines().filter((l) => l.args).map((l) => l.args![0])
     expect(prompts[0]).toContain('in local chat')
     expect(prompts[1]).toContain('Work turn from your waker')
-    const [replyDone, workDone] = lines().filter((l) => l.tool === 'work_done')
-    expect(replyDone.text).toContain('Not closed: this is your quick reply turn')
+    const [replyDone, workDone] = lines().filter((l) => l.tool === 'work_done') as Array<Line & { data?: Record<string, unknown> }>
+    expect(replyDone.text).toContain('REFUSED: Not closed: this is your quick reply turn')
+    expect(replyDone.data?.workDone).toBeUndefined()
     expect(workDone.text).toContain('1 order(s) closed')
     const workInbox = lines().filter((l) => l.tool === 'inbox')[1]
     expect(workInbox.text).toContain(`line ${line}: build a bench here`)
     await s.waker!.statusSettled()
-    await until(() => w.canonical.published.filter((e) => e.kind === 7).length >= 3)
-    expect(w.canonical.published.filter((e) => e.kind === 7 && e.tags.some((t) => t[0] === 'e' && t[1] === line)).map((e) => e.content)).toEqual(['👀', '⚙️', '✅'])
+    await s.agent.operatorChannel.reactionsSettled()
+    const statuses = () => toOperator(w.inbox, opSk, op).filter((r) => r.kind === 7 && r.tags.some((t) => t[0] === 'e' && t[1] === line))
+    await until(() => statuses().length >= 3)
+    expect(statuses().map((r) => r.content).sort()).toEqual([JOB_STATUS.seen, JOB_STATUS.working, JOB_STATUS.done].sort())
+    expect(statuses().every((r) => r.tags.some((t) => t[0] === 'k' && t[1] === '23333'))).toBe(true)
+    expect(w.canonical.published.filter((e) => e.kind === 7)).toEqual([])
     expect(s.waker!.openWork).toBeNull()
   }, 60_000)
 })

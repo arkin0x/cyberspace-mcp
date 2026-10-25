@@ -46,7 +46,7 @@ import { lookOf } from './hidden/itemModel.js'
 import { lookReport, type ChainFacts } from './look.js'
 import { attributed, bytesToHex, hexToBytes, nowSeconds, signEvent, tagValue, type EventTemplate, type NostrEvent } from './nostr/event.js'
 import { Outbox, type GuardVerdict } from './nostr/outbox.js'
-import { REACTION_KIND, unwrapMessage, wrapMessage, wrapReaction } from './nostr/dm.js'
+import { unwrapMessage, wrapMessage, wrapReaction } from './nostr/dm.js'
 import { mergeAnswers } from './nostr/relayOutcome.js'
 import { DEFAULT_RELAY, GENERAL_RELAYS, Relays, isDefaultRelay, normalizeRelay, type PublishResult } from './nostr/relays.js'
 import { OperatorWatch, type OperatorMove } from './follow.js'
@@ -239,6 +239,8 @@ export class Agent {
   private readonly objectsSeen = new Map<string, ShardModel>()
   /** Who carries out the operator's STOP on the jobs (the waker, under serve); the ride is paused here whatever it says. */
   onStop: ((targets: string[]) => string[]) | null = null
+  /** Who marks the unread orders a STOP dropped (the waker, for their ⏹️). */
+  onStoppedUnread: ((ids: string[]) => void) | null = null
 
   private constructor(readonly config: AgentConfig, dir: StateDir, sk: Uint8Array, release: () => void, calibration: Calibration) {
     this.dir = dir
@@ -301,9 +303,10 @@ export class Agent {
       wrap: (recipient, text) => wrapMessage({ senderSk: this.sk, recipient, text, now: nowSeconds() }),
       unwrap: (wrap) => unwrapMessage(wrap, this.sk),
       // The 👀 on each order, the first time the server sees it (arkinox, 2026-10-12).
-      wrapReaction: (recipient, eventId, content) => wrapReaction({ senderSk: this.sk, recipient, eventId, content, now: nowSeconds() }),
+      wrapReaction: (recipient, eventId, content, extraTags) => wrapReaction({ senderSk: this.sk, recipient, eventId, content, extraTags, now: nowSeconds() }),
       // The operator's STOP, carried out by the server, never by a model (arkinox, 2026-10-25).
       onStop: (targets) => { void this.carryOutStop(targets) },
+      onStoppedUnread: (ids) => { try { this.onStoppedUnread?.(ids) } catch { /* the jobs' bookkeeping never fails a read */ } },
       reactionRetryMs: config.reactionRetryMs,
       now: nowSeconds, log: this.log, maxWaitMs: config.relayMaxWaitMs,
       // The operator's CONTINUE (KEEP GOING), and only it, renews the session budget (arkinox, 2026-10-11).
@@ -999,6 +1002,10 @@ export class Agent {
 
   /** Ride the line to a block: the work runs in the background, and the ride call after the proof is ready signs the hyperjump (DECK-0001 5). */
   async ride(input: { to?: number; budget_seconds?: number; wait_seconds?: number; as_of?: number; pause?: boolean; cancel?: boolean; forget?: boolean; prover?: 'local' | 'hosaka' } = {}, signal?: AbortSignal): Promise<ToolResult> {
+    // After the operator's STOP a ride is held, its proof unsigned and its work kept, until their next message (2026-10-25).
+    if (this.operatorChannel.halted() && !input.pause && !input.cancel && !input.forget) {
+      throw new Refusal('Held: your operator sent STOP. The ride waits, nothing computed is lost, and nothing is signed until their next message.')
+    }
     const result = await this.transit.ride(input, signal)
     const where = result.data.where as { hex?: string } | undefined
     if (result.data.action !== 'hyperjump' || !where?.hex) return result
@@ -2452,28 +2459,20 @@ export class Agent {
    */
   operatorChatOrders(): Array<{ id: string; at: number; text: string }> {
     const op = this.chat.operator()
-    if (!op) return []
+    // The rule a DM order needs holds here too: the operator follows the agent (kind 3), by the newest check.
+    if (!op || !this.operatorChannel.followedNow()) return []
     return this.chat.lines.filter((l) => l.unread && !l.mine && l.addressed && l.from === op).map((l) => ({ id: l.id, at: l.at, text: l.text }))
   }
 
   /**
-   * A job's status on the order it came from (arkinox, 2026-10-25): on a DM
-   * order, the private kind 7 the 👀 is; on a chat order, a public kind 7
-   * on the chat line, as ONOSENDAI reacts to a hidden item: content the
-   * emoji, e the line's id (with the operator as its author), p the
-   * operator, k 23333. Words never go in it.
+   * A job's status on the order it came from (arkinox, 2026-10-25), always
+   * private: the NIP-17 kind 7 the 👀 is, to the operator, content the
+   * emoji, e the order's id (a DM's rumor id, or a chat line's id with
+   * ["k", "23333"] marking the channel). Never a public event: what the
+   * agent was told in the room stays in the room.
    */
-  async jobStatus(order: { id: string; channel: 'dm' | 'chat' }, emoji: string): Promise<void> {
-    if (order.channel === 'dm') return this.operatorChannel.status(order.id, emoji)
-    const op = this.chat.operator()
-    if (!op) return
-    const event = this.sign({ kind: REACTION_KIND, created_at: nowSeconds(), content: emoji, tags: [['e', order.id, '', op], ['p', op], ['k', String(CHAT_KIND)]] })
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      const sent = await this.relays.publish(event)
-      if (sent.ok) { this.log(`${emoji} on chat line ${order.id.slice(0, 8)}... accepted by ${sent.accepted.join(', ')}`); return }
-      this.log(`${emoji} on chat line ${order.id.slice(0, 8)}... not delivered (attempt ${attempt} of 2): ${sent.reason}`)
-      if (attempt === 1) await new Promise((r) => setTimeout(r, this.config.reactionRetryMs ?? 5000).unref())
-    }
+  jobStatus(order: { id: string; channel: 'dm' | 'chat' }, emoji: string): Promise<void> {
+    return this.operatorChannel.status(order.id, emoji, order.channel === 'chat' ? [['k', String(CHAT_KIND)]] : [])
   }
 
   /**

@@ -71,6 +71,12 @@ export interface WakeSettings {
    * as this when maxIdleTurns is not set.
    */
   maxIdleTurns: number
+  /**
+   * The most work turns one order gets, progress or not, before the waker
+   * gives it up with one DM (2026-10-25: a job is bounded). Counted per
+   * order, so a new order neither extends nor shortens an older one.
+   */
+  maxJobTurns: number
   /** Seconds between a work turn's end and the continue turn that resumes it. */
   resumeDelaySeconds: number
 }
@@ -86,6 +92,7 @@ export const WAKE_DEFAULTS = {
   maxContinuations: 12,
   continueDelaySeconds: 30,
   maxIdleTurns: 2,
+  maxJobTurns: 12,
   resumeDelaySeconds: 60,
 } as const
 
@@ -264,6 +271,7 @@ export function serveSettingsFrom(args: ServeArgs, file: ServeFileConfig): Serve
       cwd: typeof w.cwd === 'string' && w.cwd.trim() ? w.cwd : null,
       activityPaths: activityPathsOf(w.activityPaths),
       maxIdleTurns: countOf(w.maxIdleTurns) ?? countOf(w.maxResumes) ?? WAKE_DEFAULTS.maxIdleTurns,
+      maxJobTurns: posNum(w.maxJobTurns) !== undefined ? Math.max(1, Math.floor(posNum(w.maxJobTurns)!)) : WAKE_DEFAULTS.maxJobTurns,
       resumeDelaySeconds: posNum(w.resumeDelaySeconds) ?? WAKE_DEFAULTS.resumeDelaySeconds,
     },
   }
@@ -294,5 +302,5 @@ Every agent option of the stdio mode works here too (--operator, --cap-call-seco
 see cyberspace-mcp --help. config.json keys: "serve": { "port", "token" } and
 "wake": { "command", "replyCommand", "pollSeconds", "idleKillMinutes", "maxTurnMinutes",
 "chatStrangerMinutes", "roamRewakeMinutes", "ordersRewakeMinutes", "maxContinuations", "cwd",
-"activityPaths", "maxIdleTurns", "resumeDelaySeconds" }.
+"activityPaths", "maxIdleTurns", "maxJobTurns", "resumeDelaySeconds" }.
 Pause the waker with cyberspace-mcp wake pause (the file <state>/wake.pause); resume with wake resume.`

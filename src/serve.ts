@@ -67,7 +67,8 @@ export async function startServe(argv: string[], deps: ServeDeps): Promise<Servi
         onActivity: () => waker?.noteActivity(),
         ...(waker ? {
           wakeAgain: () => waker!.requestAgain(), workDone: () => waker!.markDone(), onInbox: (r) => waker!.onInbox(r),
-          onTool: (name, ok, readOnly) => waker!.noteTool(name, ok, readOnly),
+          onTool: (name, ok, args, data) => waker!.noteTool(name, ok, args, data),
+          gate: (name, readOnly) => waker!.gate(name, readOnly),
         } : {}),
       }),
     })
@@ -86,6 +87,9 @@ export async function startServe(argv: string[], deps: ServeDeps): Promise<Servi
       seal: (text) => agent.sealToSelf(text),
       open: (sealed) => agent.openFromSelf(sealed),
       chatOrders: () => agent.operatorChatOrders(),
+      // A STOP halts everything until the operator's next message (dms.json keeps it across restarts).
+      halted: () => agent.operatorChannel.halted(),
+      resumeFromStop: () => agent.operatorChannel.clearHalt(),
       env: {
         CYBERSPACE_MCP_URL: http.url,
         CYBERSPACE_MCP_STATE: stateDir,
@@ -99,9 +103,11 @@ export async function startServe(argv: string[], deps: ServeDeps): Promise<Servi
     const w = waker
     // The operator's STOP is the server's to carry out: the waker stops the turn and the jobs; the agent pauses the ride.
     agent.onStop = (targets) => w.stopJobs(targets)
+    agent.onStoppedUnread = (ids) => w.markStopped(ids)
     // An operator's line that mentions the agent is an order the moment it is heard, whoever reads it first.
+    // Through operatorChatOrders, so the same rules hold as at every poll (the operator follows the agent).
     agent.chat.on('line', (l: ChatLine) => {
-      if (!l.mine && l.addressed && l.from === agent.chat.operator()) w.takeChatOrders([{ id: l.id, at: l.at, text: l.text }])
+      if (!l.mine && l.addressed && l.from === agent.chat.operator()) w.takeChatOrders(agent.operatorChatOrders())
     })
     w.start()
   }
