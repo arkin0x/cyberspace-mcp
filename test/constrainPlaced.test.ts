@@ -19,8 +19,9 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { Agent } from '../src/agent.js'
-import { bagTemplate, HIDDEN_KIND, SHARD_KIND, unbag, type BagEntry } from '../src/hidden/bags.js'
-import { decryptForRegion, regionKeyAt } from '../src/hidden/crypto.js'
+import { bagTemplate, HIDDEN_KIND, SHARD_KIND, referenceTo, unbag, type BagEntry } from '../src/hidden/bags.js'
+import { ALGO, decryptForRegion, encryptForRegion, regionKeyAt } from '../src/hidden/crypto.js'
+import { MAX_CONSTRAIN_PER_CALL } from '../src/placed.js'
 import { bytesToHex, signEvent, type NostrEvent } from '../src/nostr/event.js'
 import { openEntries } from '../src/placed.js'
 import { publicObjectTemplate } from '../src/publicObject.js'
@@ -99,9 +100,9 @@ function bagOn(relay: FakeRelay, pubkey: string, lookupId: string): NostrEvent |
   return relay.all().find((e) => e.kind === HIDDEN_KIND && e.pubkey === pubkey && e.tags.some((t) => t[0] === 'd' && t[1] === lookupId))
 }
 
-/** How many versions of one bag a relay was sent. */
+/** How many versions of one bag a relay was sent (a version sent straight and again by the outbox is one). */
 function bagWrites(relay: FakeRelay, pubkey: string, lookupId: string): number {
-  return relay.published.filter((e) => e.kind === HIDDEN_KIND && e.pubkey === pubkey && e.tags.some((t) => t[0] === 'd' && t[1] === lookupId)).length
+  return new Set(relay.published.filter((e) => e.kind === HIDDEN_KIND && e.pubkey === pubkey && e.tags.some((t) => t[0] === 'd' && t[1] === lookupId)).map((e) => e.id)).size
 }
 
 async function entriesOf(bag: NostrEvent, regionKey: Uint8Array): Promise<BagEntry[]> {
@@ -131,6 +132,31 @@ async function seedOldShard(s: World, name = 'old wall'): Promise<{ old: NostrEv
   s.canonical.seed(bag)
   return { old, unknown, bag }
 }
+
+
+/** A bag a client from before the default left in the h`height` cube at BASE: what the agent hid there first, then `extra`. */
+async function seedBag(s: World, height: number, extra: (now: number, k: { key: Uint8Array; lookupId: string }) => Promise<BagEntry[]>): Promise<NostrEvent> {
+  await s.call('hide', { contents: { message: 'first here' }, ...at(0n, height) })
+  const k = key(BASE, height)
+  const current = bagOn(s.mine, s.a.pubkey, k.lookupId)!
+  const carried = await entriesOf(current, k.key)
+  const bag = signEvent(await bagTemplate([...carried, ...(await extra(current.created_at, k))], k.key, k.lookupId, height, current.created_at + 5, HIDDEN_KIND), s.sk)
+  s.mine.seed(bag)
+  s.canonical.seed(bag)
+  return bag
+}
+
+/** A sealed kind 33331 as one written before the default: no constrain in what is sealed. */
+async function oldSealed(s: World, payload: Record<string, unknown>, regionKey: Uint8Array, createdAt: number): Promise<NostrEvent> {
+  const ct = await encryptForRegion(regionKey, JSON.stringify(payload))
+  const object = signEvent({ kind: 33331, created_at: createdAt, content: 'hidden', tags: [['d', 'e'.repeat(32)], ['alt', 'hidden'], ['encrypted', ALGO, ct, 'cyberspace:region']] }, s.sk)
+  s.mine.seed(object)
+  s.canonical.seed(object)
+  return object
+}
+
+const sealedPayload = async (relay: FakeRelay, regionKey: Uint8Array): Promise<Record<string, unknown>> =>
+  JSON.parse((await decryptForRegion(regionKey, relay.all().find((e) => e.kind === 33331)!.tags.find((t) => t[0] === 'encrypted')![2]))!) as Record<string, unknown>
 
 describe('place and publish_object write "opaque" when the payload chose none (ONOSENDAI #476)', () => {
   let s: World
@@ -381,9 +407,133 @@ describe('move_placed writes the WALK default into a shard it writes again (DECK
     const moved = (await entriesOf(bagOn(s.canonical, s.a.pubkey, k.lookupId)!, k.key)).find((e) => (e as NostrEvent).kind === SHARD_KIND) as NostrEvent
     expect(moved.tags.find((t) => t[0] === 'd')).toEqual(['d', old.id])
     expect(payloadOf(moved)).toEqual({ ...named('old wall'), constrain: 'opaque' })
+    expect(r.text).toContain('WALK: constrain "opaque"')
+    expect(r.text).toContain('the default, written since it had none')
     await s.call('constrain_placed', { target: 'old wall', constrain: 'off' })
     await s.call('move_placed', { target: 'old wall', by: { dz: 1 } })
     const again = (await entriesOf(bagOn(s.canonical, s.a.pubkey, k.lookupId)!, k.key)).find((e) => (e as NostrEvent).kind === SHARD_KIND) as NostrEvent
     expect(payloadOf(again).constrain).toBe('off')
+  }, 60_000)
+})
+
+describe('constrain_placed when a relay refuses (review of #44)', () => {
+  let s: World
+  beforeEach(async () => { s = await setup() })
+
+  it('the canonical relay refusing the inline rewrite: not changed, its words verbatim, nothing recorded as set, the lesser relay put back, and a retry does it', async () => {
+    await s.call('place', { object: named('gate', { constrain: 'off' }), ...at(0n, 8) })
+    const k = key(BASE, 8)
+    const before = bagOn(s.canonical, s.a.pubkey, k.lookupId)!
+    s.canonical.policy.refuse = (ev) => (ev.kind === HIDDEN_KIND ? 'blocked: bags are closed today' : null)
+    const r = await s.call('constrain_placed', { target: 'gate', constrain: 'all' })
+    expect(r.isError).toBe(true)
+    expect(r.text).toContain('Changed nothing')
+    expect(r.text).toContain('blocked: bags are closed today')
+    expect(r.text).toContain('keeps its old setting')
+    expect(r.text).toContain('went out again over it')
+    expect(bagOn(s.canonical, s.a.pubkey, k.lookupId)!.id).toBe(before.id)
+    // The lesser relay took the rewrite, then the bag as it was over it: every relay says "off".
+    const onMine = (await unbag(bagOn(s.mine, s.a.pubkey, k.lookupId)!, k.key, undefined, undefined, 8)).find((h) => h.shard?.name === 'gate')!
+    expect(payloadOf(onMine.inner).constrain).toBe('off')
+    expect(rowsOf(await s.call('placed')).find((x) => x.label === 'gate')!.walk?.constrain).toBe('off')
+    s.canonical.policy.refuse = () => null
+    const again = await s.call('constrain_placed', { target: 'gate', constrain: 'all' })
+    expect(again.isError).toBe(false)
+    expect((again.data.changed as Row[]).map((x) => x.label)).toEqual(['gate'])
+    const onCanonical = (await unbag(bagOn(s.canonical, s.a.pubkey, k.lookupId)!, k.key, undefined, undefined, 8)).find((h) => h.shard?.name === 'gate')!
+    expect(payloadOf(onCanonical.inner).constrain).toBe('all')
+  }, 60_000)
+
+  it('in bulk across bags, some taken and some refused: the answer says exactly which shards changed', async () => {
+    await s.call('place', { object: named('square wall', { constrain: 'off' }), ...at(0n, 8) })
+    await s.call('place', { object: named('square floor', { constrain: 'off' }), ...at(1n, 8) })
+    await s.call('place', { object: named('square arch', { constrain: 'off' }), ...at(0n, 3) })
+    await s.call('place', { object: named('square gate', { constrain: 'off' }), ...at(1n, 3) })
+    const k3 = key(BASE, 3)
+    s.canonical.policy.refuse = (ev) => (ev.kind === HIDDEN_KIND && ev.tags.some((t) => t[0] === 'd' && t[1] === k3.lookupId) ? 'blocked: not this cube' : null)
+    const r = await s.call('constrain_placed', { match: 'square', constrain: 'opaque' })
+    expect(r.isError).toBe(false)
+    expect((r.data.changed as Row[]).map((x) => x.label).sort()).toEqual(['square floor', 'square wall'])
+    const failed = r.data.failed as Array<Row & { why: string }>
+    expect(failed.map((x) => x.label).sort()).toEqual(['square arch', 'square gate'])
+    for (const f of failed) expect(f.why).toContain('blocked: not this cube')
+    expect(r.text).toContain('Not changed: shard "square arch"')
+    const walk = async (): Promise<Record<string, string | null | undefined>> => Object.fromEntries(rowsOf(await s.call('placed')).map((x) => [x.label, x.walk?.constrain]))
+    expect(await walk()).toEqual({ 'square wall': 'opaque', 'square floor': 'opaque', 'square arch': 'off', 'square gate': 'off' })
+    s.canonical.policy.refuse = () => null
+    const again = await s.call('constrain_placed', { match: 'square', constrain: 'opaque' })
+    expect((again.data.changed as Row[]).map((x) => x.label).sort()).toEqual(['square arch', 'square gate'])
+    expect((again.data.already as Row[]).map((x) => x.label).sort()).toEqual(['square floor', 'square wall'])
+  }, 60_000)
+})
+
+describe('constrain_placed, more than one call\'s worth (review of #44, S1)', () => {
+  it('the cap counts only shards that still need it, so the same call made again does the rest', async () => {
+    const s = await setup()
+    const n = MAX_CONSTRAIN_PER_CALL + 5
+    await seedBag(s, 8, async (now) => Array.from({ length: n }, (_, i) => signEvent({ kind: SHARD_KIND, created_at: now, content: JSON.stringify(named(`brick ${i}`, { constrain: 'off' })), tags: [['C', positionHex({ x: BASE, y: BASE, z: BASE + 1n }, 0)], ['-']] }, s.sk)))
+    const first = await s.call('constrain_placed', { all: true, constrain: 'opaque' })
+    expect(first.isError).toBe(false)
+    expect((first.data.changed as Row[]).length).toBe(MAX_CONSTRAIN_PER_CALL)
+    expect(first.data.remaining).toBe(5)
+    expect(first.text).toContain('Make the same call again')
+    const second = await s.call('constrain_placed', { all: true, constrain: 'opaque' })
+    expect((second.data.changed as Row[]).length).toBe(5)
+    expect(second.data.remaining).toBe(0)
+    expect((second.data.already as Row[]).length).toBe(MAX_CONSTRAIN_PER_CALL)
+    const third = await s.call('constrain_placed', { all: true, constrain: 'opaque' })
+    expect(third.text).toContain('Nothing to change')
+    expect(rowsOf(await s.call('placed')).filter((x) => x.type === 'shard').every((x) => x.walk?.constrain === 'opaque')).toBe(true)
+  }, 120_000)
+})
+
+describe('constrain_placed and move_placed, the smaller points of the review of #44', () => {
+  let s: World
+  beforeEach(async () => { s = await setup() })
+
+  it('one sealed object named by two placements is sealed again once and reported once (N1)', async () => {
+    let object!: NostrEvent
+    await seedBag(s, 3, async (now, k) => {
+      object = await oldSealed(s, bigObject('twin'), k.key, now)
+      return [referenceTo(object, { x: BASE, y: BASE, z: BASE + 1n }, 0, CANONICAL), referenceTo(object, { x: BASE, y: BASE, z: BASE + 2n }, 0, CANONICAL)]
+    })
+    const r = await s.call('constrain_placed', { all: true, constrain: 'all' })
+    expect(r.isError).toBe(false)
+    expect((r.data.changed as Row[]).map((x) => x.label)).toEqual(['twin'])
+    expect(s.canonical.published.filter((e) => e.kind === 33331)).toHaveLength(1)
+    expect((await sealedPayload(s.canonical, key(BASE, 3).key)).constrain).toBe('all')
+  }, 60_000)
+
+  it('an opacity alone on a shard with no setting says it now carries "opaque" too (N2)', async () => {
+    await seedBag(s, 8, async (now) => [signEvent({ kind: SHARD_KIND, created_at: now, content: JSON.stringify(named('pane')), tags: [['C', positionHex({ x: BASE, y: BASE, z: BASE + 1n }, 0)], ['-']] }, s.sk)])
+    const r = await s.call('constrain_placed', { target: 'pane', opacity: 50 })
+    expect(r.isError).toBe(false)
+    expect(r.text).toContain('now carry constrain "opaque"')
+    expect(r.text).toContain('see-through')
+  }, 60_000)
+
+  it('move_placed says the setting it writes, and reseals a sealed shard moved inside its bag when it had none (L1, L2)', async () => {
+    let object!: NostrEvent
+    await seedBag(s, 3, async (now, k) => {
+      object = await oldSealed(s, bigObject('old big'), k.key, now)
+      return [referenceTo(object, { x: BASE, y: BASE, z: BASE + 1n }, 0, CANONICAL)]
+    })
+    const r = await s.call('move_placed', { target: 'old big', by: { dz: 1 } })
+    expect(r.isError).toBe(false)
+    expect(r.data.sameBag).toBe(true)
+    expect(r.text).toContain('WALK: constrain "opaque"')
+    expect(r.text).toContain('sealed again under the same d')
+    const now = s.canonical.all().find((e) => e.kind === 33331)!
+    expect(now.id).not.toBe(object.id)
+    expect(now.tags.find((t) => t[0] === 'd')![1]).toBe('e'.repeat(32))
+    expect((await sealedPayload(s.canonical, key(BASE, 3).key)).constrain).toBe('opaque')
+    // Once it has a word, a move inside its bag leaves the object as it is.
+    const again = await s.call('move_placed', { target: 'old big', by: { dz: 1 } })
+    expect(again.isError).toBe(false)
+    expect(s.canonical.all().find((e) => e.kind === 33331)!.id).toBe(now.id)
+    // A chest's objects are said too.
+    const chest = await s.call('seal_chest', { name: 'Crate', lock: s.a.pubkey, contents: [{ object: named('little statue') }], height: 5, coordinate: { ...P, z: (BASE + 1n).toString() } })
+    expect(chest.isError).toBe(false)
+    expect(chest.text).toContain('WALK for the object(s) sealed in it: "little statue" constrain "opaque"')
   }, 60_000)
 })

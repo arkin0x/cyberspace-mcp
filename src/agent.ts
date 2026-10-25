@@ -1733,6 +1733,8 @@ export class Agent {
       const lock = this.resolveLock(String(contents.chest.lock ?? ''))
       const inner: Rumor[] = []
       const forged: Array<{ key: KeyItem; event: NostrEvent }> = []
+      // Each object sealed in it carries its WALK setting; said back, as for a placed one (DECK-0003 1.12; review of #44, L1).
+      const objectWalks: string[] = []
       for (const e of contents.chest.entries ?? []) {
         if ('message' in e) {
           const text = String(e.message)
@@ -1741,7 +1743,9 @@ export class Agent {
           // A rumor in a chest as in a bag: the chest's signature vouches for it.
           inner.push(this.rumor(messageInnerTemplate(text, at.position, at.plane, now)))
         } else if ('object' in e) {
-          inner.push(this.sign(shardInnerTemplate(this.shardFrom(e.object), at.position, at.plane, now)))
+          const shard = this.shardFrom(e.object)
+          inner.push(this.sign(shardInnerTemplate(shard, at.position, at.plane, now)))
+          objectWalks.push(`"${shard.name}" ${walkWords(withAuthoredConstrain(shard))}${chosenConstrainOf(shard) ? '' : ' (the default)'}`)
         } else if ('key' in e) {
           const keyName = String(e.key?.name ?? '').trim().slice(0, MAX_ITEM_NAME)
           if (!keyName) throw new Refusal('An item forged into a chest needs a name.')
@@ -1772,6 +1776,7 @@ export class Agent {
         entries: [event],
         what: `a chest "${name}" (id ${handle(event.id)}) sealed to ${lock.words}, holding ${counts.join(', ')}${forged.length ? `; you hold the new item(s) ${forged.map((f) => `"${f.key.name}" (public key ${f.key.itemPubkey})`).join(', ')}` : ''}`,
         chest: { id: event.id, name, lock: lock.pubkey, requires },
+        ...(objectWalks.length ? { walk: ` WALK for the object(s) sealed in it: ${objectWalks.join('; ')}.` } : {}),
       }
     }
     throw new Refusal('contents must be one of: { message }, { object }, { key: { name } }, { chest: { name, lock, entries } }.')
@@ -1825,7 +1830,7 @@ export class Agent {
       accepted.length ? `Accepted by ${accepted.join(', ')}.` : `No relay accepted the bag${result.ok ? '' : `: ${result.reason}`}. It waits in the outbox.`,
       Object.keys(refused).length ? `Refused by ${Object.entries(refused).map(([u, r]) => `${u}: ${r}`).join('; ')} (verbatim; a refusal is not retried).` : '',
       hint ? `Hinted at heights ${hint.join(',')}${riddle ? `, riddle "${riddle}"` : ''}.` : 'No hint: only someone who derives this cube\'s key will find it.',
-      walk ? `${walk.trim()} constrain_placed changes it where it stands.` : '',
+      walk ? `${walk.trim()}${'object' in input.contents ? ' constrain_placed changes it where it stands.' : ''}` : '',
       `Its id is ${handle(objectEvent ? objectEvent.id : !isReference(entries[0]) ? (entries[0] as NostrEvent).id : objectHandle(`${key.lookupId}/${entryKey(entries[0])}`))}: placed lists it, remove_placed takes it down, move_placed moves it.`,
     ].filter(Boolean).join('\n')
     return { text, data: { bagId: bag.id, lookupId: key.lookupId, cube: { height, base: key.base, plane: at.plane }, entries: merged.length, carried: carried.length, keyMs: Math.round(keyMs), accepted, refused, hint, riddle, objectEventId: objectEvent?.id ?? null, ...(item ? { item } : {}), ...(chest ? { chest } : {}) } }
