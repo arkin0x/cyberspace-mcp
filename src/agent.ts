@@ -34,7 +34,7 @@ import { AVATAR_KIND, MAX_AVATAR_BYTES, avatarPrice, avatarSeconds, avatarTempla
 import { avatarThreads, mineAvatar } from './avatarMine.js'
 import { Chat, type ChatLine } from './chat.js'
 import {
-  HIDDEN_KIND, MAX_ABOUT, MAX_ITEM_NAME, carriedTags, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, REFERENCE_THRESHOLD_BYTES, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
+  CHAT_KIND, HIDDEN_KIND, MAX_ABOUT, MAX_ITEM_NAME, carriedTags, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, REFERENCE_THRESHOLD_BYTES, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
   audioLabel, itemLineage, keyInnerTemplate, messageInnerTemplate, messagePreview, objectTemplate, referenceCount, referenceTo, rumorOf, shardInnerTemplate, unbag, wantsReference, entryKey,
   type BagEntry, type Hidden, type HiddenType, type KeyItem, type Reference, type Rumor,
 } from './hidden/bags.js'
@@ -46,7 +46,7 @@ import { lookOf } from './hidden/itemModel.js'
 import { lookReport, type ChainFacts } from './look.js'
 import { attributed, bytesToHex, hexToBytes, nowSeconds, signEvent, tagValue, type EventTemplate, type NostrEvent } from './nostr/event.js'
 import { Outbox, type GuardVerdict } from './nostr/outbox.js'
-import { unwrapMessage, wrapMessage, wrapReaction } from './nostr/dm.js'
+import { REACTION_KIND, unwrapMessage, wrapMessage, wrapReaction } from './nostr/dm.js'
 import { mergeAnswers } from './nostr/relayOutcome.js'
 import { DEFAULT_RELAY, GENERAL_RELAYS, Relays, isDefaultRelay, normalizeRelay, type PublishResult } from './nostr/relays.js'
 import { OperatorWatch, type OperatorMove } from './follow.js'
@@ -237,6 +237,8 @@ export class Agent {
    * contents (arkinox, 2026-10-11).
    */
   private readonly objectsSeen = new Map<string, ShardModel>()
+  /** Who carries out the operator's STOP on the jobs (the waker, under serve); the ride is paused here whatever it says. */
+  onStop: ((targets: string[]) => string[]) | null = null
 
   private constructor(readonly config: AgentConfig, dir: StateDir, sk: Uint8Array, release: () => void, calibration: Calibration) {
     this.dir = dir
@@ -299,7 +301,9 @@ export class Agent {
       wrap: (recipient, text) => wrapMessage({ senderSk: this.sk, recipient, text, now: nowSeconds() }),
       unwrap: (wrap) => unwrapMessage(wrap, this.sk),
       // The 👀 on each order, the first time the server sees it (arkinox, 2026-10-12).
-      wrapReaction: (recipient, eventId) => wrapReaction({ senderSk: this.sk, recipient, eventId, now: nowSeconds() }),
+      wrapReaction: (recipient, eventId, content) => wrapReaction({ senderSk: this.sk, recipient, eventId, content, now: nowSeconds() }),
+      // The operator's STOP, carried out by the server, never by a model (arkinox, 2026-10-25).
+      onStop: (targets) => { void this.carryOutStop(targets) },
       reactionRetryMs: config.reactionRetryMs,
       now: nowSeconds, log: this.log, maxWaitMs: config.relayMaxWaitMs,
       // The operator's CONTINUE (KEEP GOING), and only it, renews the session budget (arkinox, 2026-10-11).
@@ -2401,6 +2405,75 @@ export class Agent {
   /** Where the agent stands right now, without asking the relays. */
   here(): Place {
     return this.keeper.place()
+  }
+
+  /**
+   * The operator's STOP (arkinox, 2026-10-25: HOLD becomes a real control):
+   * the jobs are stopped first (the waker kills the turn under way and
+   * closes them, with ⏹️), then a ride computing in the background is
+   * paused, every finished leaf kept. Never throws; logs ids, never words.
+   */
+  async carryOutStop(targets: string[]): Promise<void> {
+    try {
+      const stopped = this.onStop?.(targets) ?? []
+      this.log(`STOP: ${stopped.length} job(s) stopped`)
+    } catch (err) {
+      this.log(`STOP: the jobs could not be stopped: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    if (this.transit.rideState().state !== 'computing') return
+    try {
+      await this.transit.ride({ pause: true })
+      this.log('STOP: the ride is paused')
+    } catch (err) {
+      this.log(`STOP: the ride could not be paused: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  /**
+   * Text sealed with NIP-44 v2 from the agent's key to itself (the
+   * conversation key of its own secret and public key, as the self copy of
+   * a NIP-17 seal is), for what the server keeps on disk about its jobs
+   * (arkinox, 2026-10-25). Only this key opens it.
+   */
+  sealToSelf(text: string): string {
+    return nip44.encrypt(text, nip44.utils.getConversationKey(this.sk, this.pubkey))
+  }
+
+  /** Open what sealToSelf sealed. Throws when it is not this key's. */
+  openFromSelf(payload: string): string {
+    return nip44.decrypt(payload, nip44.utils.getConversationKey(this.sk, this.pubkey))
+  }
+
+  /**
+   * The operator's unread lines in local chat that address the agent: its
+   * orders from the room (arkinox, 2026-10-25), by the signature's word
+   * (fromOperator), never the text's. Words are untrusted chat text, read
+   * as orders only because the operator's key said them.
+   */
+  operatorChatOrders(): Array<{ id: string; at: number; text: string }> {
+    const op = this.chat.operator()
+    if (!op) return []
+    return this.chat.lines.filter((l) => l.unread && !l.mine && l.addressed && l.from === op).map((l) => ({ id: l.id, at: l.at, text: l.text }))
+  }
+
+  /**
+   * A job's status on the order it came from (arkinox, 2026-10-25): on a DM
+   * order, the private kind 7 the 👀 is; on a chat order, a public kind 7
+   * on the chat line, as ONOSENDAI reacts to a hidden item: content the
+   * emoji, e the line's id (with the operator as its author), p the
+   * operator, k 23333. Words never go in it.
+   */
+  async jobStatus(order: { id: string; channel: 'dm' | 'chat' }, emoji: string): Promise<void> {
+    if (order.channel === 'dm') return this.operatorChannel.status(order.id, emoji)
+    const op = this.chat.operator()
+    if (!op) return
+    const event = this.sign({ kind: REACTION_KIND, created_at: nowSeconds(), content: emoji, tags: [['e', order.id, '', op], ['p', op], ['k', String(CHAT_KIND)]] })
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const sent = await this.relays.publish(event)
+      if (sent.ok) { this.log(`${emoji} on chat line ${order.id.slice(0, 8)}... accepted by ${sent.accepted.join(', ')}`); return }
+      this.log(`${emoji} on chat line ${order.id.slice(0, 8)}... not delivered (attempt ${attempt} of 2): ${sent.reason}`)
+      if (attempt === 1) await new Promise((r) => setTimeout(r, this.config.reactionRetryMs ?? 5000).unref())
+    }
   }
 
   /**

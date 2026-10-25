@@ -7,6 +7,7 @@
 // model turn started whenever there is something to answer.
 
 import { Agent, type AgentConfig } from './agent.js'
+import type { ChatLine } from './chat.js'
 import { parseArgs, readFileConfig, readWalletFile, settingsFrom } from './config.js'
 import { ensureToken, readToken, startHttp, type HttpHandle } from './http.js'
 import { createServer } from './server.js'
@@ -64,7 +65,10 @@ export async function startServe(argv: string[], deps: ServeDeps): Promise<Servi
       log,
       createServer: () => createServer(agent, log, {
         onActivity: () => waker?.noteActivity(),
-        ...(waker ? { wakeAgain: () => waker!.requestAgain(), workDone: () => waker!.markDone(), onInbox: (r) => waker!.onInbox(r) } : {}),
+        ...(waker ? {
+          wakeAgain: () => waker!.requestAgain(), workDone: () => waker!.markDone(), onInbox: (r) => waker!.onInbox(r),
+          onTool: (name, ok, readOnly) => waker!.noteTool(name, ok, readOnly),
+        } : {}),
       }),
     })
   } catch (err) {
@@ -77,6 +81,11 @@ export async function startServe(argv: string[], deps: ServeDeps): Promise<Servi
       stateDir,
       log: (line) => log(line),
       messageOperator: (text) => agent.messageOperator({ text }),
+      // Every instruction from the operator is a job (arkinox, 2026-10-25): its status on its order, its words sealed to the agent's own key, and the operator's chat lines as orders.
+      react: (order, emoji) => agent.jobStatus(order, emoji),
+      seal: (text) => agent.sealToSelf(text),
+      open: (sealed) => agent.openFromSelf(sealed),
+      chatOrders: () => agent.operatorChatOrders(),
       env: {
         CYBERSPACE_MCP_URL: http.url,
         CYBERSPACE_MCP_STATE: stateDir,
@@ -86,7 +95,16 @@ export async function startServe(argv: string[], deps: ServeDeps): Promise<Servi
     })
   }
   log(`agent ${agent.npub} serving MCP at ${http.url}${token ? ' (bearer token required)' : ''}; state in ${stateDir}`)
-  if (waker) waker.start()
+  if (waker) {
+    const w = waker
+    // The operator's STOP is the server's to carry out: the waker stops the turn and the jobs; the agent pauses the ride.
+    agent.onStop = (targets) => w.stopJobs(targets)
+    // An operator's line that mentions the agent is an order the moment it is heard, whoever reads it first.
+    agent.chat.on('line', (l: ChatLine) => {
+      if (!l.mine && l.addressed && l.from === agent.chat.operator()) w.takeChatOrders([{ id: l.id, at: l.at, text: l.text }])
+    })
+    w.start()
+  }
   else log('no waker: set wake.command in config.json (or --wake-command) so the agent answers without you; see QUICKSTART.md')
 
   let stopping: Promise<void> | null = null

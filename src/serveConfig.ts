@@ -63,8 +63,14 @@ export interface WakeSettings {
    * state.db-wal, which Hermes writes at every step. Default none.
    */
   activityPaths: string[]
-  /** Continue turns after a work turn ended before its orders were marked done (work_done); then one DM to the operator. 0 turns resuming off. */
-  maxResumes: number
+  /**
+   * Work turns in a row that make no progress before the waker gives up on
+   * open work (arkinox, 2026-10-25: a job stays open until done), with one DM
+   * to the operator. Progress is a tool call that changes something, or a
+   * wake_again. 0 turns resuming off. config.json's older maxResumes is read
+   * as this when maxIdleTurns is not set.
+   */
+  maxIdleTurns: number
   /** Seconds between a work turn's end and the continue turn that resumes it. */
   resumeDelaySeconds: number
 }
@@ -79,7 +85,7 @@ export const WAKE_DEFAULTS = {
   followSettleSeconds: 12,
   maxContinuations: 12,
   continueDelaySeconds: 30,
-  maxResumes: 3,
+  maxIdleTurns: 2,
   resumeDelaySeconds: 60,
 } as const
 
@@ -257,7 +263,7 @@ export function serveSettingsFrom(args: ServeArgs, file: ServeFileConfig): Serve
       continueDelaySeconds: posNum(w.continueDelaySeconds) ?? WAKE_DEFAULTS.continueDelaySeconds,
       cwd: typeof w.cwd === 'string' && w.cwd.trim() ? w.cwd : null,
       activityPaths: activityPathsOf(w.activityPaths),
-      maxResumes: countOf(w.maxResumes) ?? WAKE_DEFAULTS.maxResumes,
+      maxIdleTurns: countOf(w.maxIdleTurns) ?? countOf(w.maxResumes) ?? WAKE_DEFAULTS.maxIdleTurns,
       resumeDelaySeconds: posNum(w.resumeDelaySeconds) ?? WAKE_DEFAULTS.resumeDelaySeconds,
     },
   }
@@ -288,5 +294,5 @@ Every agent option of the stdio mode works here too (--operator, --cap-call-seco
 see cyberspace-mcp --help. config.json keys: "serve": { "port", "token" } and
 "wake": { "command", "replyCommand", "pollSeconds", "idleKillMinutes", "maxTurnMinutes",
 "chatStrangerMinutes", "roamRewakeMinutes", "ordersRewakeMinutes", "maxContinuations", "cwd",
-"activityPaths", "maxResumes", "resumeDelaySeconds" }.
+"activityPaths", "maxIdleTurns", "resumeDelaySeconds" }.
 Pause the waker with cyberspace-mcp wake pause (the file <state>/wake.pause); resume with wake resume.`
