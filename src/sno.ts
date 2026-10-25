@@ -9,6 +9,12 @@
 // in `extra`. A valid one is kept as given; a malformed one is left out and
 // named in `repaired`, and for `constrain` the default ("opaque") is written
 // in its place when the object is published (walkConstrain.ts).
+//
+// `objects` (DECK-0003 1.10: the payloads of placed objects carried inside the
+// object that places them), which sno-core 0.1.20 knows, is left out and named
+// in `ignored`, as every unknown field was before: this tool writes no table
+// until the spec section is merged (arkinox/cyberspace#81), and then only with
+// keys under the agent's own pubkey and never into a public event.
 
 import { blankName, fromPayload, readOpacity, toPayload, type ShardModel, type ShardPayload } from 'sno-core/shards'
 import { CONSTRAIN_FIELD, chosenConstrain } from './walkConstrain.js'
@@ -139,10 +145,12 @@ export function validateSnoPayload(raw: unknown): Validation {
   if (errors.length > 0) return { ok: false, errors }
   const read = fromPayload(raw, 'validate')
   if (!read) return { ok: false, errors: ['sno-core refuses this payload for a reason the checks above do not name; compare it with DECK-0003 section 1.'] }
-  const { extra, ...bare } = read
+  const { extra, objects: _held, ...bare } = read
   const carried = extra ?? {}
   const chosen = chosenConstrain(carried[CONSTRAIN_FIELD])
   const ignored = Object.keys(carried).filter((k) => k !== CONSTRAIN_FIELD)
+  // Not written yet (see the header): named back to the agent, as before 0.1.20.
+  if (p.objects !== undefined) ignored.push('objects')
   const repaired: string[] = []
   if (p.opacity !== undefined && p.opacity !== 100 && readOpacity(p.opacity) === undefined) repaired.push('opacity')
   if (CONSTRAIN_FIELD in carried && !chosen) repaired.push(CONSTRAIN_FIELD)
