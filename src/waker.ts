@@ -34,7 +34,8 @@
 // its turns make progress (a call to a tool on the PROGRESS list that had a
 // real effect; a wake_again alone is not progress), and given up, with one
 // DM to the operator, after maxIdleTurns work turns in a row without
-// progress, after maxJobTurns work turns on it, or a day after it came, each
+// progress, after maxJobTurns work turns on it, or once it has been open a
+// day (time waiting on a ride is not counted), each
 // counted per order, so a new order never extends an old one. A ride that
 // waits keeps the job waiting, and its day does not run out meanwhile.
 //
@@ -94,6 +95,15 @@ const STATUS_MAX = 2000
 export const PROGRESS_TOOLS = new Set(['hop', 'board', 'ride', 'hide', 'place', 'publish_object', 'move_placed', 'remove_placed', 'seal_chest', 'forge_item', 'take', 'open_chest', 'comment', 'set_avatar', 'visit', 'constrain_placed'])
 /** Open work older than this is closed without a turn: nobody is waiting on a day-old order any more. */
 const WORK_STALE_MS = 24 * 60 * 60_000
+/**
+ * The only tools a turn the operator's STOP killed may still call while it
+ * dies: each answers from memory, publishing nothing and changing nothing
+ * the agent keeps. Not orders_waiting (it can publish the 👀 and the kind
+ * 10050), wallet (an NWC request), listen (read marks), wait_for (it
+ * blocks), whereami, look and plan_hop (they refresh the chain and derive
+ * keys), say or any other tool.
+ */
+export const DYING_ALLOWED = new Set(['ride_status', 'items', 'budget', 'outbox', 'validate_object', 'render'])
 /** Ride states in which the work waits on the ride or on the operator, not on a turn. */
 const RIDE_WAITING = new Set(['computing', 'awaiting_payment', 'paused', 'paused_cap'])
 
@@ -621,10 +631,13 @@ export class Waker {
   /**
    * Before a tool runs: a turn the operator's STOP killed may still be
    * dying (the grace before SIGKILL), and it may not change anything any
-   * more. Only read-only tools answer it. Null when the tool may run.
+   * more, or say anything. Only the tools on DYING_ALLOWED answer it, never
+   * by their read-only mark alone (follow-up to #45: orders_waiting, wallet
+   * and listen are marked read-only and still publish or change state).
+   * Null when the tool may run.
    */
-  gate(name: string, readOnly: boolean): string | null {
-    if (!this.stopKilled || readOnly) return null
+  gate(name: string, _readOnly: boolean): string | null {
+    if (!this.stopKilled || DYING_ALLOWED.has(name)) return null
     return `Your operator sent STOP: this turn is being stopped, and ${name} does nothing now. End your turn.`
   }
 
