@@ -30,6 +30,7 @@ import { ALGO, decryptForRegion, encryptForRegion } from './crypto.js'
 import { hintFits, hintTags, parseHint, type HintHeights } from './hint.js'
 import { animationOf, modelOf, modelTags, type ItemAnimation, type ItemModelRef } from './itemModel.js'
 import { nftLinkCount } from './nftLink.js'
+import { rewritePayload, withAuthoredConstrain } from '../walkConstrain.js'
 
 /** The location-encrypted envelope (spec 8.6). */
 export const HIDDEN_KIND = 33330
@@ -107,9 +108,13 @@ export function entryKey(e: BagEntry): string {
 /** Where a reference without its own point is drawn: the base of the region the bag is sealed to. */
 export interface RegionOrigin { at: Position; plane: Plane }
 
-/** The bytes a shard's payload takes on the wire. */
-function payloadBytes(shard: ShardModel): number {
-  return new TextEncoder().encode(JSON.stringify(toPayload(shard))).length
+/**
+ * The bytes a shard's payload takes on the wire as this server writes it:
+ * with its WALK setting, "opaque" when nobody chose (DECK-0003 1.12,
+ * walkConstrain.ts), as ONOSENDAI counts it (lib/hidden.ts wantsReference).
+ */
+export function payloadBytes(shard: ShardModel): number {
+  return new TextEncoder().encode(JSON.stringify(toPayload(withAuthoredConstrain(shard)))).length
 }
 
 /** Whether a shard is large enough to hide by reference. */
@@ -124,7 +129,8 @@ export function wantsReference(shard: ShardModel): boolean {
  * where.
  */
 export async function objectTemplate(shard: ShardModel, regionKey: Uint8Array, d: string, createdAt: number): Promise<EventTemplate> {
-  const ciphertext = await encryptForRegion(regionKey, JSON.stringify(toPayload(shard)))
+  // The WALK default goes in what is sealed, as ONOSENDAI's objectTemplate writes it (#476).
+  const ciphertext = await encryptForRegion(regionKey, JSON.stringify(toPayload(withAuthoredConstrain(shard))))
   return {
     kind: OBJECT_KIND,
     created_at: createdAt,
@@ -140,14 +146,20 @@ export async function objectTemplate(shard: ShardModel, regionKey: Uint8Array, d
  * its comments and reactions name"). The payload is opened with the old
  * region's key and sealed with the new one; every other tag and the public
  * preview stay as they were. Null when it does not open with `fromKey`.
+ *
+ * The payload is written again on the way (walkConstrain.ts rewritePayload,
+ * `change`): with the WALK default when nobody chose, as ONOSENDAI's EDIT
+ * writes a moved shard (#476), or with the setting `change` gives. Sealed
+ * as it was found when it does not read as SNO. `toKey` may be `fromKey`:
+ * the object sealed again to the same place, with a new setting.
  */
-export async function resealedObject(object: NostrEvent, fromKey: Uint8Array, toKey: Uint8Array, createdAt: number): Promise<EventTemplate | null> {
+export async function resealedObject(object: NostrEvent, fromKey: Uint8Array, toKey: Uint8Array, createdAt: number, change: Parameters<typeof rewritePayload>[1] = {}): Promise<EventTemplate | null> {
   const at = object.tags.findIndex((t) => t[0] === 'encrypted')
   if (object.kind !== OBJECT_KIND || at < 0 || object.tags[at][1] !== ALGO || !object.tags[at][2]) return null
   const plain = await decryptForRegion(fromKey, object.tags[at][2])
   if (plain === null) return null
   const sealed = [...object.tags[at]]
-  sealed[2] = await encryptForRegion(toKey, plain)
+  sealed[2] = await encryptForRegion(toKey, rewritePayload(plain, change) ?? plain)
   if (sealed.length < 4) sealed[3] = REGION_KEY_DERIVATION
   const tags = object.tags.map((t, i) => (i === at ? sealed : [...t]))
   return { kind: OBJECT_KIND, created_at: createdAt, content: object.content, tags }
@@ -436,12 +448,12 @@ export function isProtectedTags(tags: readonly (readonly string[])[]): boolean {
   return tags.some((t) => Array.isArray(t) && t[0] === '-')
 }
 
-/** The inner shard event template (kind 3330), signed by the author, with NIP-70's `-`. */
+/** The inner shard event template (kind 3330), signed by the author, with NIP-70's `-`, and its WALK setting ("opaque" when nobody chose, ONOSENDAI #476). */
 export function shardInnerTemplate(shard: ShardModel, at: Position, plane: Plane, createdAt: number): EventTemplate {
   return {
     kind: SHARD_KIND,
     created_at: createdAt,
-    content: JSON.stringify(toPayload(shard)),
+    content: JSON.stringify(toPayload(withAuthoredConstrain(shard))),
     tags: [['C', positionHex(at, plane)], [...PROTECTED_TAG]],
   }
 }

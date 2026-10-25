@@ -21,6 +21,7 @@ import { creditOf, creditTags, objectAddress, SNO_KIND } from 'sno-core/feed'
 import { refTags } from 'sno-core/parts'
 import { toPayload, type ShardModel } from 'sno-core/shards'
 import type { EventTemplate } from './nostr/event.js'
+import { withAuthoredConstrain } from './walkConstrain.js'
 
 export { SNO_KIND }
 
@@ -56,7 +57,7 @@ export function defaultAlt(shard: ShardModel): string {
   return `a 3D object: ${shard.name}, ${shard.vertices.length} vertices${shard.parts?.length ? `, ${shard.parts.length} placed objects` : ''}`
 }
 
-/** The event a shard goes out as, a public object (DECK-0003 3.1): ONOSENDAI's publicObjectTemplate, with the author's `d` and `alt`. */
+/** The event a shard goes out as, a public object (DECK-0003 3.1): ONOSENDAI's publicObjectTemplate, with the author's `d` and `alt`, and its WALK setting ("opaque" when nobody chose, #476). */
 export function publicObjectTemplate(shard: ShardModel, d: string, createdAt: number, alt?: string): EventTemplate {
   const credit = creditOf(shard)
   return {
@@ -69,7 +70,7 @@ export function publicObjectTemplate(shard: ShardModel, d: string, createdAt: nu
       ...refTags(shard),
       ...(credit ? creditTags(credit, { notify: true }) : []),
     ],
-    content: JSON.stringify(toPayload(shard)),
+    content: JSON.stringify(toPayload(withAuthoredConstrain(shard))),
   }
 }
 

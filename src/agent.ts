@@ -34,8 +34,8 @@ import { AVATAR_KIND, MAX_AVATAR_BYTES, avatarPrice, avatarSeconds, avatarTempla
 import { avatarThreads, mineAvatar } from './avatarMine.js'
 import { Chat, type ChatLine } from './chat.js'
 import {
-  HIDDEN_KIND, MAX_ABOUT, MAX_ITEM_NAME, carriedTags, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, REFERENCE_THRESHOLD_BYTES, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
-  audioLabel, itemLineage, keyInnerTemplate, messageInnerTemplate, messagePreview, objectTemplate, referenceCount, referenceTo, rumorOf, shardInnerTemplate, unbag, wantsReference, entryKey,
+  HIDDEN_KIND, MAX_ABOUT, MAX_ITEM_NAME, carriedTags, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
+  audioLabel, itemLineage, keyInnerTemplate, messageInnerTemplate, messagePreview, objectTemplate, payloadBytes, referenceCount, referenceTo, rumorOf, shardInnerTemplate, unbag, wantsReference, entryKey,
   type BagEntry, type Hidden, type HiddenType, type KeyItem, type Reference, type Rumor,
 } from './hidden/bags.js'
 import { MAX_COMMENT_LENGTH, itemKind, sealedComment, type CommentParent, type CommentSubject } from './hidden/comments.js'
@@ -56,6 +56,7 @@ import { ROAM_MAX_MINUTES, ROAM_MIN_MINUTES, Roam, roamCandidates, searchRoam } 
 import { profileTemplate, type ProfileFields, MAX_PICTURE_URL, pictureUrl, publishedFields } from './profile.js'
 import { objectHandle, renderShard, type NamedView } from './render.js'
 import { validateSnoPayload } from './sno.js'
+import { chosenConstrainOf, walkWords, withAuthoredConstrain } from './walkConstrain.js'
 import { DEFAULT_PUBLISH_PER_DAY, MAX_ALT_LENGTH, MAX_NAME_LENGTH, dProblem, newObjectId, objectPointers, publicObjectTemplate } from './publicObject.js'
 import { hopCeiling, loadOrMeasure, projectCantorMs, type Calibration } from './space/calibration.js'
 import { describePlace, distanceBetween, distanceWords, parseCoordinate, placeFromHex, placeOf, spawnPlace, type CoordinateInput, type Place } from './space/coords.js'
@@ -151,8 +152,25 @@ const OBJECTS_REMEMBERED = 64
  * The fields of an agent's payload that were left out because this tool does
  * not know them (sno.ts `ignored`), in words; empty when there were none.
  */
-function ignoredNote(ignored: string[]): string {
-  return ignored.length ? ` Left out, not fields this tool knows (DECK-0003 section 1.1): ${ignored.map((k) => JSON.stringify(k)).join(', ')}.` : ''
+function ignoredNote(ignored: string[], repaired: string[] = []): string {
+  const left = ignored.length ? ` Left out, not fields this tool knows (DECK-0003 section 1.1): ${ignored.map((k) => JSON.stringify(k)).join(', ')}.` : ''
+  const fixed = repaired.map((k) => (k === 'opacity'
+    ? ' "opacity" was not a whole percent from 1 to 100, so it is left out and the object is drawn fully opaque (DECK-0003 1.11).'
+    : ' "constrain" was not one of "off", "all" or "opaque", so it is not a choice: the default "opaque" is written (DECK-0003 1.12).')).join('')
+  return left + fixed
+}
+
+/**
+ * The WALK setting an object is written with (DECK-0003 1.12), in words:
+ * an authoring tool with no screen reports the setting it writes. The
+ * payload's own word, or "opaque" when it gave none (ONOSENDAI #476).
+ */
+function walkNote(shard: ShardModel): string {
+  const chosen = chosenConstrainOf(shard)
+  const written = walkWords(withAuthoredConstrain(shard))
+  return chosen
+    ? ` WALK: ${written}, as the payload says.`
+    : ` WALK: ${written}, the default, since the payload chose none; give "constrain": "off" (or "all") in the payload to choose otherwise.`
 }
 
 function followOffWords(reason: string): string {
@@ -1681,7 +1699,7 @@ export class Agent {
   }
 
   /** The inner entry (or entries) for what is being hidden, signed. A large object is published first as its own kind 33331. */
-  private async entriesFor(contents: Contents, at: Place, regionKey: Uint8Array, now: number, where: { lookupId: string; height: number }): Promise<{ entries: BagEntry[]; what: string; objectEvent?: NostrEvent; item?: { name: string; itemPubkey: string }; chest?: { id: string; name: string; lock: string; requires: string } }> {
+  private async entriesFor(contents: Contents, at: Place, regionKey: Uint8Array, now: number, where: { lookupId: string; height: number }): Promise<{ entries: BagEntry[]; what: string; walk?: string; objectEvent?: NostrEvent; item?: { name: string; itemPubkey: string }; chest?: { id: string; name: string; lock: string; requires: string } }> {
     const place: ItemPlace = { lookupId: where.lookupId, height: where.height, x: at.position.x.toString(), y: at.position.y.toString(), z: at.position.z.toString(), plane: at.plane }
     if ('message' in contents) {
       const text = String(contents.message)
@@ -1696,9 +1714,9 @@ export class Agent {
         const objectEvent = this.sign(await objectTemplate(shard, regionKey, d, now))
         const result = await this.relays.publish(objectEvent)
         if (!result.ok) throw new Refusal(`The object's own event (kind ${OBJECT_KIND}) was not accepted by any relay: ${result.reason}. Each relay said: ${Object.entries(result.reasons).map(([u, r]) => `${u}: ${r}`).join('; ')}.`)
-        return { entries: [referenceTo(objectEvent, at.position, at.plane, result.accepted[0] ?? '')], what: `an object by reference (${shard.vertices.length} vertices)`, objectEvent }
+        return { entries: [referenceTo(objectEvent, at.position, at.plane, result.accepted[0] ?? '')], what: `an object by reference (${shard.vertices.length} vertices)`, objectEvent, walk: walkNote(shard) }
       }
-      return { entries: [this.sign(shardInnerTemplate(shard, at.position, at.plane, now))], what: `an object (${shard.vertices.length} vertices, inline)` }
+      return { entries: [this.sign(shardInnerTemplate(shard, at.position, at.plane, now))], what: `an object (${shard.vertices.length} vertices, inline)`, walk: walkNote(shard) }
     }
     if ('key' in contents) {
       const name = String(contents.key.name ?? '').trim().slice(0, MAX_ITEM_NAME)
@@ -1781,7 +1799,7 @@ export class Agent {
     const currentSettings = current ? bagSettingsOf(current, height) : null
     const hint = input.hint_heights ?? currentSettings?.hint ?? null
     if (hint && !hintFits(hint, height)) throw new Refusal(`hint_heights ${hint.join(',')} cannot contain a height ${height} region: each must be from ${height} to 85.`)
-    const { entries, what, objectEvent, item, chest } = await this.entriesFor(input.contents, at, regionKey, now, { lookupId: key.lookupId, height })
+    const { entries, what, walk, objectEvent, item, chest } = await this.entriesFor(input.contents, at, regionKey, now, { lookupId: key.lookupId, height })
     const have = new Set(carried.map(entryKey))
     const merged = [...carried, ...entries.filter((e) => !have.has(entryKey(e)))]
     const riddle = (input.riddle ?? currentSettings?.riddle ?? '').slice(0, MAX_RIDDLE_LENGTH)
@@ -1807,6 +1825,7 @@ export class Agent {
       accepted.length ? `Accepted by ${accepted.join(', ')}.` : `No relay accepted the bag${result.ok ? '' : `: ${result.reason}`}. It waits in the outbox.`,
       Object.keys(refused).length ? `Refused by ${Object.entries(refused).map(([u, r]) => `${u}: ${r}`).join('; ')} (verbatim; a refusal is not retried).` : '',
       hint ? `Hinted at heights ${hint.join(',')}${riddle ? `, riddle "${riddle}"` : ''}.` : 'No hint: only someone who derives this cube\'s key will find it.',
+      walk ? `${walk.trim()} constrain_placed changes it where it stands.` : '',
       `Its id is ${handle(objectEvent ? objectEvent.id : !isReference(entries[0]) ? (entries[0] as NostrEvent).id : objectHandle(`${key.lookupId}/${entryKey(entries[0])}`))}: placed lists it, remove_placed takes it down, move_placed moves it.`,
     ].filter(Boolean).join('\n')
     return { text, data: { bagId: bag.id, lookupId: key.lookupId, cube: { height, base: key.base, plane: at.plane }, entries: merged.length, carried: carried.length, keyMs: Math.round(keyMs), accepted, refused, hint, riddle, objectEventId: objectEvent?.id ?? null, ...(item ? { item } : {}), ...(chest ? { chest } : {}) } }
@@ -1894,6 +1913,11 @@ export class Agent {
   /** move_placed: move one placed thing by an offset or to a coordinate, keeping its lineage (placed.ts). */
   movePlaced(input: { target?: string; type?: string; by?: { dx?: string | number; dy?: string | number; dz?: string | number }; to?: CoordinateInput; height?: number }): Promise<ToolResult> {
     return this.placements.move(input)
+  }
+
+  /** constrain_placed: set placed shards' WALK setting (and opacity) in place, keeping their lineage (placed.ts). */
+  constrainPlaced(input: { target?: string | string[]; type?: string; match?: string; bag?: string; all?: boolean; constrain?: string; opacity?: number }): Promise<ToolResult> {
+    return this.placements.constrain(input)
   }
 
   // ---- items and chests --------------------------------------------------------
@@ -2359,8 +2383,8 @@ export class Agent {
     this.dir.writeJson(PUBLISHED_FILE, { posts: [...recent, now] } satisfies PublishedFile)
     const left = Math.max(0, limit - recent.length - 1)
     return {
-      text: `Published "${v.shard.name}" to the feed${replacing ? ` under d "${d}" (it replaces any earlier version there)` : ''}: kind 33331 ${event.id.slice(0, 8)}..., ${v.vertices} vertices, ${v.faces} faces, ${v.bytes} bytes. Accepted by ${entry.accepted.join(', ')}.${refusedWords} Address ${address} (naddr ${naddr}). This publishes the object; it does not place it in the world. To hide it at a place, call place with this address. To change it later, publish again with d "${d}". ${left} more today.${ignoredNote(v.ignored)}`,
-      data: { eventId: event.id, address, naddr, d, name: v.shard.name, replaced: replacing, accepted: entry.accepted, refused: entry.refused ?? {}, publishedToday: recent.length + 1, maxPerDay: limit, ignored: v.ignored },
+      text: `Published "${v.shard.name}" to the feed${replacing ? ` under d "${d}" (it replaces any earlier version there)` : ''}: kind 33331 ${event.id.slice(0, 8)}..., ${v.vertices} vertices, ${v.faces} faces, ${payloadBytes(v.shard)} bytes.${walkNote(v.shard)} Accepted by ${entry.accepted.join(', ')}.${refusedWords} Address ${address} (naddr ${naddr}). This publishes the object; it does not place it in the world. To hide it at a place, call place with this address. To change it later, publish again with d "${d}". ${left} more today.${ignoredNote(v.ignored, v.repaired)}`,
+      data: { eventId: event.id, address, naddr, d, name: v.shard.name, replaced: replacing, accepted: entry.accepted, refused: entry.refused ?? {}, publishedToday: recent.length + 1, maxPerDay: limit, ignored: v.ignored, repaired: v.repaired, constrain: chosenConstrainOf(withAuthoredConstrain(v.shard)) },
     }
   }
 
@@ -2372,10 +2396,12 @@ export class Agent {
   validateObject(input: { payload: unknown }): ToolResult {
     const v = validateSnoPayload(input.payload)
     if (!v.ok) return { text: `Not valid: ${v.errors.join(' ')}`, data: { valid: false, errors: v.errors } }
-    const byReference = v.bytes > REFERENCE_THRESHOLD_BYTES
+    // The bytes as place and publish_object write it, with its WALK setting (walkConstrain.ts).
+    const bytes = payloadBytes(v.shard)
+    const byReference = wantsReference(v.shard)
     return {
-      text: `Valid SNO: "${v.shard.name}", ${v.vertices} vertices, ${v.faces} faces, mode ${v.shard.mode}, unit 2^${v.shard.unit} gibsons, ${v.bytes} bytes on the wire${byReference ? ' (large: it would be hidden by reference)' : ' (small: it would be carried inline)'}.${ignoredNote(v.ignored)}`,
-      data: { valid: true, name: v.shard.name, vertices: v.vertices, faces: v.faces, mode: v.shard.mode, unit: v.shard.unit, bytes: v.bytes, byReference, ignored: v.ignored },
+      text: `Valid SNO: "${v.shard.name}", ${v.vertices} vertices, ${v.faces} faces, mode ${v.shard.mode}, unit 2^${v.shard.unit} gibsons, ${bytes} bytes on the wire${byReference ? ' (large: it would be hidden by reference)' : ' (small: it would be carried inline)'}.${walkNote(v.shard)}${ignoredNote(v.ignored, v.repaired)}`,
+      data: { valid: true, name: v.shard.name, vertices: v.vertices, faces: v.faces, mode: v.shard.mode, unit: v.shard.unit, bytes, byReference, ignored: v.ignored, repaired: v.repaired, constrain: chosenConstrainOf(withAuthoredConstrain(v.shard)) },
     }
   }
 
