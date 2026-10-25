@@ -8,7 +8,9 @@
     launchctl load ~/Library/LaunchAgents/com.github.arkin0x.cyberspace-mcp.plist
     tail -f ~/Library/Logs/cyberspace-mcp.log
 
-  launchd does not expand ~, so every path is written out.
+  launchd does not expand ~, so every path is written out. After a crash or a
+  reboot the server takes back the lock this machine left (the machine id is
+  kept beside the state directory, ~/.cyberspace-mcp.machine-id).
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">

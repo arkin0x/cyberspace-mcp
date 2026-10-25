@@ -160,6 +160,8 @@ nohup cyberspace-mcp serve >> ~/.cyberspace-mcp/serve.log 2>&1 &
 
 Stop it with `kill <pid>` (the pid is in `~/.cyberspace-mcp/lock`). Stopping is clean: a ride under way keeps its work on disk and resumes on the next start. Never run two servers on one state directory; the second refuses to start, because one key has one mover.
 
+After a crash, a reboot or a container restart, the next start takes back the lock this machine left (it is kept as `lock.stale-*`): the lock records this machine's id, kept in `~/.cyberspace-mcp.machine-id`, beside the state directory. When the pid cannot be seen from the new start (a container's previous boot), it first waits 25 s for the old lock's heartbeat to be silent. Never sync or copy the machine id file or a running state directory to another machine. In a container that wipes everything outside one volume, keep the state directory on that volume (`--state /data/...`); the machine id file lands beside it.
+
 ## 9. Safety
 
 - The server listens on `127.0.0.1` only, answers only requests addressed to that host, and refuses requests from web pages. Anyone with a shell on your machine can reach it; on a shared machine, add a token: `cyberspace-mcp init --token` (or `serve --token`). It is made once in `~/.cyberspace-mcp/http-token` (mode 600), and init puts it in `claude-mcp.json` for you.

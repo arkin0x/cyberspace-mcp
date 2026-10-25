@@ -91,6 +91,8 @@ export interface AgentConfig {
   calibration?: Calibration
   relayMaxWaitMs?: number
   log?: (line: string) => void
+  /** This machine's id for the lock (--machine-id); else $CYBERSPACE_MCP_MACHINE_ID, else <state>.machine-id. */
+  machineId?: string
   /** The hyperspace line's manifest URL; the default is the NTH headers-v1 manifest. */
   manifestUrl?: string
   /** Worker threads for a ride; 0 computes on the calling thread. Default: the cores available less one. */
@@ -420,10 +422,10 @@ export class Agent {
    */
   static async start(config: AgentConfig): Promise<Agent> {
     const dir = StateDir.open(config.stateDir)
-    const release = dir.lock()
+    const log = config.log ?? (() => {})
+    const release = await dir.lock({ machineId: config.machineId, log })
     try {
       const sk = dir.loadOrCreateKey()
-      const log = config.log ?? (() => {})
       let calibration = config.calibration
       if (!calibration) {
         const { calibration: c, measured } = loadOrMeasure(dir)
