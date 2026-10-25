@@ -69,6 +69,8 @@ const TYPE_WORDS: Record<string, HiddenType> = { shard: 'shard', object: 'shard'
 const PUT_BACK_RETRY_MS = [500, 1500]
 /** The most shards one constrain_placed call changes: each is a signature, and a sealed one a publish of its own. */
 export const MAX_CONSTRAIN_PER_CALL = 100
+/** The most shards one constrain_placed call tries, changed or refused, so a call the relays keep refusing still ends soon (review of #46, N1). */
+export const MAX_CONSTRAIN_ATTEMPTS_PER_CALL = 2 * MAX_CONSTRAIN_PER_CALL
 
 /** What `placed` lists for one thing in one of the agent's bags. */
 export interface PlacedEntry {
@@ -544,6 +546,52 @@ export class Placements {
     return { event, entry }
   }
 
+  /**
+   * Send a rewrite of one of the agent's own bags straight to the relays and
+   * settle it against the canonical relay, where every reader looks. Taken
+   * there: recorded as the newest version and kept in the outbox, as a bag
+   * move_placed sends to a new cube. Not taken: the canonical relay is asked
+   * what it holds now. Our rewrite after all (an answer that was lost): it
+   * landed. Anything else: nothing is recorded, and the relays that took our
+   * rewrite get back the version our rewrite replaced, signed again newer:
+   * whichever is newer of what the canonical relay holds now and `current`,
+   * the bag this call read and built on. The canonical relay's can be newer
+   * (another session wrote it meanwhile: a restore of the bag as read
+   * overwrote it there, follow-up to #44); `current` can be newer (an
+   * earlier change only a lesser relay took, as in a deny-mode lockout:
+   * restoring the canonical relay's dropped it, review of #46). The canonical
+   * relay itself is never written over.
+   */
+  private async landBag(event: NostrEvent, key: Pick<HeldKey, 'lookupId' | 'keyHex' | 'height' | 'base'>, settings: BagSettings, place: { position: Position; plane: Plane }, current: NostrEvent | null): Promise<{ landed: true; entry: OutboxEntry } | { landed: false; why: string; unanswered: boolean }> {
+    const sent = await this.host.relays.publish(event).catch((err) => ({ ok: false as const, reason: err instanceof Error ? err.message : String(err), reasons: {} as Record<string, string> }))
+    const took = sent.ok ? sent.accepted : []
+    const record = async (): Promise<{ landed: true; entry: OutboxEntry }> => {
+      this.host.keys.noteOwnBag(key, event.created_at, { bagId: event.id, event })
+      const entry = this.host.outbox.add(event)
+      await this.host.outbox.send(entry)
+      await this.noteOpened(event, key, settings)
+      return { landed: true, entry }
+    }
+    if (took.includes(this.canonical)) return record()
+    const said = Object.entries(sent.reasons).map(([u, why]) => `${u}: ${why}`).join('; ')
+    const refused = `the canonical relay did not take the rewritten bag (${said || (sent.ok ? 'no answer' : sent.reason)}${said ? ', verbatim' : ''})`
+    const asked = await this.host.relays.queryEach({ kinds: [HIDDEN_KIND], authors: [this.host.pubkey], '#d': [key.lookupId] }, undefined, [this.host.relays.canonical])
+    const answer = asked.find((a) => a.outcome === 'answered' && normalizeURL(a.url) === this.canonical)
+    if (!answer) return { landed: false, unanswered: took.length > 0, why: `${refused}, and did not answer when asked what it holds now, so nothing was sent to undo it${took.length ? `; ${took.join(', ')} may show the change until the bag is written again` : ''}` }
+    let there: NostrEvent | null = null
+    for (const e of answer.events) if (e.kind === HIDDEN_KIND && e.pubkey === this.host.pubkey && dOf(e) === key.lookupId && newer(e, there)) there = e
+    if (there?.id === event.id) return record()
+    if (took.length === 0) return { landed: false, unanswered: false, why: refused }
+    // The version our rewrite replaced: the newer of the canonical relay's and the one this call built on.
+    const base = current && newer(current, there) ? current : there
+    const from = base === there ? 'what the canonical relay holds' : 'the version this call read and rewrote'
+    const entries = base ? await openEntries(base, hexToBytes(key.keyHex)) : null
+    if (!base || !entries) return { landed: false, unanswered: false, why: `${refused}. ${took.join(', ')} took it; ${base ? 'the version it replaced does not open with this key' : 'neither the canonical relay nor this call holds a version of this bag'}, so nothing was sent over it there` }
+    const restore = await this.signBag(entries, key, bagSettingsOf(base, key.height), place, event)
+    const back = await this.host.relays.publishMany(took, restore).catch((err) => ({ ok: false as const, reason: err instanceof Error ? err.message : String(err), reasons: {} as Record<string, string> }))
+    return { landed: false, unanswered: false, why: `${refused}. ${took.join(', ')} took it, so ${from} (${base.id.slice(0, 8)}...) went out again there, newer (${restore.id.slice(0, 8)}...): ${back.ok ? `accepted by ${back.accepted.join(', ')}` : `not taken (${back.reason})`}` }
+  }
+
   /** Delete one of the agent's bags whole (NIP-09), by its address and its newest id, exactly as ONOSENDAI deletes an emptied one. */
   private async deleteBag(lookupId: string, bagId: string | null, createdAt: number, key: Pick<HeldKey, 'lookupId' | 'keyHex' | 'height' | 'base'> | null): Promise<{ event: NostrEvent; entry: OutboxEntry }> {
     const at = Math.max(nowSeconds(), createdAt)
@@ -795,8 +843,15 @@ export class Placements {
         }
         const entries = mergeEntries(src.entries.filter((e) => entryKey(e) !== row.key), [moved])
         const settings = bagSettingsOf(src.current, height)
-        const { event: newBag, entry } = await this.publishBag(entries, newKey, settings, dest, src.current)
-        await this.noteOpened(newBag, newKey, settings)
+        // Straight to the relays and counted only once the canonical relay took it, as the cross-cube path (follow-up to #44: through the outbox a refusal read as moved).
+        const newBag = await this.signBag(entries, newKey, settings, dest, src.current)
+        const landed = await this.landBag(newBag, newKey, settings, dest, src.current)
+        if (!landed.landed) {
+          const back = object && rollback ? await this.putBack(rollback) : ''
+          const recover = landed.unanswered ? ' Some relays may show it at the new place until the bag is written again. Once the canonical relay answers, call placed: wherever it shows the thing, move_placed it to where you want it (to back where it was, if it shows the new place), which writes the bag again everywhere.' : ''
+          throw new Refusal(`${landed.why.charAt(0).toUpperCase()}${landed.why.slice(1)}. Nothing was moved on the canonical relay; it stays where it was.${back}${recover}`)
+        }
+        const entry = landed.entry
         return this.moved(row, moved, object, from, dest, oldKey, newKey, height, keyMs, true, `Same bag, rewritten in one step (${newBag.id.slice(0, 8)}..., ${entries.length} thing(s)): ${relayWords(entry)}.${object ? ` Its sealed object was sealed again under the same d (${object.id.slice(0, 8)}...).` : ''}${walk}`, newBag, entry.accepted, entry.refused ?? {})
       }
 
@@ -971,11 +1026,13 @@ export class Placements {
     })
     const already = rows.filter((r) => { const w = wantOf(r); return rawConstrain(r.hidden!.shard!) === w.constrain && readOpacity(r.hidden!.shard!.opacity) === w.opacity })
     // The cap counts only what still needs changing, so the same call made again reaches the rest (review of #44, S1).
+    // The cap counts only what this call changes: a bag the canonical relay
+    // refuses does not use it up, so the other bags are done in the same call
+    // (follow-up to #44: a refused bag first in the list stalled every call).
     const needing = rows.filter((r) => !already.includes(r))
-    const todo = needing.slice(0, MAX_CONSTRAIN_PER_CALL)
-    const later = needing.length - todo.length
     const byBag = new Map<string, Row[]>()
-    for (const r of todo) byBag.set(r.bag.lookupId, [...(byBag.get(r.bag.lookupId) ?? []), r])
+    for (const r of needing) byBag.set(r.bag.lookupId, [...(byBag.get(r.bag.lookupId) ?? []), r])
+    let attempted = 0
 
     type Changed = { row: Row; id: string; lineage: string | null; how: string }
     const changed: Changed[] = []
@@ -985,7 +1042,11 @@ export class Placements {
     const canonical = this.canonical
 
     await this.withBags([...byBag.keys()], async () => {
-      for (const [lookupId, group] of byBag) {
+      for (const [lookupId, all] of byBag) {
+        const room = Math.min(MAX_CONSTRAIN_PER_CALL - changed.length, MAX_CONSTRAIN_ATTEMPTS_PER_CALL - attempted)
+        if (room <= 0) break
+        const group = all.slice(0, room)
+        attempted += group.length
         try {
           const key = this.keyOf(group[0].bag)
           for (const r of group) this.unsentGuard([lookupId], isReference(r.entry) ? dOf(r.hidden!.inner) : null)
@@ -1029,34 +1090,16 @@ export class Placements {
             const entries = src.entries.map((e) => replaced.get(entryKey(e)) ?? e)
             const settings = bagSettingsOf(src.current!, key.height)
             const place = { position: { x: BigInt(key.base.x), y: BigInt(key.base.y), z: BigInt(key.base.z) }, plane: group[0].plane }
-            // Straight to the relays, as move_placed sends a new bag: the change
-            // counts only once the canonical relay took it, and only then is it
-            // recorded as the newest version (review of #44, B1: through the
-            // outbox a refusal still read as changed, here and in placed).
+            // Straight to the relays, and counted only once the canonical relay took it (landBag; review of #44, B1).
             const event = await this.signBag(entries, key, settings, place, src.current)
-            const sent = await this.host.relays.publish(event).catch((err) => ({ ok: false as const, reason: err instanceof Error ? err.message : String(err), reasons: {} as Record<string, string> }))
-            const took = sent.ok ? sent.accepted : []
-            if (!took.includes(canonical)) {
-              const said = Object.entries(sent.reasons).map(([u, why]) => `${u}: ${why}`).join('; ')
-              // A lesser relay that took the new version would show the new
-              // setting and make a retry read "already set": the bag as it was
-              // goes out again over it, newer, so every relay ends where the
-              // canonical one is. Its entries are the ones the canonical relay holds.
-              let back = ''
-              if (took.length > 0 || !sent.ok) {
-                const restored = await this.publishBag(src.entries, key, settings, place, event)
-                await this.noteOpened(restored.event, key, settings)
-                back = ` ${took.length ? `${took.join(', ')} took the rewritten bag, so` : 'A relay whose answer timed out may have stored the rewritten bag, so'} the bag as it was went out again over it (${restored.event.id.slice(0, 8)}...): ${relayWords(restored.entry)}.`
-              }
-              for (const r of group) {
-                if (replaced.has(r.key)) failed.push({ row: r, why: `the canonical relay did not take the rewritten bag (${said || (sent.ok ? 'no answer' : sent.reason)}${said ? ', verbatim' : ''}), so it keeps its old setting.${back}` })
-              }
+            const landed = await this.landBag(event, key, settings, place, src.current)
+            if (!landed.landed) {
+              // No direct way to make a relay drop what it took: writing the bag again is the way (review of #46, L1).
+              const recover = landed.unanswered ? ` To make every relay show the same: once the canonical relay answers, call constrain_placed again with the setting you want; if it says the shard already has it, set another value first (constrain "off", or another opacity) and then the one you want, which writes the bag again everywhere.` : ''
+              for (const r of group) if (replaced.has(r.key)) failed.push({ row: r, why: `${landed.why}. It keeps its old setting on the canonical relay.${recover}` })
               continue
             }
-            this.host.keys.noteOwnBag(key, event.created_at, { bagId: event.id, event })
-            const entry = this.host.outbox.add(event)
-            await this.host.outbox.send(entry)
-            await this.noteOpened(event, key, settings)
+            const entry = landed.entry
             // "last" keeps naming the same thing when that thing was signed again.
             const noted = this.host.keys.lastPlaced
             const next = noted && noted.lookupId === lookupId ? replaced.get(noted.entryKey) : undefined
@@ -1096,7 +1139,8 @@ export class Placements {
     if (already.length) out.push(`Already set, left as they are: ${already.map((r) => `"${r.label}" (id ${r.id.slice(0, 12)})`).join(', ')}.`)
     for (const f of failed) out.push(`Not changed: ${name(f.row)} (id ${f.row.id.slice(0, 12)}): ${f.why}`)
     for (const k of skipped) out.push(`Skipped: ${name(k.row)} (id ${k.row.id.slice(0, 12)}): ${k.why}.`)
-    if (later > 0) out.push(`${later} more shard(s) still need it: one call changes at most ${MAX_CONSTRAIN_PER_CALL}. Make the same call again for the rest; the ones already set are left alone.`)
+    const later = needing.length - attempted
+    if (later > 0) out.push(`${later} more shard(s) still need it: one call changes at most ${MAX_CONSTRAIN_PER_CALL} and tries at most ${MAX_CONSTRAIN_ATTEMPTS_PER_CALL}. Make the same call again for the rest; the ones already set are left alone.${failed.length ? ' A bag the canonical relay refused is tried again by the next call too; narrow the call with match or bag to leave it out.' : ''}`)
     if (reading.silent.length) out.push(`Not answered: ${reading.silent.join('; ')}. A shard only those relays hold was not seen.`)
     const text = out.join('\n')
     if (changed.length === 0 && failed.length > 0) throw new Refusal(text)

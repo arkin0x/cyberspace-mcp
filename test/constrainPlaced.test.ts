@@ -21,8 +21,9 @@ import { generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { Agent } from '../src/agent.js'
 import { bagTemplate, HIDDEN_KIND, SHARD_KIND, referenceTo, unbag, type BagEntry } from '../src/hidden/bags.js'
 import { ALGO, decryptForRegion, encryptForRegion, regionKeyAt } from '../src/hidden/crypto.js'
-import { MAX_CONSTRAIN_PER_CALL } from '../src/placed.js'
-import { bytesToHex, signEvent, type NostrEvent } from '../src/nostr/event.js'
+import { MAX_CONSTRAIN_ATTEMPTS_PER_CALL, MAX_CONSTRAIN_PER_CALL } from '../src/placed.js'
+import { bytesToHex, nowSeconds, signEvent, type NostrEvent } from '../src/nostr/event.js'
+import { messageInnerTemplate } from '../src/hidden/bags.js'
 import { openEntries } from '../src/placed.js'
 import { publicObjectTemplate } from '../src/publicObject.js'
 import { createServer } from '../src/server.js'
@@ -430,7 +431,7 @@ describe('constrain_placed when a relay refuses (review of #44)', () => {
     expect(r.text).toContain('Changed nothing')
     expect(r.text).toContain('blocked: bags are closed today')
     expect(r.text).toContain('keeps its old setting')
-    expect(r.text).toContain('went out again over it')
+    expect(r.text).toContain('went out again there, newer')
     expect(bagOn(s.canonical, s.a.pubkey, k.lookupId)!.id).toBe(before.id)
     // The lesser relay took the rewrite, then the bag as it was over it: every relay says "off".
     const onMine = (await unbag(bagOn(s.mine, s.a.pubkey, k.lookupId)!, k.key, undefined, undefined, 8)).find((h) => h.shard?.name === 'gate')!
@@ -536,4 +537,134 @@ describe('constrain_placed and move_placed, the smaller points of the review of 
     expect(chest.isError).toBe(false)
     expect(chest.text).toContain('WALK for the object(s) sealed in it: "little statue" constrain "opaque"')
   }, 60_000)
+})
+
+describe('a refused bag rewrite, scoped to what the relays hold (follow-up to #44)', () => {
+  let s: World
+  beforeEach(async () => { s = await setup() })
+
+  it('the restore after a refusal never overwrites a newer version another session put on the canonical relay', async () => {
+    await s.call('place', { object: named('gate', { constrain: 'off' }), ...at(0n, 8) })
+    const k = key(BASE, 8)
+    const v1 = bagOn(s.canonical, s.a.pubkey, k.lookupId)!
+    // Another session of the same key writes V2 (one more message) while our rewrite is in flight; the canonical relay turns ours away once, for now.
+    const carried = await entriesOf(v1, k.key)
+    const other = signEvent(messageInnerTemplate('from another session', { x: BASE, y: BASE, z: BASE + 2n }, 0, v1.created_at), s.sk)
+    const v2 = signEvent(await bagTemplate([...carried, other], k.key, k.lookupId, 8, nowSeconds() + 1, HIDDEN_KIND), s.sk)
+    let once = false
+    s.canonical.policy.refuse = (ev) => {
+      if (once || ev.kind !== HIDDEN_KIND || ev.id === v2.id) return null
+      once = true
+      s.canonical.seed(v2)
+      return 'rate-limited: slow down'
+    }
+    const r = await s.call('constrain_placed', { target: 'gate', constrain: 'all' })
+    expect(r.isError).toBe(true)
+    expect(r.text).toContain('rate-limited: slow down')
+    // V2 stands on the canonical relay, untouched.
+    expect(bagOn(s.canonical, s.a.pubkey, k.lookupId)!.id).toBe(v2.id)
+    // The lesser relay that took our rewrite now holds what the canonical relay holds: V2's entries, the gate as it was.
+    const onMine = await unbag(bagOn(s.mine, s.a.pubkey, k.lookupId)!, k.key, undefined, undefined, 8)
+    expect(onMine.map((h) => h.text ?? h.shard?.name).sort()).toEqual(['from another session', 'gate'])
+    expect(payloadOf(onMine.find((h) => h.shard)!.inner).constrain).toBe('off')
+    // A retry builds on V2 and keeps its message.
+    const again = await s.call('constrain_placed', { target: 'gate', constrain: 'all' })
+    expect(again.isError).toBe(false)
+    const after = await unbag(bagOn(s.canonical, s.a.pubkey, k.lookupId)!, k.key, undefined, undefined, 8)
+    expect(after.map((h) => h.text ?? h.shard?.name).sort()).toEqual(['from another session', 'gate'])
+    expect(payloadOf(after.find((h) => h.shard)!.inner).constrain).toBe('all')
+  }, 60_000)
+
+  it('move_placed inside its bag: the canonical relay refusing the rewrite means nothing moved', async () => {
+    await s.call('place', { object: named('mover', { constrain: 'off' }), ...at(0n, 8) })
+    await s.call('hide', { contents: { message: 'stays' }, ...at(1n, 8) })
+    const k = key(BASE, 8)
+    const before = bagOn(s.canonical, s.a.pubkey, k.lookupId)!
+    s.canonical.policy.refuse = (ev) => (ev.kind === HIDDEN_KIND ? 'blocked: no bags today' : null)
+    const r = await s.call('move_placed', { target: 'mover', by: { dz: 1 } })
+    expect(r.isError).toBe(true)
+    expect(r.text).toContain('blocked: no bags today')
+    expect(r.text).toContain('Nothing was moved')
+    expect(bagOn(s.canonical, s.a.pubkey, k.lookupId)!.id).toBe(before.id)
+    const onMine = (await unbag(bagOn(s.mine, s.a.pubkey, k.lookupId)!, k.key, undefined, undefined, 8)).find((h) => h.shard)!
+    expect(onMine.at.z).toBe(BASE)
+    s.canonical.policy.refuse = () => null
+    const listed = rowsOf(await s.call('placed')).find((x) => x.label === 'mover')! as Row & { at: { z: string } }
+    expect(listed.at.z).toBe(BASE.toString())
+    const again = await s.call('move_placed', { target: 'mover', by: { dz: 1 } })
+    expect(again.isError).toBe(false)
+    const moved = (await unbag(bagOn(s.canonical, s.a.pubkey, k.lookupId)!, k.key, undefined, undefined, 8)).find((h) => h.shard)!
+    expect(moved.at.z).toBe(BASE + 1n)
+  }, 60_000)
+
+  it('a bag the canonical relay keeps refusing does not hold up the cap: the other bags are done in the same call', async () => {
+    await s.call('place', { object: named('lamp a', { constrain: 'off' }), ...at(0n, 3) })
+    await s.call('place', { object: named('lamp b', { constrain: 'off' }), ...at(1n, 3) })
+    await new Promise((res) => setTimeout(res, 1100))
+    // Newer, so listed first: a full call's worth of shards in a bag the canonical relay refuses.
+    const big = await seedBag(s, 8, async (now) => Array.from({ length: MAX_CONSTRAIN_PER_CALL }, (_, i) => signEvent({ kind: SHARD_KIND, created_at: now, content: JSON.stringify(named(`brick ${i}`, { constrain: 'off' })), tags: [['C', positionHex({ x: BASE, y: BASE, z: BASE + 1n }, 0)], ['-']] }, s.sk)))
+    const k8 = key(BASE, 8)
+    s.canonical.policy.refuse = (ev) => (ev.kind === HIDDEN_KIND && ev.created_at > big.created_at && ev.tags.some((t) => t[0] === 'd' && t[1] === k8.lookupId) ? 'blocked: that cube is full' : null)
+    const r = await s.call('constrain_placed', { all: true, constrain: 'opaque' })
+    expect(r.isError).toBe(false)
+    expect((r.data.changed as Row[]).map((x) => x.label).sort()).toEqual(['lamp a', 'lamp b'])
+    expect((r.data.failed as Row[]).length).toBe(MAX_CONSTRAIN_PER_CALL)
+    expect(r.data.remaining).toBe(0)
+  }, 120_000)
+})
+
+describe('a refused rewrite restores the version it replaced, not an older one (review of #46)', () => {
+  let s: World
+  beforeEach(async () => { s = await setup() })
+
+  const hasText = async (relay: FakeRelay, k: { key: Uint8Array; lookupId: string }, text: string): Promise<boolean> =>
+    (await entriesOf(bagOn(relay, s.a.pubkey, k.lookupId)!, k.key)).some((x) => typeof (x as NostrEvent).content === 'string' && (x as NostrEvent).content.includes(text))
+  const constrainOn = async (relay: FakeRelay, k: { key: Uint8Array; lookupId: string }): Promise<unknown> =>
+    payloadOf((await entriesOf(bagOn(relay, s.a.pubkey, k.lookupId)!, k.key)).find((x) => (x as NostrEvent).kind === SHARD_KIND) as NostrEvent).constrain
+
+  it('a message only the lesser relay took (the canonical relay in deny mode) is not dropped by the restore', async () => {
+    await s.call('place', { object: named('wall', { constrain: 'off' }), ...at(0n, 8) })
+    const k = key(BASE, 8)
+    s.canonical.policy.refuse = (ev) => (ev.kind === HIDDEN_KIND ? 'blocked: deny mode' : null)
+    await s.call('hide', { contents: { message: 'only the lesser relay has this' }, ...at(1n, 8) })
+    expect(await hasText(s.mine, k, 'only the lesser')).toBe(true)
+    expect(await hasText(s.canonical, k, 'only the lesser')).toBe(false)
+    const r = await s.call('constrain_placed', { target: 'wall', constrain: 'all' })
+    expect(r.isError).toBe(true)
+    expect(r.text).toContain('the version this call read and rewrote')
+    expect(await hasText(s.mine, k, 'only the lesser')).toBe(true)
+    expect(await constrainOn(s.mine, k)).toBe('off')
+    expect(rowsOf(await s.call('placed')).map((x) => x.label)).toContain('only the lesser relay has this')
+  }, 60_000)
+
+  it('a message removed on the lesser relay only does not come back', async () => {
+    await s.call('place', { object: named('wall', { constrain: 'off' }), ...at(0n, 8) })
+    await s.call('hide', { contents: { message: 'remove me please' }, ...at(1n, 8) })
+    const k = key(BASE, 8)
+    s.canonical.policy.refuse = (ev) => (ev.kind === HIDDEN_KIND ? 'blocked: deny mode' : null)
+    await s.call('remove_placed', { target: 'remove me please' })
+    expect(await hasText(s.mine, k, 'remove me')).toBe(false)
+    const r = await s.call('constrain_placed', { target: 'wall', constrain: 'all' })
+    expect(r.isError).toBe(true)
+    expect(await hasText(s.mine, k, 'remove me')).toBe(false)
+    expect(await constrainOn(s.mine, k)).toBe('off')
+  }, 60_000)
+
+  it('a call the relays keep refusing stops after a bounded number of tries and says how many are left', async () => {
+    await s.call('place', { object: named('lamp a', { constrain: 'off' }), ...at(0n, 3) })
+    await s.call('place', { object: named('lamp b', { constrain: 'off' }), ...at(1n, 3) })
+    await new Promise((res) => setTimeout(res, 1100))
+    const bricks = (prefix: string) => async (now: number): Promise<BagEntry[]> => Array.from({ length: MAX_CONSTRAIN_PER_CALL }, (_, i) => signEvent({ kind: SHARD_KIND, created_at: now, content: JSON.stringify(named(`${prefix} ${i}`, { constrain: 'off' })), tags: [['C', positionHex({ x: BASE, y: BASE, z: BASE + 1n }, 0)], ['-']] }, s.sk))
+    const b5 = await seedBag(s, 5, bricks('stone'))
+    const b8 = await seedBag(s, 8, bricks('brick'))
+    const refusedIds = new Set([key(BASE, 5).lookupId, key(BASE, 8).lookupId])
+    const since = Math.min(b5.created_at, b8.created_at)
+    s.canonical.policy.refuse = (ev) => (ev.kind === HIDDEN_KIND && ev.created_at > since && ev.tags.some((t) => t[0] === 'd' && refusedIds.has(t[1])) ? 'blocked: those cubes are full' : null)
+    const r = await s.call('constrain_placed', { all: true, constrain: 'opaque' })
+    expect(MAX_CONSTRAIN_ATTEMPTS_PER_CALL).toBe(2 * MAX_CONSTRAIN_PER_CALL)
+    expect(r.isError).toBe(true)
+    expect(r.text).toContain('2 more shard(s) still need it')
+    expect(r.text).toContain(`tries at most ${MAX_CONSTRAIN_ATTEMPTS_PER_CALL}`)
+    expect(rowsOf(await s.call('placed')).filter((x) => x.label.startsWith('lamp')).every((x) => x.walk?.constrain === 'off')).toBe(true)
+  }, 120_000)
 })
