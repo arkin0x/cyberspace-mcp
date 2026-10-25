@@ -198,7 +198,7 @@ describe('every instruction from the operator is a job (arkinox, 2026-10-25)', (
   }, 20_000)
 
   it('progress is a real effect: ride counts when it starts, resumes or signs, never for a poll or a pause; set_avatar only for a new avatar', async () => {
-    const t = setup('slow')
+    const t = setup('slow', { maxIdleTurns: 5 })
     t.waker.onInbox(inboxWith(ORDER))
     const turnWith = async (fn: () => void): Promise<number> => { t.advance(60_000); await during(t.waker, fn); return t.waker.openWork!.idleTurns }
     expect(await turnWith(() => t.waker.noteTool('ride', true, { to: 900000 }, { state: 'computing' }))).toBe(0)
@@ -212,6 +212,9 @@ describe('every instruction from the operator is a job (arkinox, 2026-10-25)', (
     const avatar = { source: 'payload', name: 'cube', vertices: 8, faces: 6 }
     expect(await turnWith(() => t.waker.noteTool('set_avatar', true, {}, avatar))).toBe(0)
     expect(await turnWith(() => t.waker.noteTool('set_avatar', true, {}, avatar))).toBe(1)
+    // constrain_placed (#44) only when it changed a shard.
+    expect(await turnWith(() => t.waker.noteTool('constrain_placed', true, {}, { changed: [] }))).toBe(2)
+    expect(await turnWith(() => t.waker.noteTool('constrain_placed', true, {}, { changed: [{ id: 'x' }] }))).toBe(0)
     t.cleanup()
   }, 20_000)
 

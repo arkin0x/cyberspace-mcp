@@ -3,8 +3,15 @@
 // the arbiter: it returns a model or null and never a reason, so the checks
 // of 1.9 are restated here to name the reason, and fromPayload has the last
 // word.
+//
+// Two fields sno-core repairs rather than refuses (DECK-0003 1.11, 1.12):
+// `opacity`, which sno-core 0.1.18 knows, and `constrain`, which it carries
+// in `extra`. A valid one is kept as given; a malformed one is left out and
+// named in `repaired`, and for `constrain` the default ("opaque") is written
+// in its place when the object is published (walkConstrain.ts).
 
-import { blankName, fromPayload, toPayload, type ShardModel, type ShardPayload } from 'sno-core/shards'
+import { blankName, fromPayload, readOpacity, toPayload, type ShardModel, type ShardPayload } from 'sno-core/shards'
+import { CONSTRAIN_FIELD, chosenConstrain } from './walkConstrain.js'
 
 export type Validation =
   | {
@@ -19,9 +26,13 @@ export type Validation =
        * left out of `shard` and `payload`. sno-core (0.1.17) would carry them
        * through; an agent's tools publish only what they can validate, so an
        * invented or unknown field is named back to the agent instead of being
-       * signed into a public event.
+       * signed into a public event. `constrain` (DECK-0003 1.12) is not
+       * among them: a valid word is kept in `shard.extra`, where sno-core
+       * writes it.
        */
       ignored: string[]
+      /** Fields whose value was malformed and is left out, as DECK-0003 repairs them: `opacity` (drawn opaque), `constrain` (not a choice, so the default is written). */
+      repaired: string[]
     }
   | { ok: false; errors: string[] }
 
@@ -128,8 +139,14 @@ export function validateSnoPayload(raw: unknown): Validation {
   if (errors.length > 0) return { ok: false, errors }
   const read = fromPayload(raw, 'validate')
   if (!read) return { ok: false, errors: ['sno-core refuses this payload for a reason the checks above do not name; compare it with DECK-0003 section 1.'] }
-  const { extra, ...shard } = read
-  const ignored = Object.keys(extra ?? {})
+  const { extra, ...bare } = read
+  const carried = extra ?? {}
+  const chosen = chosenConstrain(carried[CONSTRAIN_FIELD])
+  const ignored = Object.keys(carried).filter((k) => k !== CONSTRAIN_FIELD)
+  const repaired: string[] = []
+  if (p.opacity !== undefined && p.opacity !== 100 && readOpacity(p.opacity) === undefined) repaired.push('opacity')
+  if (CONSTRAIN_FIELD in carried && !chosen) repaired.push(CONSTRAIN_FIELD)
+  const shard: ShardModel = chosen ? { ...bare, extra: { [CONSTRAIN_FIELD]: chosen } } : bare
   const payload = toPayload(shard)
-  return { ok: true, shard, payload, bytes: new TextEncoder().encode(JSON.stringify(payload)).length, vertices: shard.vertices.length, faces: shard.faces.length, ignored }
+  return { ok: true, shard, payload, bytes: new TextEncoder().encode(JSON.stringify(payload)).length, vertices: shard.vertices.length, faces: shard.faces.length, ignored, repaired }
 }
