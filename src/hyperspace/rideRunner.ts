@@ -107,6 +107,8 @@ export interface RideRunnerOptions {
   grindChunk?: number
   /** A milliseconds clock for the budget and the ETA; tests inject one. */
   now?: () => number
+  /** Called before every write to the ride cache; throws to stop it (the state directory's lock, lock.ts). */
+  guard?: (what: string) => void
 }
 
 /**
@@ -369,7 +371,7 @@ export class RideRunner {
 
   /** Open or create `<state>/rides` and the runner over it. */
   static open(path: string, options: RideRunnerOptions = {}): RideRunner {
-    return new RideRunner(RideCache.open(path), options)
+    return new RideRunner(RideCache.open(path, options.guard), options)
   }
 
   /** Drop a ride's cached leaves and price search: the tool calls this once the hyperjump is signed and recorded. */

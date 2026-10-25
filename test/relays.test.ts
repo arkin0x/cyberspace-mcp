@@ -130,3 +130,66 @@ describe('the relay client over the fake relay', () => {
     relays.close()
   })
 })
+
+// The state directory's lock is checked the moment before an event leaves for
+// each relay, after every wait (a slow connect, an AUTH round trip), so a
+// pause between the last check and the send cannot let a server that lost
+// its lock publish (lock.ts; review of #48, L1).
+describe('beforePublish, the lock\'s check before every send', () => {
+  class LockLostError extends Error { override name = 'LockLostError' }
+  const URL_A = 'wss://slow-connect.example'
+  const URL_B = 'wss://auth-on-publish.example'
+
+  it('runs after a slow connect, before the event goes out, and a refusal there stops the publish', async () => {
+    const network = new FakeNetwork()
+    // The first connection (the auth pass) is refused at once; the publish's own connect then takes 300 ms.
+    const relay = network.add(URL_A, { requireAuth: false, connectDelayMs: 300, refuseConnects: 1 })
+    const t0 = Date.now()
+    const calls: number[] = []
+    // The second check is the one after the connect: the lock is lost by then (a pause landed in the wait).
+    const relays = new Relays({
+      urls: [URL_A], signAuth: async (t) => finalizeEvent(t, generateSecretKey()), websocketImplementation: network.WebSocket, maxWaitMs: 1500,
+      beforePublish: () => { calls.push(Date.now() - t0); if (calls.length >= 2) throw new LockLostError('Refused to publish an event: this server no longer holds its lock') },
+    })
+    try {
+      await expect(relays.publish(note(generateSecretKey(), 'never sent'))).rejects.toThrow(LockLostError)
+      expect(calls).toHaveLength(2)
+      expect(calls[1]).toBeGreaterThanOrEqual(290)
+      expect(relay.published).toHaveLength(0)
+    } finally {
+      relays.close()
+    }
+  })
+
+  it('runs again before the send that follows an AUTH the relay asked for, and a refusal there stops it', async () => {
+    const network = new FakeNetwork()
+    const relay = network.add(URL_B, { requireAuth: false, challengeOnReq: true, requireAuthToPublish: true })
+    let calls = 0
+    const relays = new Relays({
+      urls: [URL_B], signAuth: async (t) => finalizeEvent(t, generateSecretKey()), websocketImplementation: network.WebSocket, maxWaitMs: 1500,
+      // The top check, the one before the first send (refused: auth-required), then the one after the AUTH: lost by then.
+      beforePublish: () => { if (++calls >= 3) throw new LockLostError('Refused to publish an event: this server no longer holds its lock') },
+    })
+    try {
+      await expect(relays.publish(note(generateSecretKey(), 'never sent'))).rejects.toThrow(LockLostError)
+      expect(calls).toBe(3)
+      expect(relay.published).toHaveLength(0)
+    } finally {
+      relays.close()
+    }
+  })
+
+  it('lets the event go when every check passes', async () => {
+    const network = new FakeNetwork()
+    const relay = network.add(URL_B, { requireAuth: false, challengeOnReq: true, requireAuthToPublish: true })
+    let calls = 0
+    const relays = new Relays({ urls: [URL_B], signAuth: async (t) => finalizeEvent(t, generateSecretKey()), websocketImplementation: network.WebSocket, maxWaitMs: 1500, beforePublish: () => { calls++ } })
+    try {
+      expect((await relays.publish(note(generateSecretKey(), 'sent'))).ok).toBe(true)
+      expect(calls).toBe(3)
+      expect(relay.published).toHaveLength(1)
+    } finally {
+      relays.close()
+    }
+  })
+})

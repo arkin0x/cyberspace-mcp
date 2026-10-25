@@ -136,6 +136,9 @@ interface AskOptions {
   onEvent?: (ev: NostrEvent) => void
 }
 
+/** An error thrown by beforePublish (the lock's LockLostError), told apart by name so this file needs no import of the lock. */
+const isLockRefusal = (err: unknown): boolean => err instanceof Error && err.name === 'LockLostError'
+
 export class Relays {
   readonly canonical: string
   readonly urls: string[]
@@ -270,20 +273,24 @@ export class Relays {
   private async publishOnce(urls: string[], event: NostrEvent): Promise<PublishResult> {
     this.beforePublish?.()
     await this.authAll(urls)
-    // Checked again once the sockets are ready, the moment before the event leaves.
-    this.beforePublish?.()
     const results = await Promise.allSettled(urls.map(async (url) => {
       const relay = await this.ensureRelay(url)
       try {
+        // Checked once more after every wait (a connect, an AUTH), the moment before the event leaves for each relay.
+        this.beforePublish?.()
         return await relay.publish(event)
       } catch (err) {
         // A relay that wants AUTH before it takes an event (some DM inboxes do) and sent its challenge only now: answer it and send once more.
         if (!/^auth-required\b/i.test(err instanceof Error ? err.message : String(err))) throw err
         if (!(await this.challengeOf(relay, 1000))) throw err
         await relay.auth((t) => this.sign(t))
+        this.beforePublish?.()
         return relay.publish(event)
       }
     }))
+    // A refusal by the lock (lock.ts) is no relay's answer: it stops the publish, whatever the relays said.
+    const stopped = results.find((r) => r.status === 'rejected' && this.beforePublish && isLockRefusal(r.reason))
+    if (stopped) throw (stopped as PromiseRejectedResult).reason
     const accepted: string[] = []
     const reasons: Record<string, string> = {}
     results.forEach((r, i) => {

@@ -325,10 +325,14 @@ export class Transit {
   /** A ride the background dropped (its head moved), told once by the next ride call or status. */
   private ended: { to: number; reason: string } | null = null
 
+  private readonly dir: StateDir
+
   constructor(dir: StateDir, private readonly body: TransitBody, options: TransitOptions = {}) {
-    this.store = LineStore.open(join(dir.path, 'line'), { manifestUrl: options.manifestUrl, fetch: options.fetch })
+    // Every write under line/ and rides/, on this thread or a ride's, first checks the state directory's lock (lock.ts).
+    this.dir = dir
+    this.store = LineStore.open(join(dir.path, 'line'), { manifestUrl: options.manifestUrl, fetch: options.fetch, guard: (w) => dir.guard(w) })
     this.threads = options.threads ?? Math.max(1, availableParallelism() - 1)
-    this.runner = RideRunner.open(join(dir.path, 'rides'), { threads: this.threads, now: options.now })
+    this.runner = RideRunner.open(join(dir.path, 'rides'), { threads: this.threads, now: options.now, guard: (w) => dir.guard(w) })
     this.interrupted = this.readRecord()
     this.hosaka = createHosaka({ apiUrl: options.hosakaUrl ?? HOSAKA_DEFAULT_URL, sign: body.sign, fetch: options.hosakaFetch })
     this.hosakaQuoteWaitMs = options.hosakaQuoteWaitMs ?? HOSAKA_QUOTE_WAIT_MS
@@ -920,7 +924,7 @@ export class Transit {
           return bytesToHex(hashes.subarray((height - lo - 1) * 32, (height - lo) * 32))
         },
       }, options)
-      : runRideInThread({ cachePath: this.runner.cache.path, threads: this.threads, previousEventIdHex: flight.previousId, fromHeight: flight.fromHeight, toHeight: flight.toHeight, hashes }, options)
+      : runRideInThread({ cachePath: this.runner.cache.path, threads: this.threads, previousEventIdHex: flight.previousId, fromHeight: flight.fromHeight, toHeight: flight.toHeight, hashes, ...(this.dir.leaseView() ? { lease: this.dir.leaseView()! } : {}) }, options)
     flight.run = work.then(
       (result) => {
         flight.run = null
@@ -1257,6 +1261,7 @@ export class Transit {
       leavesDone: flight.progress?.leavesDone ?? 0, workSeconds: Number(flight.workSeconds.toFixed(3)), savedAt: now,
     }
     try {
+      this.dir.guard('write flight.json')
       const tmp = `${this.recordPath()}.${process.pid}.tmp`
       writeFileSync(tmp, JSON.stringify(record, null, 2), { mode: 0o600 })
       renameSync(tmp, this.recordPath())
@@ -1266,6 +1271,7 @@ export class Transit {
   }
 
   private deleteRecord(): void {
+    this.dir.guard('remove flight.json')
     try { unlinkSync(this.recordPath()) } catch { /* none */ }
   }
 

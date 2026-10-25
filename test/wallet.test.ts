@@ -146,6 +146,24 @@ describe('the connection string is a secret', () => {
 })
 
 describe('the NWC client, against a fake wallet service', () => {
+  it('sends nothing to the wallet once beforePublish refuses (a server that lost its lock pays nothing: lock.ts)', async () => {
+    const w = world()
+    let lost = false
+    const client = new NwcClient(parseNwc(new Secret(w.service.uri()), 'test'), {
+      websocketImplementation: w.network.WebSocket, maxWaitMs: 1000,
+      beforePublish: () => { if (lost) { const e = new Error('Refused to send a request to the wallet: this server no longer holds its lock'); e.name = 'LockLostError'; throw e } },
+    })
+    try {
+      expect(await client.getBalanceMsats()).toBe(100_000_000)
+      lost = true
+      const inv = w.payee.invoice(21)
+      await expect(client.payInvoice(inv.bolt11)).rejects.toThrow(/no longer holds its lock/)
+      expect(w.service.requests.map((r) => r.method)).toEqual(['get_balance'])
+    } finally {
+      client.close()
+    }
+  })
+
   it('reads the info event, then get_balance and pay_invoice in NIP-44 v2; the requests are signed with the connection\'s key, never another', async () => {
     const w = world()
     const client = new NwcClient(parseNwc(new Secret(w.service.uri()), 'test'), { websocketImplementation: w.network.WebSocket, maxWaitMs: 1000 })

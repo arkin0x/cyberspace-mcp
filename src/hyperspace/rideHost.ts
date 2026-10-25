@@ -8,6 +8,7 @@
 import { Worker } from 'node:worker_threads'
 import type { RideHostData, RideHostMessage } from './rideHostWorker.js'
 import type { RideRunOptions, RideRunResult } from './rideRunner.js'
+import type { LeaseView } from '../state/lock.js'
 
 export interface RideHostJob {
   cachePath: string
@@ -18,6 +19,8 @@ export interface RideHostJob {
   fromHeight: number
   toHeight: number
   hashes: Uint8Array
+  /** The state directory's lease, checked by the thread before every write to the ride cache (lock.ts). */
+  lease?: LeaseView
 }
 
 /** How often the caller's stop predicate is looked at. */

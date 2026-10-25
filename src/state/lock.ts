@@ -47,7 +47,33 @@ import { Worker } from 'node:worker_threads'
 export class LockHeldError extends Error {}
 
 /** This server no longer holds its lock (or cannot show that it does): nothing may be signed, published or written. */
-export class LockLostError extends Error {}
+export class LockLostError extends Error {
+  override name = 'LockLostError'
+}
+
+/**
+ * The lease as another thread of this process sees it (a ride's thread, which
+ * writes the ride cache): the heartbeat's shared buffer and the fence. It can
+ * be handed to a worker in its workerData.
+ */
+export interface LeaseView {
+  shared: SharedArrayBuffer
+  fenceMs: number
+}
+
+/**
+ * Throws LockLostError unless the lease is live: never fenced, never
+ * released, and its last confirmed heartbeat within the fence by both
+ * clocks. For a thread that holds no HeldLock (the main thread's own checks
+ * also fence; this one only refuses).
+ */
+export function checkLease(view: LeaseView, what: string): void {
+  const beat = new BigInt64Array(view.shared)
+  const wall = BigInt(Date.now()) - Atomics.load(beat, 0)
+  const steady = process.hrtime.bigint() / 1_000_000n - Atomics.load(beat, 1)
+  const age = Number(wall > steady ? wall : steady)
+  if (Atomics.load(beat, 2) !== 0n || age > view.fenceMs) throw new LockLostError(`Refused to ${what}: this server no longer holds its state directory's lock (or cannot show that it does). One key has one mover.`)
+}
 
 /** The environment variable that names this machine's id, in place of the file. */
 export const MACHINE_ID_ENV = 'CYBERSPACE_MCP_MACHINE_ID'
@@ -124,8 +150,8 @@ const code = (err: unknown): string | undefined => (err as NodeJS.ErrnoException
  * never over a file already there, and return the new name: a hard link
  * then the old name dropped, or a rename where links are not supported.
  */
-export function moveAside(path: string, what: string, reason: string): string {
-  const base = `${path}.${what}-${stamp()}-${reason}`
+export function moveAside(path: string, what: string, reason: string, as = path): string {
+  const base = `${as}.${what}-${stamp()}-${reason}`
   for (let n = 1; n < 1000; n++) {
     const dest = n === 1 ? base : `${base}-${n}`
     try {
@@ -276,6 +302,7 @@ function makeMachineId(path: string, note?: string): MachineId | 'changed' {
 
 const readOr = (path: string): string | null => { try { return readFileSync(path, 'utf8') } catch { return null } }
 const mtimeOf = (path: string): bigint | null => { try { return statSync(path, { bigint: true }).mtimeNs } catch { return null } }
+const inodeOr = (path: string): bigint | null => { try { return statSync(path, { bigint: true }).ino } catch { return null } }
 
 /** The kernel's boot id, or null where there is no /proc. */
 const bootId = (): string | null => readOr('/proc/sys/kernel/random/boot_id')?.trim() || null
@@ -408,6 +435,8 @@ export interface HeldLock {
   assertFresh(what: string): void
   /** Why this process was fenced, or null. */
   fenced(): string | null
+  /** The lease for another thread of this process to check (checkLease). */
+  view(): LeaseView
   /** Called once when this process is fenced (at once when it already is). */
   onLost(cb: (reason: string) => void): void
 }
@@ -476,6 +505,7 @@ export async function takeLock(stateDir: string, opts: LockOptions = {}): Promis
     let reason = verdict.kind === 'stale' ? verdict.reason : 'silent'
     let detail = verdict.detail
     let mtime = mtimeOf(path)
+    const inode = inodeOr(path)
     if (verdict.kind === 'watch') {
       const old = parseLock(raw)!
       const watchMs = opts.silenceMs ?? Math.max(MIN_SILENCE_MS, Math.ceil(2.5 * (old.heartbeatMs ?? HEARTBEAT_MS)), (old.fenceMs ?? FENCE_MS) + 10_000)
@@ -492,7 +522,7 @@ export async function takeLock(stateDir: string, opts: LockOptions = {}): Promis
       detail = `${verdict.detail}, its heartbeat silent for ${Math.round(watchMs / 1000)} s`
       mtime = mtimeOf(path)
     }
-    const taken = takeOver(path, raw!, mtime, reason, publish)
+    const taken = takeOver(path, { raw: raw!, mtime, inode }, reason, publish)
     if (taken === 'busy') { await sleep(200); continue }
     if (taken === 'changed') continue
     log(`lock: ${self} took over the lock ${detail} (${reason}); the old lock is kept as ${taken}`)
@@ -507,18 +537,30 @@ export async function takeLock(stateDir: string, opts: LockOptions = {}): Promis
  * and modification time), move it aside and publish this process's own,
  * in that order, before the claim is let go. Returns the name the old lock
  * is kept under, 'busy' when another taker holds the claim, 'changed' when
- * the lock is no longer the one judged.
+ * the lock is no longer the one judged. hooks.beforeMove: tests only (a
+ * fresh lock swapped in at the worst moment).
  */
-function takeOver(path: string, judged: string, judgedMtime: bigint | null, reason: string, publish: () => boolean): string | 'busy' | 'changed' {
+export function takeOver(path: string, judged: { raw: string; mtime: bigint | null; inode: bigint | null }, reason: string, publish: () => boolean, hooks: { beforeMove?: () => void } = {}): string | 'busy' | 'changed' {
   return withClaim(path, () => {
-    if (readOr(path) !== judged || mtimeOf(path) !== judgedMtime) return 'changed'
-    let kept: string
+    // The very file judged: its bytes (the nonce among them), its modification time and its inode.
+    if (judged.inode === null || readOr(path) !== judged.raw || mtimeOf(path) !== judged.mtime || inodeOr(path) !== judged.inode) return 'changed'
+    hooks.beforeMove?.()
+    // Moved to a name of this process's own first, then checked: what was moved must be the very file judged (bytes,
+    // nonce included, and inode). A claim taken from a taker that was paused inside it may let that taker move
+    // a fresh lock at this moment; a fresh lock moved here by mistake is put back, and if it cannot be, its owner
+    // finds its lock gone and fences itself.
+    const taking = `${path}.taking-${process.pid}-${randomBytes(4).toString('hex')}`
     try {
-      kept = moveAside(path, 'stale', reason)
+      renameSync(path, taking)
     } catch (err) {
       if (code(err) === 'ENOENT') return 'changed'
       throw err
     }
+    if (readOr(taking) !== judged.raw || inodeOr(taking) !== judged.inode) {
+      try { linkSync(taking, path); unlinkSync(taking) } catch { /* left as lock.taking-*: its owner fences itself on the missing lock */ }
+      return 'changed'
+    }
+    const kept = moveAside(taking, 'stale', reason, path)
     // A server starting just now may publish into the gap (it needs no claim to take a free lock): then it is the owner, and this one judges its lock.
     if (!publish()) return 'changed'
     return kept
@@ -661,6 +703,7 @@ function armLease(path: string, mine: string, nonce: string, heartbeatMs: number
       if (parseLock(raw)?.nonce !== nonce) { doFence('the lock now names another owner'); throw refuse(what, `no longer holds ${path}: ${fence}`) }
     },
     fenced: () => fence,
+    view: () => ({ shared, fenceMs }),
     onLost(cb: (reason: string) => void): void {
       if (fence) cb(fence)
       else callbacks.push(cb)

@@ -27,7 +27,8 @@ import { generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { Agent } from '../src/agent.js'
 import { bytesToHex } from '../src/nostr/event.js'
 import { ForeignKeyError, KEY_GENERATED_BY, LockHeldError, LockLostError, StateDir } from '../src/state/dir.js'
-import { describeLock, machineIdPath, MACHINE_ID_ENV, moveAside, procStart, resolveMachineId, takeLock } from '../src/state/lock.js'
+import { checkLease, describeLock, machineIdPath, MACHINE_ID_ENV, moveAside, procStart, resolveMachineId, takeLock, takeOver } from '../src/state/lock.js'
+import { RideCache } from '../src/hyperspace/rideCache.js'
 import { FakeNetwork } from './fakeRelay.js'
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -440,6 +441,13 @@ describe('the lock is a lease: an owner that cannot show it holds it signs nothi
       expect(relay.published.length).toBe(published)
       expect(() => StateDir.open(path).writeJson('probe.json', {})).not.toThrow()
       expect(() => (agent as unknown as { dir: StateDir }).dir.writeJson('profile.json', {})).toThrow(LockLostError)
+      // The writes that do not go through writeJson: the waker's, flight.json, the line and the ride cache, all behind the same guard.
+      expect(() => agent.guardWrite('write wake-work.json')).toThrow(LockLostError)
+      const transit = (agent as unknown as { transit: { dir: StateDir; runner: { cache: RideCache }; store: { guard: (w: string) => void } } }).transit
+      expect(transit.dir).toBe((agent as unknown as { dir: StateDir }).dir)
+      expect(() => transit.store.guard('write the hyperspace line')).toThrow(LockLostError)
+      expect(() => transit.runner.cache.appendLeaves('a'.repeat(64), [{ height: 1, leafHex: 'b'.repeat(64) }])).toThrow(LockLostError)
+      expect(existsSync(join(path, 'rides', 'leaves', `${'a'.repeat(64)}.log`))).toBe(false)
     } finally {
       await agent.stop().catch(() => {})
       rmSync(join(path, 'lock'), { force: true })
@@ -447,7 +455,67 @@ describe('the lock is a lease: an owner that cannot show it holds it signs nothi
   })
 })
 
+describe('the guards on every other write', () => {
+  it('a lease another thread checks: live while held, refused once released, and once its beat is older than the fence', async () => {
+    const path = fresh()
+    const held = await StateDir.open(path).lock({ env, heartbeatMs: 0, fenceMs: 150 })
+    const view = held.view()
+    expect(() => checkLease(view, 'write the ride cache')).not.toThrow()
+    await sleep(250)
+    expect(() => checkLease(view, 'write the ride cache')).toThrow(LockLostError)
+    held.release()
+    const again = await StateDir.open(path).lock({ env, heartbeatMs: 50 })
+    const live = again.view()
+    await sleep(200)
+    expect(() => checkLease(live, 'write the ride cache')).not.toThrow()
+    again.release()
+    expect(() => checkLease(live, 'write the ride cache')).toThrow(/no longer holds/)
+  })
+
+  it('the ride cache, the waker\'s files and remove() all stop at the guard, leaving the files as they were', () => {
+    const path = fresh()
+    let lost = false
+    const guard = (what: string): void => { if (lost) throw new LockLostError(`Refused to ${what}`) }
+    const cache = RideCache.open(join(path, 'rides'), guard)
+    cache.appendLeaves('c'.repeat(64), [{ height: 1, leafHex: 'd'.repeat(64) }])
+    const dir = StateDir.open(path)
+    dir.useGuard(guard)
+    dir.writeJson('wake-work.json', { open: true })
+    lost = true
+    expect(() => cache.appendLeaves('c'.repeat(64), [{ height: 2, leafHex: 'd'.repeat(64) }])).toThrow(/Refused to write the ride cache/)
+    expect(() => cache.forget('c'.repeat(64))).toThrow(LockLostError)
+    expect(readFileSync(join(path, 'rides', 'leaves', `${'c'.repeat(64)}.log`), 'utf8').trim().split('\n')).toHaveLength(1)
+    expect(() => dir.remove('wake-work.json')).toThrow(/Refused to remove wake-work.json/)
+    expect(() => dir.writeJson('wake-work.json', {})).toThrow(LockLostError)
+    expect(JSON.parse(readFileSync(join(path, 'wake-work.json'), 'utf8'))).toEqual({ open: true })
+  })
+})
+
 describe('taking a lock over', () => {
+  it.skipIf(!hasProc)('a fresh lock that lands between the check and the move is put back, never kept aside, and the taker judges again', () => {
+    const path = fresh()
+    StateDir.open(path)
+    const lock = join(path, 'lock')
+    const old = JSON.stringify({ pid: DEAD_PID, startedAt: 'long ago', host: hostname(), nonce: 'old' })
+    writeFileSync(lock, old)
+    const judged = { raw: old, mtime: statSync(lock, { bigint: true }).mtimeNs, inode: statSync(lock, { bigint: true }).ino }
+    // A taker paused inside a claim another took from it as abandoned: the other's fresh lock is at `lock` when it moves.
+    const fresh2 = JSON.stringify({ pid: process.pid, startedAt: 'now', host: hostname(), nonce: 'fresh' })
+    let published = false
+    const r = takeOver(lock, judged, 'pid-gone', () => { published = true; return true }, {
+      beforeMove: () => { renameSync(lock, join(path, 'old.elsewhere')); writeFileSync(lock, fresh2) },
+    })
+    expect(r).toBe('changed')
+    expect(published).toBe(false)
+    expect(readFileSync(lock, 'utf8')).toBe(fresh2)
+    expect(staleFiles(path)).toEqual([])
+    expect(readdirSync(path).filter((f) => f.startsWith('lock.taking-'))).toEqual([])
+    // Judged by inode too: the same bytes in another file are not the file judged.
+    writeFileSync(join(path, 'copy'), old)
+    renameSync(join(path, 'copy'), lock)
+    expect(takeOver(lock, judged, 'pid-gone', () => true)).toBe('changed')
+  })
+
   it.skipIf(!hasProc)('waits for a claim another taker holds, never moving the lock meanwhile, and moves aside a claim abandoned mid-takeover', async () => {
     const path = fresh()
     StateDir.open(path)

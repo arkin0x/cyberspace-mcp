@@ -304,6 +304,7 @@ export class Agent {
     this.wallet = new Wallet(dir, {
       nwc: config.nwc ?? null, source: config.nwcSource ?? 'the configuration', maxPaymentSats: config.maxPaymentSats ?? DEFAULT_MAX_PAYMENT_SATS, maxDailySats: config.maxDailySats ?? DEFAULT_MAX_DAILY_SATS,
       websocketImplementation: config.websocketImplementation, maxWaitMs: config.relayMaxWaitMs, log: this.log, now: config.walletClock, payTimeoutMs: config.walletPayTimeoutMs,
+      beforePublish: () => held.assert('send a request to the wallet'),
     })
     this.transit = new Transit(dir, {
       pubkey: this.pubkey, keeper: this.keeper, budget: this.budget, outbox: this.outbox, canonical: this.relays.canonical,
@@ -456,6 +457,11 @@ export class Agent {
    */
   onLockLost(cb: (reason: string) => void): void {
     this.held.onLost(cb)
+  }
+
+  /** Throws unless this server may write into its state directory (its lock holds): for the waker, which writes beside it. */
+  guardWrite(what: string): void {
+    this.dir.guard(what)
   }
 
   /** Throws unless this server still holds its lock; returns undefined, so `this.assertLock(...) ?? next` reads in one expression. */

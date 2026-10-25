@@ -22,6 +22,7 @@
 import { parentPort, workerData, type MessagePort } from 'node:worker_threads'
 import { bytesToHex } from 'cyberspace-core'
 import { RideRunner, type RideProgress, type RideRunResult } from './rideRunner.js'
+import { checkLease, type LeaseView } from '../state/lock.js'
 
 export interface RideHostData {
   /** Marks a thread started as a ride host, so importing this file anywhere else serves nothing. */
@@ -38,6 +39,8 @@ export interface RideHostData {
   budgetSeconds: number
   /** Nonzero asks the run to stop as if its budget ran out. */
   stop: SharedArrayBuffer
+  /** The state directory's lease: a server that lost its lock writes nothing to the ride cache (lock.ts). */
+  lease?: LeaseView
 }
 
 export type RideHostMessage =
@@ -58,7 +61,8 @@ function serve(port: MessagePort, data: RideHostData): void {
     const at = (height - lo - 1) * 32
     return bytesToHex(data.hashes.subarray(at, at + 32))
   }
-  const runner = RideRunner.open(data.cachePath, { threads: data.threads, chunkSize: data.chunkSize, grindChunk: data.grindChunk })
+  const lease = data.lease
+  const runner = RideRunner.open(data.cachePath, { threads: data.threads, chunkSize: data.chunkSize, grindChunk: data.grindChunk, ...(lease ? { guard: (what: string) => checkLease(lease, what) } : {}) })
   runner.run(
     { previousEventIdHex: data.previousEventIdHex, fromHeight: data.fromHeight, toHeight: data.toHeight, blockHashFor },
     {
