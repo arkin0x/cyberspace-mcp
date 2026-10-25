@@ -116,7 +116,8 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
   --machine-id <id>             This machine's id, which the state directory's lock records so a
                                 restart of the same machine takes back its own lock. Default
                                 $CYBERSPACE_MCP_MACHINE_ID, else <state>.machine-id (made once,
-                                beside the state directory; never sync or copy it).
+                                beside the state directory; never sync or copy it). An id given here
+                                or in the environment must be unique to this machine.
   --help                        This text.
 
 The same keys may live in <state>/config.json: relays, operator, name, about,

@@ -64,7 +64,7 @@ import { apartOnBestAxis, nearestClear, overlapping, spacingFor, type Body } fro
 import { AvatarSizes } from './avatarSizes.js'
 import { planSummary, priceNextStep, type Ceilings, type PricedStep } from './space/plan.js'
 import { KeyStore, keyItemOfHeld, MAX_COMPUTE_HEIGHT, SCAN_MAX_HEIGHT, SCAN_MIN_HEIGHT, sealerOfSeen, type EntrySummary, type HeldItem, type HeldKey, type ItemPlace, type OpenedBag, type SeenChest } from './space/regionKeys.js'
-import { StateDir } from './state/dir.js'
+import { StateDir, type HeldLock } from './state/dir.js'
 import { Refusal, type ToolResult } from './tool.js'
 import { Transit } from './transit.js'
 import type { Secret } from './nwc.js'
@@ -248,6 +248,7 @@ export class Agent {
   calibration: Calibration
   private readonly dir: StateDir
   private readonly sk: Uint8Array
+  private readonly held: HeldLock
   private readonly release: () => void
   private readonly log: (line: string) => void
   private name: string | null
@@ -265,10 +266,11 @@ export class Agent {
   /** Who marks the unread orders a STOP dropped (the waker, for their ⏹️). */
   onStoppedUnread: ((ids: string[]) => void) | null = null
 
-  private constructor(readonly config: AgentConfig, dir: StateDir, sk: Uint8Array, release: () => void, calibration: Calibration) {
+  private constructor(readonly config: AgentConfig, dir: StateDir, sk: Uint8Array, held: HeldLock, calibration: Calibration) {
     this.dir = dir
     this.sk = sk
-    this.release = release
+    this.held = held
+    this.release = () => held.release()
     this.log = config.log ?? (() => {})
     this.pubkey = getPublicKey(sk)
     this.npub = nip19.npubEncode(this.pubkey)
@@ -276,7 +278,7 @@ export class Agent {
     this.name = config.name ?? null
     const urls = config.relays.map((u) => normalizeRelay(u)).filter((u): u is string => !!u)
     if (urls.length === 0) throw new Error('no usable relay URL was given')
-    this.relays = new Relays({ urls, signAuth: async (t) => finalizeEvent(t, this.sk), websocketImplementation: config.websocketImplementation, maxWaitMs: config.relayMaxWaitMs, log: this.log })
+    this.relays = new Relays({ urls, signAuth: async (t) => finalizeEvent(t, this.sk), websocketImplementation: config.websocketImplementation, maxWaitMs: config.relayMaxWaitMs, log: this.log, beforePublish: () => held.assert('publish an event') })
     this.holders = new Holders(dir, this.relays.canonical)
     this.keeper = new ChainKeeper(dir, this.relays, this.holders, this.pubkey, this.log)
     this.outbox = new Outbox(dir, this.relays, {
@@ -323,10 +325,10 @@ export class Agent {
     this.operatorChannel = new OperatorChannel({
       pubkey: this.pubkey, relays: this.relays, dir, operator: () => this.operatorOfProfile(), operatorProblem: () => this.operatorProblem(), lookupRelays: config.lookupRelays ?? GENERAL_RELAYS,
       sign: (t) => this.sign(t),
-      wrap: (recipient, text) => wrapMessage({ senderSk: this.sk, recipient, text, now: nowSeconds() }),
+      wrap: (recipient, text) => this.assertLock('seal a DM') ?? wrapMessage({ senderSk: this.sk, recipient, text, now: nowSeconds() }),
       unwrap: (wrap) => unwrapMessage(wrap, this.sk),
       // The 👀 on each order, the first time the server sees it (arkinox, 2026-10-12).
-      wrapReaction: (recipient, eventId, content, extraTags) => wrapReaction({ senderSk: this.sk, recipient, eventId, content, extraTags, now: nowSeconds() }),
+      wrapReaction: (recipient, eventId, content, extraTags) => this.assertLock('seal a DM reaction') ?? wrapReaction({ senderSk: this.sk, recipient, eventId, content, extraTags, now: nowSeconds() }),
       // The operator's STOP, carried out by the server, never by a model (arkinox, 2026-10-25).
       onStop: (targets, _id, haltBegan) => { void this.carryOutStop(targets, haltBegan) },
       onStoppedUnread: (ids) => { try { this.onStoppedUnread?.(ids) } catch { /* the jobs' bookkeeping never fails a read */ } },
@@ -423,7 +425,7 @@ export class Agent {
   static async start(config: AgentConfig): Promise<Agent> {
     const dir = StateDir.open(config.stateDir)
     const log = config.log ?? (() => {})
-    const release = await dir.lock({ machineId: config.machineId, log })
+    const held = await dir.lock({ machineId: config.machineId, log })
     try {
       const sk = dir.loadOrCreateKey()
       let calibration = config.calibration
@@ -432,7 +434,7 @@ export class Agent {
         calibration = c
         log(measured ? `calibrated: hop ceiling h${hopCeiling(c.cantorMsByHeight)}, ${Math.round(c.sha256PerSec / 1000)}k SHA-256/s` : 'calibration loaded from the state directory')
       }
-      const agent = new Agent(config, dir, sk, release, calibration)
+      const agent = new Agent(config, dir, sk, held, calibration)
       if (agent.nonDefaultCanonical) {
         log(`WARNING: the canonical relay is ${agent.relays.canonical}, not the default ${DEFAULT_RELAY}. The chain's truth (which spawn is newest, where the head is) is read from there. A spawn signed because that relay shows no chain would end a chain this identity has on the default relay. Use this only for a relay that really holds this identity's chain.`)
       }
@@ -441,9 +443,25 @@ export class Agent {
       agent.operatorChannel.startPolling(config.ordersPollMs ?? ORDERS_POLL_MS)
       return agent
     } catch (err) {
-      release()
+      held.release()
       throw err
     }
+  }
+
+  /**
+   * Called once if this server loses its lock (lock.ts: the lock names
+   * another owner, or its heartbeat could not be confirmed within the
+   * fence). From then on nothing is signed, published or written; the
+   * caller stops the server and exits non-zero so its supervisor restarts it.
+   */
+  onLockLost(cb: (reason: string) => void): void {
+    this.held.onLost(cb)
+  }
+
+  /** Throws unless this server still holds its lock; returns undefined, so `this.assertLock(...) ?? next` reads in one expression. */
+  private assertLock(what: string): undefined {
+    this.held.assert(what)
+    return undefined
   }
 
   private async boot(): Promise<void> {
@@ -512,6 +530,8 @@ export class Agent {
   }
 
   private sign(template: EventTemplate): NostrEvent {
+    // One key, one mover: a server that cannot show it still holds the lock signs nothing (lock.ts).
+    this.held.assert('sign an event')
     return signEvent(template, this.sk)
   }
 

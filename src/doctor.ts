@@ -207,18 +207,18 @@ export async function runDoctor(argv: string[], deps: DoctorDeps): Promise<{ cod
 
   // The lock, and this machine's id for it.
   try {
-    const { machine, judgment, held } = describeLock(stateDir, { machineId: args.machineId, env: deps.env })
+    const { machine, judgment, held, ageMs } = describeLock(stateDir, { machineId: args.machineId, env: deps.env })
     const id = machine.id
       ? `machine id ${machine.id} (${machine.source === 'file' ? machine.path : machine.source === 'env' ? `$${MACHINE_ID_ENV}` : '--machine-id'})`
       : `no machine id yet${machine.path ? ` (serve makes ${machine.path})` : ''}`
-    const older = held && !held.machineId ? ', older lock format without a machine id' : ''
+    const older = `${held && !held.machineId ? ', older lock format without a machine id' : ''}${ageMs !== null && judgment.kind !== 'free' ? `, last touched ${Math.max(0, Math.round(ageMs / 1000))} s ago` : ''}`
     const note = machine.note ? `; ${machine.note}` : ''
     if (judgment.kind === 'free' || judgment.kind === 'ours' || (judgment.kind === 'held' && judgment.here)) {
       add({ name: 'lock', verdict: machine.note ? 'warn' : 'ok', detail: `${id}; lock ${judgment.kind === 'free' ? 'free' : judgment.detail}${older}${note}`, fix: `never sync or copy ${machine.path ?? 'the machine id file'}` })
     } else if (judgment.kind === 'stale' || judgment.kind === 'watch') {
       add({ name: 'lock', verdict: 'warn', detail: `${id}; lock ${judgment.detail}${older}${note}`, fix: judgment.kind === 'watch' ? 'the next serve takes it over by itself once its heartbeat has been silent for 25 s, and keeps the old lock as lock.stale-*' : 'the next serve takes it over by itself and keeps the old lock as lock.stale-*' })
     } else {
-      add({ name: 'lock', verdict: 'warn', detail: `${id}; lock ${judgment.detail}${note}`, fix: `serve refuses this lock; when that server is gone for certain, rename ${join(stateDir, 'lock')} to lock.stale-<date>` })
+      add({ name: 'lock', verdict: 'warn', detail: `${id}; lock ${judgment.detail}${older}${note}`, fix: `serve refuses this lock; when that server is gone for certain, rename ${join(stateDir, 'lock')} to lock.stale-<date>` })
     }
   } catch (err) {
     add({ name: 'lock', verdict: 'fail', detail: err instanceof Error ? err.message : String(err), fix: `fix --machine-id or $${MACHINE_ID_ENV}` })

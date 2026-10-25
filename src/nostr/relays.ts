@@ -103,6 +103,8 @@ export interface RelaysOptions {
   maxWaitMs?: number
   /** Where a line of diagnostics goes; never stdout, which is the MCP channel. */
   log?: (line: string) => void
+  /** Called synchronously before every publish; throws to stop it (the state directory's lock, lock.ts). */
+  beforePublish?: () => void
 }
 
 /** `accepted`: the relays that took the event (normalized URLs). `reasons`: each failure, verbatim, by relay. */
@@ -148,6 +150,8 @@ export class Relays {
   private registries = new Map<string, LiveRegistry>()
   private closed = false
 
+  private readonly beforePublish?: () => void
+
   constructor(opts: RelaysOptions) {
     const urls = [...new Set(opts.urls.map((u) => normalizeURL(u)))]
     if (urls.length === 0) throw new Error('at least one relay is needed')
@@ -155,6 +159,7 @@ export class Relays {
     this.urls = urls
     this.maxWaitMs = opts.maxWaitMs ?? 8000
     this.signAuth = opts.signAuth
+    this.beforePublish = opts.beforePublish
     // Node's own WebSocket, behind the guard of websocket.ts, unless a test hands in the fake one.
     this.websocketImplementation = opts.websocketImplementation ?? GuardedWebSocket
     this.log = opts.log ?? (() => {})
@@ -263,7 +268,10 @@ export class Relays {
   }
 
   private async publishOnce(urls: string[], event: NostrEvent): Promise<PublishResult> {
+    this.beforePublish?.()
     await this.authAll(urls)
+    // Checked again once the sockets are ready, the moment before the event leaves.
+    this.beforePublish?.()
     const results = await Promise.allSettled(urls.map(async (url) => {
       const relay = await this.ensureRelay(url)
       try {

@@ -12,9 +12,9 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, w
 import { join } from 'node:path'
 import { generateSecretKey } from 'nostr-tools/pure'
 import { bytesToHex, hexToBytes, HEX_64 } from '../nostr/event.js'
-import { LockHeldError, takeLock, type LockOptions } from './lock.js'
+import { LockHeldError, LockLostError, takeLock, type HeldLock, type LockOptions } from './lock.js'
 
-export { LockHeldError }
+export { LockHeldError, LockLostError, type HeldLock }
 
 /** A key file that is not one this server wrote. */
 export class ForeignKeyError extends Error {}
@@ -31,6 +31,9 @@ interface KeyFile {
 const NEVER_A_HUMANS_KEY = 'An agent never takes a human\'s key: never share a key between two running agents, or between an agent and a human (agents note 6, rule 1). Delete the file and let this server create its own key, or give it an empty state directory.'
 
 export class StateDir {
+  /** The lock this instance took, once it did: every write checks it still holds it. */
+  private held: HeldLock | null = null
+
   private constructor(readonly path: string) {}
 
   /** Open or create the directory (mode 700). */
@@ -59,6 +62,8 @@ export class StateDir {
 
   /** Write a JSON file atomically: a temporary file in the same directory, then a rename. */
   writeJson(name: string, value: unknown): void {
+    // A server that lost its lock writes nothing more: the directory may be another's now.
+    this.held?.assertFresh(`write ${name}`)
     const target = this.file(name)
     const tmp = `${target}.${process.pid}.tmp`
     const fd = openSync(tmp, 'w', 0o600)
@@ -106,9 +111,13 @@ export class StateDir {
    * LockHeldError, with a plain message, while its owner may still run. A
    * lock this machine left behind (a dead pid, a reused pid, or a previous
    * boot whose heartbeat is silent) is taken over and kept aside as
-   * lock.stale-*. Returns the release, also run when this process exits.
+   * lock.stale-*. Returns the held lock (its release, and assert, called
+   * before every signature and publish); from then on every writeJson on
+   * this instance checks the lock's heartbeat first.
    */
-  lock(opts: LockOptions = {}): Promise<() => void> {
-    return takeLock(this.path, opts)
+  async lock(opts: LockOptions = {}): Promise<HeldLock> {
+    const held = await takeLock(this.path, opts)
+    this.held = held
+    return held
   }
 }

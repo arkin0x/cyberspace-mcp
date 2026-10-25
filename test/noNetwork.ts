@@ -12,3 +12,10 @@ globalThis.fetch = async (input, init) => {
   if (/^http:\/\/127\.0\.0\.1:\d+\//.test(url)) return loopbackFetch(input, init)
   throw new TypeError(`tests never touch the network (fetch ${url} was not injected)`)
 }
+
+// Every agent a test starts takes its state directory's lock, and the lock's
+// machine id would otherwise be a file beside each temporary state directory
+// (<dir>.machine-id, lock.ts) left behind in the temporary directory. One id
+// for the whole run instead; test/lock.test.ts passes its own environment to
+// test the file, and removes the files it makes.
+process.env.CYBERSPACE_MCP_MACHINE_ID = 'cyberspace-mcp-tests'

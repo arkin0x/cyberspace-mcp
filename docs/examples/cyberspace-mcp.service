@@ -26,6 +26,7 @@ Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 WorkingDirectory=%h
 # After a crash or a reboot the server takes back the lock this machine left
 # (the machine id is kept beside the state directory, ~/.cyberspace-mcp.machine-id).
+# A server that loses its lock exits 1, and on-failure restarts it.
 Restart=on-failure
 RestartSec=15
 # A clean stop flushes a ride's work to disk and stops a turn under way.

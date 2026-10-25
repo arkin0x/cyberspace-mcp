@@ -171,9 +171,9 @@ describe('doctor', () => {
     expect(check(r.checks, 'operator DM inbox (10050)')?.detail).toContain('inbox.example')
     expect(check(r.checks, 'agent DM inbox (10050)')?.verdict).toBe('ok')
     expect(check(r.checks, 'wake command')?.verdict).toBe('ok')
-    // The lock: free, with the machine id init's start made beside the state directory.
+    // The lock: free, with the machine id the tests run under (test/noNetwork.ts).
     expect(check(r.checks, 'lock')?.verdict).toBe('ok')
-    expect(check(r.checks, 'lock')?.detail).toMatch(new RegExp(`^machine id [0-9a-f-]{36} \\(${state.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.machine-id\\); lock free$`))
+    expect(check(r.checks, 'lock')?.detail).toBe('machine id cyberspace-mcp-tests ($CYBERSPACE_MCP_MACHINE_ID); lock free')
     // serve is not running here: a warning with the command, not a failure.
     expect(check(r.checks, 'serve')?.verdict).toBe('warn')
     expect(r.code).toBe(0)

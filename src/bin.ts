@@ -67,14 +67,16 @@ async function stdio(argv: string[]): Promise<void> {
   const server = createServer(agent, log)
   const transport = new StdioServerTransport()
   let stopping = false
-  const stop = async (why: string): Promise<void> => {
+  const stop = async (why: string, code = 0): Promise<void> => {
     if (stopping) return
     stopping = true
     log(`stopping: ${why}`)
     try { await agent.stop() } catch { /* already down */ }
     try { await server.close() } catch { /* already closed */ }
-    process.exit(0)
+    process.exit(code)
   }
+  // A server that lost its lock stops and exits non-zero, so its supervisor restarts it through the lock (lock.ts).
+  agent.onLockLost((reason) => { void stop(`this server lost its lock (${reason})`, 1) })
   process.on('SIGINT', () => { void stop('SIGINT') })
   process.on('SIGTERM', () => { void stop('SIGTERM') })
   transport.onclose = () => { void stop('the client closed the connection') }
@@ -99,11 +101,16 @@ async function serve(argv: string[]): Promise<void> {
     process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`)
     process.exit(err instanceof Error && /^(--|config\.json|unknown argument|the command)/.test(err.message) ? 2 : 1)
   }
-  const stop = async (why: string): Promise<void> => {
+  let stopping = false
+  const stop = async (why: string, code = 0): Promise<void> => {
+    if (stopping) return
+    stopping = true
     log(`stopping: ${why}`)
-    await serving.stop()
-    process.exit(0)
+    try { await serving.stop() } catch (err) { log(`stop: ${err instanceof Error ? err.message : String(err)}`) }
+    process.exit(code)
   }
+  // A server that lost its lock stops (the waker and every turn with it) and exits non-zero, so its supervisor restarts it through the lock (lock.ts).
+  serving.agent.onLockLost((reason) => { void stop(`this server lost its lock (${reason})`, 1) })
   process.on('SIGINT', () => { void stop('SIGINT') })
   process.on('SIGTERM', () => { void stop('SIGTERM') })
   // A long-lived server outlives a library's stray promise: nostr-tools sends
