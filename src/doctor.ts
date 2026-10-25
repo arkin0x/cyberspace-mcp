@@ -4,8 +4,9 @@
 // and this server's own; never printed), the operator set, named in the
 // profile and following the agent, the operator's DM inbox (kind 10050),
 // the agent's own kind 10050, the relays answering, serve running, and the
-// wake command starting (run with --version, so no model is called). It
-// reads; it writes nothing and takes no lock, so it runs beside serve.
+// wake command starting (run with --version, so no model is called), and
+// the lock with this machine's id for it. It reads; it writes nothing and
+// takes no lock, so it runs beside serve.
 
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync, statSync } from 'node:fs'
@@ -20,6 +21,7 @@ import { mergeAnswers } from './nostr/relayOutcome.js'
 import { defaultStateDir, mcpUrl, serveSettingsFrom, splitServeArgs, type ServeFileConfig } from './serveConfig.js'
 import { PAUSE_FILE } from './waker.js'
 import { ForeignKeyError, StateDir } from './state/dir.js'
+import { describeLock, MACHINE_ID_ENV } from './state/lock.js'
 import type { NostrEvent } from './nostr/event.js'
 
 export type Verdict = 'ok' | 'warn' | 'fail'
@@ -201,6 +203,25 @@ export async function runDoctor(argv: string[], deps: DoctorDeps): Promise<{ cod
     } finally {
       relays.close()
     }
+  }
+
+  // The lock, and this machine's id for it.
+  try {
+    const { machine, judgment, held, ageMs } = describeLock(stateDir, { machineId: args.machineId, env: deps.env })
+    const id = machine.id
+      ? `machine id ${machine.id} (${machine.source === 'file' ? machine.path : machine.source === 'env' ? `$${MACHINE_ID_ENV}` : '--machine-id'})`
+      : `no machine id yet${machine.path ? ` (serve makes ${machine.path})` : ''}`
+    const older = `${held && !held.machineId ? ', older lock format without a machine id' : ''}${ageMs !== null && judgment.kind !== 'free' ? `, last touched ${Math.max(0, Math.round(ageMs / 1000))} s ago` : ''}`
+    const note = machine.note ? `; ${machine.note}` : ''
+    if (judgment.kind === 'free' || judgment.kind === 'ours' || (judgment.kind === 'held' && judgment.here)) {
+      add({ name: 'lock', verdict: machine.note ? 'warn' : 'ok', detail: `${id}; lock ${judgment.kind === 'free' ? 'free' : judgment.detail}${older}${note}`, fix: `never sync or copy ${machine.path ?? 'the machine id file'}` })
+    } else if (judgment.kind === 'stale' || judgment.kind === 'watch') {
+      add({ name: 'lock', verdict: 'warn', detail: `${id}; lock ${judgment.detail}${older}${note}`, fix: judgment.kind === 'watch' ? 'the next serve takes it over by itself once its heartbeat has been silent for 25 s, and keeps the old lock as lock.stale-*' : 'the next serve takes it over by itself and keeps the old lock as lock.stale-*' })
+    } else {
+      add({ name: 'lock', verdict: 'warn', detail: `${id}; lock ${judgment.detail}${older}${note}`, fix: `serve refuses this lock; when that server is gone for certain, rename ${join(stateDir, 'lock')} to lock.stale-<date>` })
+    }
+  } catch (err) {
+    add({ name: 'lock', verdict: 'fail', detail: err instanceof Error ? err.message : String(err), fix: `fix --machine-id or $${MACHINE_ID_ENV}` })
   }
 
   // serve.

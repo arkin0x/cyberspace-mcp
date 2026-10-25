@@ -62,7 +62,7 @@
 // wait. Tool calls already running finish.
 
 import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync, statSync, unlinkSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { JOB_STATUS, type JobState } from './nostr/dm.js'
 import { fillPrompt, type WakeSettings } from './serveConfig.js'
@@ -301,6 +301,8 @@ export interface WakerDeps {
   ordersWaiting: () => Promise<WakeData>
   /** The state directory, for wake.pause and wake.again. */
   stateDir: string
+  /** Called before every write or removal in the state directory (the agent's lock, lock.ts); none when the waker runs alone (tests). */
+  guard?: (what: string) => void
   log: (line: string) => void
   /** Variables for the child besides the server's own environment (the MCP URL, the state directory). */
   env?: Record<string, string>
@@ -392,6 +394,7 @@ export class Waker {
   constructor(readonly settings: WakeSettings, private readonly deps: WakerDeps) {
     this.now = deps.now ?? Date.now
     this.dir = StateDir.open(deps.stateDir)
+    if (deps.guard) this.dir.useGuard(deps.guard)
     const saved = readWork(this.dir.readJson<unknown>(WORK_FILE, null))
     if (saved) {
       this.work = saved
@@ -435,7 +438,7 @@ export class Waker {
       this.work.sealed = kept.length > 0 && this.deps.seal ? this.deps.seal(JSON.stringify(kept)) : null
       this.dir.writeJson(WORK_FILE, this.work)
     } else {
-      try { unlinkSync(this.dir.file(WORK_FILE)) } catch { /* none */ }
+      this.dir.remove(WORK_FILE)
     }
   }
 
@@ -743,7 +746,7 @@ export class Waker {
     let asked = this.againRequested
     this.againRequested = false
     if (existsSync(file)) {
-      try { unlinkSync(file) } catch { /* gone already */ }
+      this.dir.remove(AGAIN_FILE)
       asked = true
     }
     return asked
@@ -752,7 +755,7 @@ export class Waker {
   /** A wake_again from a reply turn is not the work turn's: the work turn asks for its own. */
   private dropAgain(): void {
     this.againRequested = false
-    try { unlinkSync(join(this.deps.stateDir, AGAIN_FILE)) } catch { /* none */ }
+    this.dir.remove(AGAIN_FILE)
   }
 
   /** One poll: at most one turn, run to its end (two for new orders with a reply command). Public for the tests. */

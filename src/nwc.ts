@@ -128,6 +128,8 @@ export interface NwcClientOptions {
   websocketImplementation?: unknown
   maxWaitMs?: number
   log?: (line: string) => void
+  /** Called before every request goes out; throws to stop it (a server that lost its lock pays nothing: lock.ts). */
+  beforePublish?: () => void
 }
 
 /** How long a get_balance answer is waited for. */
@@ -148,6 +150,7 @@ export class NwcClient {
       websocketImplementation: opts.websocketImplementation,
       maxWaitMs: opts.maxWaitMs,
       log: opts.log,
+      beforePublish: opts.beforePublish,
     })
   }
 

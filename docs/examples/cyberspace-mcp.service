@@ -24,6 +24,12 @@ ExecStart=%h/.npm-global/bin/cyberspace-mcp serve
 # wake command, but the CLI itself may need node.
 Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 WorkingDirectory=%h
+# After a crash or a reboot the server takes back the lock this machine left
+# (the machine id is kept beside the state directory, ~/.cyberspace-mcp.machine-id).
+# A server that loses its lock exits 1, and on-failure restarts it. Starting
+# after the clock is set avoids one needless restart on a machine without a
+# real-time clock (a forward clock step of more than 15 s fences the server).
+# After=time-sync.target
 Restart=on-failure
 RestartSec=15
 # A clean stop flushes a ride's work to disk and stops a turn under way.

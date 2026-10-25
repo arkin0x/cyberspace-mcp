@@ -60,12 +60,12 @@ const GRIND_FILE = 'grind.json'
 const LINE = /^(\d+) ([0-9a-f]{64}) ([0-9a-f]{8})$/
 
 export class RideCache {
-  private constructor(readonly path: string) {}
+  private constructor(readonly path: string, private readonly guard: (what: string) => void) {}
 
-  /** Open or create `<state>/rides` and its `leaves/` directory (mode 700). */
-  static open(path: string): RideCache {
+  /** Open or create `<state>/rides` and its `leaves/` directory (mode 700). Every write calls guard first (the state directory's lock, lock.ts). */
+  static open(path: string, guard: (what: string) => void = () => {}): RideCache {
     mkdirSync(join(path, 'leaves'), { recursive: true, mode: 0o700 })
-    return new RideCache(path)
+    return new RideCache(path, guard)
   }
 
   private leavesFile(previousEventIdHex: string): string {
@@ -108,11 +108,13 @@ export class RideCache {
   /** Append finished leaves; one write per batch, so a crash loses at most the batch in hand. */
   appendLeaves(previousEventIdHex: string, entries: LeafEntry[]): void {
     if (entries.length === 0) return
+    this.guard('write the ride cache')
     appendFileSync(this.leavesFile(previousEventIdHex), this.lines(previousEventIdHex, entries), { mode: 0o600 })
   }
 
   private rewriteLeaves(previousEventIdHex: string, leaves: Map<number, string>): void {
     const entries = [...leaves.entries()].map(([height, leafHex]) => ({ height, leafHex }))
+    this.guard('write the ride cache')
     writeFileAtomic(this.leavesFile(previousEventIdHex), this.lines(previousEventIdHex, entries))
   }
 
@@ -132,11 +134,13 @@ export class RideCache {
   writeGrind(previousEventIdHex: string, rootHex: string, next: number): void {
     const map = this.grindMap()
     map[grindKey(previousEventIdHex, rootHex)] = next
+    this.guard('write the ride cache')
     writeFileAtomic(join(this.path, GRIND_FILE), JSON.stringify(map, null, 2))
   }
 
   /** Drop a ride's leaves and its price searches: after its hyperjump is signed, or when its proof failed to verify. */
   forget(previousEventIdHex: string): void {
+    this.guard('remove a ride from the ride cache')
     try { unlinkSync(this.leavesFile(previousEventIdHex)) } catch { /* nothing cached */ }
     const map = this.grindMap()
     const prefix = `${previousEventIdHex}:`

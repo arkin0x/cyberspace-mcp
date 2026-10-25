@@ -45,7 +45,7 @@ The reason is the chain. Every movement event names the event before it. If two 
 
 The server keeps the rule by machinery:
 
-- It takes an **exclusive lock** on its state directory. A second server started on the same directory refuses to start. A lock from another host is never taken over, because this host cannot tell whether its owner still runs.
+- It takes an **exclusive lock** on its state directory. A second server started on the same directory refuses to start. A lock from another machine is never taken over, because this machine cannot tell whether its owner still runs. A lock this same machine left behind (a crash, a reboot, a container restart) is taken back by itself once its owner is shown to be gone.
 - It **confirms the head against the relays** before every signature, with no reuse: once before the proof is computed and once after, so a head that moved while the machine was working is caught before the signature.
 - It **reserves the head** while a move is in flight, so nothing else on this machine signs from it meanwhile.
 - Signed events not yet confirmed by the canonical relay wait in an **outbox** and are replayed only after the relays have been read: a fork at the event's point, or a chain started by another spawn, drops the event rather than publishing it.

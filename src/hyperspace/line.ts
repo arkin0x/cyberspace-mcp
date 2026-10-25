@@ -156,6 +156,8 @@ export interface LineStoreOptions {
   clock?: () => number
   /** How long a manifest once read is used before sync re-reads it. Default one hour. */
   manifestTtlMs?: number
+  /** Called before every write or removal under the line directory; throws to stop it (the state directory's lock, lock.ts). */
+  guard?: (what: string) => void
 }
 
 export interface SyncOptions {
@@ -299,11 +301,14 @@ export class LineStore {
   private readonly manifestUrl: string
   private readonly manifestTtlMs: number
 
+  private readonly guard: (what: string) => void
+
   private constructor(readonly path: string, options: LineStoreOptions) {
     this.manifestUrl = options.manifestUrl ?? HEADERS_MANIFEST_URL
     this.fetchImpl = options.fetch ?? globalThis.fetch
     this.clock = options.clock ?? Date.now
     this.manifestTtlMs = options.manifestTtlMs ?? DEFAULT_MANIFEST_TTL_MS
+    this.guard = options.guard ?? (() => {})
     this.file = readLineFile(path, this.manifestUrl)
     // The manifest on disk is only as good as the line.json that says when
     // it was read, and from where: without that it was read for another URL.
@@ -408,6 +413,7 @@ export class LineStore {
       if (parsed === null) throw new Error('malformed manifest')
       this.manifest = parsed
       this.file.manifestReadAt = new Date(this.clock()).toISOString()
+      this.guard('write the hyperspace line')
       writeFileAtomic(join(this.path, MANIFEST_FILE), JSON.stringify(parsed, null, 2))
       this.writeLineFile()
       return parsed
@@ -486,6 +492,7 @@ export class LineStore {
       // A disk copy that fails is dropped, so the next call fetches afresh
       // instead of refusing the same bytes forever.
       if (!fetched) {
+        this.guard('remove a blob of the hyperspace line')
         try { unlinkSync(path) } catch { /* already gone */ }
       }
       return refuse(`blob ${blob.ordinal} (${blob.file}) refused: ${verdict.reason}`)
@@ -494,7 +501,7 @@ export class LineStore {
     this.endStates[blob.ordinal] = verdict.state
     this.loaded[blob.ordinal] = { sha256: blob.sha256, count: blob.count }
     // Persist only what verified: the directory never holds bytes the line refused.
-    if (fetched) writeFileAtomic(path, bytes)
+    if (fetched) { this.guard('write the hyperspace line'); writeFileAtomic(path, bytes) }
     this.file.verified = this.file.verified.slice(0, blob.ordinal)
     this.file.verified[blob.ordinal] = {
       ordinal: blob.ordinal, file: name, sha256: blob.sha256, startHeight: blob.startHeight, count: blob.count,
@@ -510,6 +517,7 @@ export class LineStore {
     if (!existsSync(path)) return null
     const bytes = new Uint8Array(readFileSync(path))
     if (sha256Hex(bytes) === sha256) return bytes
+    this.guard('remove a blob of the hyperspace line')
     try { unlinkSync(path) } catch { /* already gone */ }
     return null
   }
@@ -523,6 +531,7 @@ export class LineStore {
   }
 
   private writeLineFile(): void {
+    this.guard('write the hyperspace line')
     writeFileAtomic(join(this.path, LINE_FILE), JSON.stringify(this.file, null, 2))
   }
 }

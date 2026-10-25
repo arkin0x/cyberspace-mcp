@@ -25,6 +25,10 @@ export interface FakePolicy {
   reachable: boolean
   /** Milliseconds each message takes in each direction. */
   latencyMs: number
+  /** Milliseconds a new connection takes to open. */
+  connectDelayMs: number
+  /** How many of the next connections are refused at once (the count goes down with each). */
+  refuseConnects: number
   /** The challenge is sent only after an unauthenticated REQ, right after its CLOSED, not on connect. */
   challengeOnReq: boolean
   /** Gift wraps (kind 1059) are served only to the client authenticated as their p tag, as an inbox relay serves them. */
@@ -40,6 +44,8 @@ const DEFAULT_POLICY: FakePolicy = {
   mute: false,
   reachable: true,
   latencyMs: 0,
+  connectDelayMs: 0,
+  refuseConnects: 0,
   challengeOnReq: false,
   protectWraps: false,
   requireAuthToPublish: false,
@@ -269,9 +275,11 @@ export class FakeSocket {
 
   constructor(url: string, network: FakeNetwork) {
     this.relay = network.relays.get(normalizeURL(url))
+    const refused = !!this.relay && this.relay.policy.refuseConnects > 0
+    if (refused) this.relay!.policy.refuseConnects--
     setTimeout(() => {
       if (this.readyState === FakeSocket.CLOSED) return
-      if (!this.relay || !this.relay.policy.reachable) {
+      if (!this.relay || !this.relay.policy.reachable || refused) {
         this.readyState = FakeSocket.CLOSED
         this.onerror?.({})
         this.onclose?.({ message: 'connection refused' })
@@ -280,7 +288,7 @@ export class FakeSocket {
       this.readyState = FakeSocket.OPEN
       this.onopen?.({})
       this.conn = this.relay.connect(this)
-    }, 0)
+    }, refused ? 0 : this.relay?.policy.connectDelayMs ?? 0)
   }
 
   /** A frame sent on a socket that is not open is dropped, as a WebSocket drops it (WHATWG: no throw once closing or closed). */

@@ -39,6 +39,8 @@ export interface Settings {
   chatWakeMinutes: number
   /** The most public objects publish_object may publish in any 24 hours (arkinox, 2026-10-13). */
   publishMaxPerDay: number
+  /** --machine-id: this machine's id for the lock, in place of $CYBERSPACE_MCP_MACHINE_ID and <state>.machine-id (lock.ts). Never from config.json, which travels with the state directory. */
+  machineId?: string
 }
 
 const DEFAULTS = {
@@ -72,6 +74,7 @@ export interface ParsedArgs {
   travelLogMaxPerDay?: number
   chatWakeMinutes?: number
   publishMaxPerDay?: number
+  machineId?: string
   help?: boolean
 }
 
@@ -110,6 +113,11 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
                                 speaker; the operator's always. Default ${DEFAULTS.chatWakeMinutes}
   --publish-max-per-day <n>     The most public objects publish_object may publish in any 24 hours.
                                 Default ${DEFAULTS.publishMaxPerDay}
+  --machine-id <id>             This machine's id, which the state directory's lock records so a
+                                restart of the same machine takes back its own lock. Default
+                                $CYBERSPACE_MCP_MACHINE_ID, else <state>.machine-id (made once,
+                                beside the state directory; never sync or copy it). An id given here
+                                or in the environment must be unique to this machine.
   --help                        This text.
 
 The same keys may live in <state>/config.json: relays, operator, name, about,
@@ -177,6 +185,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case '--travel-log-max-per-day': out.travelLogMaxPerDay = Math.max(1, Math.floor(num(a, next()))); break
       case '--chat-wake-minutes': out.chatWakeMinutes = num(a, next()); break
       case '--publish-max-per-day': out.publishMaxPerDay = Math.max(1, Math.floor(num(a, next()))); break
+      case '--machine-id': out.machineId = next(); if (!out.machineId) throw new Error('--machine-id needs a value'); break
       case '--help': case '-h': out.help = true; break
       // An argument that looks like a wallet string is never echoed, even into an error (arkinox, 2026-10-11).
       default: throw new Error(`unknown argument ${/walletconnect|secret=/i.test(a) ? '(it looks like a wallet connection string, so it is not repeated here; use --nwc <uri>)' : JSON.stringify(a)}; try --help`)
@@ -259,6 +268,7 @@ export function settingsFrom(args: ParsedArgs, file: FileConfig, walletFile: Wal
     travelLog: travelLogSettings(args, file.travelLog),
     chatWakeMinutes: args.chatWakeMinutes ?? posNum(file.chatWakeMinutes) ?? DEFAULTS.chatWakeMinutes,
     publishMaxPerDay: args.publishMaxPerDay ?? (posNum(file.publishMaxPerDay) !== undefined ? Math.max(1, Math.floor(posNum(file.publishMaxPerDay)!)) : DEFAULTS.publishMaxPerDay),
+    ...(args.machineId ? { machineId: args.machineId } : {}),
   }
 }
 

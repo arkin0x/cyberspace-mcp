@@ -4,26 +4,23 @@
 // key is one file, mode 600, created on first run and never printed, and it
 // is only ever a key this server generated: a human's nsec placed there is
 // refused, because an agent never takes a human's key (agents note 6, rule
-// 1). The lock is one file holding the pid and host of the process that owns
-// the directory: a second server on the same directory refuses to start,
-// because one key has one mover (brief, ruling 6).
+// 1). The lock is one file naming the process that owns the directory (its
+// machine id, host and pid; lock.ts): a second server on the same directory
+// refuses to start, because one key has one mover (brief, ruling 6).
 
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'node:fs'
-import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { generateSecretKey } from 'nostr-tools/pure'
 import { bytesToHex, hexToBytes, HEX_64 } from '../nostr/event.js'
+import { LockHeldError, LockLostError, takeLock, type HeldLock, type LeaseView, type LockOptions } from './lock.js'
 
-export class LockHeldError extends Error {}
+export { LockHeldError, LockLostError, type HeldLock, type LeaseView }
+
+/** Called before a write into the state directory; throws to stop it (a server that lost its lock writes nothing). */
+export type WriteGuard = (what: string) => void
 
 /** A key file that is not one this server wrote. */
 export class ForeignKeyError extends Error {}
-
-interface LockRecord {
-  pid: number
-  startedAt: string
-  host: string
-}
 
 /** The marker every key file this server writes carries, and loadOrCreateKey requires. */
 export const KEY_GENERATED_BY = 'cyberspace-mcp'
@@ -34,19 +31,14 @@ interface KeyFile {
   createdAt: string
 }
 
-/** Whether a process with this pid exists on this machine. */
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'EPERM'
-  }
-}
-
 const NEVER_A_HUMANS_KEY = 'An agent never takes a human\'s key: never share a key between two running agents, or between an agent and a human (agents note 6, rule 1). Delete the file and let this server create its own key, or give it an empty state directory.'
 
 export class StateDir {
+  /** The lock this instance took, once it did: every write checks it still holds it. */
+  private held: HeldLock | null = null
+  /** A guard given from outside, for an instance that took no lock itself (the waker's, beside the agent's). */
+  private extraGuard: WriteGuard | null = null
+
   private constructor(readonly path: string) {}
 
   /** Open or create the directory (mode 700). */
@@ -74,7 +66,35 @@ export class StateDir {
   }
 
   /** Write a JSON file atomically: a temporary file in the same directory, then a rename. */
+  /**
+   * Throws unless this server may write into the directory: the lock this
+   * instance took (or the guard it was given) still holds. Every write that
+   * does not go through writeJson calls it first.
+   */
+  guard(what: string): void {
+    // A server that lost its lock writes nothing more: the directory may be another's now.
+    this.held?.assertFresh(what)
+    this.extraGuard?.(what)
+  }
+
+  /** Guard this instance's writes with another's lock (the waker writes beside the agent that holds it). */
+  useGuard(guard: WriteGuard): void {
+    this.extraGuard = guard
+  }
+
+  /** The lease, for a thread that writes into the directory (a ride's), or null when this instance took no lock. */
+  leaseView(): LeaseView | null {
+    return this.held?.view() ?? null
+  }
+
+  /** Remove a file of the directory, guarded like a write; a missing file is no error. */
+  remove(name: string): void {
+    this.guard(`remove ${name}`)
+    try { unlinkSync(this.file(name)) } catch { /* none */ }
+  }
+
   writeJson(name: string, value: unknown): void {
+    this.guard(`write ${name}`)
     const target = this.file(name)
     const tmp = `${target}.${process.pid}.tmp`
     const fd = openSync(tmp, 'w', 0o600)
@@ -118,52 +138,17 @@ export class StateDir {
   }
 
   /**
-   * Take the exclusive lock on this directory. Throws LockHeldError, with a
-   * plain message, when a process that is still running holds it, or when
-   * the lock was taken on another host, where this process cannot tell
-   * whether its owner still runs. A lock left on this host by a process that
-   * no longer exists is taken over. Returns the release, which is also run
-   * when this process exits.
+   * Take the exclusive lock on this directory (lock.ts): throws
+   * LockHeldError, with a plain message, while its owner may still run. A
+   * lock this machine left behind (a dead pid, a reused pid, or a previous
+   * boot whose heartbeat is silent) is taken over and kept aside as
+   * lock.stale-*. Returns the held lock (its release, and assert, called
+   * before every signature and publish); from then on every writeJson on
+   * this instance checks the lock's heartbeat first.
    */
-  lock(): () => void {
-    const path = this.file('lock')
-    const host = hostname()
-    const record: LockRecord = { pid: process.pid, startedAt: new Date().toISOString(), host }
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const fd = openSync(path, 'wx', 0o600)
-        try { writeSync(fd, JSON.stringify(record)) } finally { closeSync(fd) }
-        return this.armRelease(path)
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
-      }
-      let held: LockRecord | null = null
-      try { held = JSON.parse(readFileSync(path, 'utf8')) as LockRecord } catch { held = null }
-      if (held && typeof held.host === 'string' && held.host !== host) {
-        throw new LockHeldError(`The state directory ${this.path} is locked by a cyberspace-mcp on another host (${held.host}, pid ${held.pid}, started ${held.startedAt}), and this host cannot tell whether it still runs. One key has one mover: a second server on the same key would fork the chain and kill it. If that server is gone for certain, remove ${path} by hand; otherwise stop it first, or give this server its own state directory.`)
-      }
-      if (held && typeof held.pid === 'number' && pidAlive(held.pid)) {
-        const who = held.pid === process.pid ? 'this very process' : `pid ${held.pid} on this host, started ${held.startedAt}`
-        throw new LockHeldError(`Another cyberspace-mcp already holds ${this.path} (${who}). One key has one mover: a second server on the same state directory would fork the chain and kill it. Stop the other server, or give this one its own state directory.`)
-      }
-      // Stale, on this host: the process is gone. Take it over.
-      try { unlinkSync(path) } catch { /* raced; the retry says who won */ }
-    }
-    throw new LockHeldError(`Could not take the lock on ${this.path}: another server took it first.`)
-  }
-
-  private armRelease(path: string): () => void {
-    let released = false
-    const release = (): void => {
-      if (released) return
-      released = true
-      try {
-        const held = JSON.parse(readFileSync(path, 'utf8')) as LockRecord
-        if (held.pid === process.pid) unlinkSync(path)
-      } catch { /* already gone */ }
-      process.off('exit', release)
-    }
-    process.on('exit', release)
-    return release
+  async lock(opts: LockOptions = {}): Promise<HeldLock> {
+    const held = await takeLock(this.path, opts)
+    this.held = held
+    return held
   }
 }

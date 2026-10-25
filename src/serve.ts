@@ -80,6 +80,7 @@ export async function startServe(argv: string[], deps: ServeDeps): Promise<Servi
     waker = new Waker(serveSettings.wake, {
       ordersWaiting: async () => (await agent.ordersWaiting()).data as WakeData,
       stateDir,
+      guard: (what) => agent.guardWrite(what),
       log: (line) => log(line),
       messageOperator: (text) => agent.messageOperator({ text }),
       // Every instruction from the operator is a job (arkinox, 2026-10-25): its status on its order, its words sealed to the agent's own key, and the operator's chat lines as orders.

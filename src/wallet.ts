@@ -87,6 +87,8 @@ export interface WalletOptions {
   websocketImplementation?: unknown
   maxWaitMs?: number
   log?: (line: string) => void
+  /** Called before every request to the wallet goes out (the state directory's lock, lock.ts). */
+  beforePublish?: () => void
   /** Tests: the clock, in ms. */
   now?: () => number
   /** Tests: how long a pay_invoice answer is waited for. */
@@ -132,7 +134,7 @@ export class Wallet {
     this.maxDailySats = opts.maxDailySats
     this.now = opts.now ?? Date.now
     this.payTimeoutMs = opts.payTimeoutMs
-    this.client = opts.nwc ? new NwcClient(parseNwc(opts.nwc, opts.source), { websocketImplementation: opts.websocketImplementation, maxWaitMs: opts.maxWaitMs, log: opts.log }) : null
+    this.client = opts.nwc ? new NwcClient(parseNwc(opts.nwc, opts.source), { websocketImplementation: opts.websocketImplementation, maxWaitMs: opts.maxWaitMs, log: opts.log, beforePublish: opts.beforePublish }) : null
     const saved = dir.readJson<Ledger | null>(LEDGER_FILE, null)
     this.ledger = saved?.version === 1 && Array.isArray(saved.payments) ? saved : { version: 1, payments: [] }
     // A payment that was going out when the process stopped may have gone out: unknown, never retried, counted.
