@@ -13,7 +13,7 @@
 // `objects` (DECK-0003 1.10: the payloads of placed objects carried inside the
 // object that places them), which sno-core 0.1.20 knows, is left out and named
 // in `ignored`, as every unknown field was before: this tool writes no table
-// until the spec section is merged (arkinox/cyberspace#81), and then only with
+// until the spec section is merged (arkin0x/cyberspace#81), and then only with
 // keys under the agent's own pubkey and never into a public event.
 
 import { blankName, fromPayload, readOpacity, toPayload, type ShardModel, type ShardPayload } from 'sno-core/shards'

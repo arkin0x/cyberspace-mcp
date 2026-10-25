@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure'
+import { fromPayload } from 'sno-core/shards'
 import { Agent, Refusal } from '../src/agent.js'
 import { hopTemplate, spawnTemplate } from '../src/chain/builder.js'
 import { bytesToHex, signEvent } from '../src/nostr/event.js'
@@ -241,6 +242,28 @@ describe('an agent on a fresh key', () => {
     const placed = await a.place({ object: payload, coordinate: { dx: 0 }, height: 4 })
     expect(placed.data.entries).toBe(1)
     expect(entriesOf(await a.find({})).map((e) => e.type)).toContain('shard')
+  }, 30_000)
+
+  it('a found shard carrying `objects`, placed by its id, is signed without them (validateSnoPayload is the only guard)', async () => {
+    // As find reads one (sno-core fromPayload knows DECK-0003 1.10): someone's object carrying the piece it places.
+    const THEM = getPublicKey(generateSecretKey())
+    const piece = `33331:${THEM}:unpublished-piece`
+    const tri = { v: 2, name: 'tri', unit: 20, mode: 'solid', vertices: [[0, 0, 0], [1, 0, 0], [0, 1, 0]], colors: [1, 2, 3], faces: [[0, 1, 2]] }
+    const shard = fromPayload({ ...tri, name: 'kit with a table', refs: [['a', piece]], parts: [[0, 0, 0, 0, 0, 0, 0, 0]], objects: { [piece]: tri } }, 'found')!
+    expect(Object.keys(shard.objects ?? {})).toEqual([piece])
+    const id = 'e0'.repeat(32)
+    ;(a as unknown as { rememberObject: (id: string, s: typeof shard) => void }).rememberObject(id, shard)
+    const placed = await a.place({ id: id.slice(0, 12), coordinate: { dx: 0 }, height: 4 })
+    expect(placed.data.entries).toBeGreaterThan(0)
+    // What was signed, as find reads it back: the placement, never the table.
+    const back = entriesOf(await a.find({})).filter((e) => e.type === 'shard')
+    const seen = (a as unknown as { objectsSeen: Map<string, typeof shard> }).objectsSeen
+    const copies = back.map((e) => seen.get(e.eventId)).filter((s) => s?.name === 'kit with a table')
+    expect(copies.length).toBeGreaterThan(0)
+    for (const c of copies) {
+      expect(c!.objects).toBeUndefined()
+      expect(c!.parts).toHaveLength(1)
+    }
   }, 30_000)
 
   it('renders a payload before placing it, and an object it found by the id find lists (arkinox, 2026-10-11)', async () => {
