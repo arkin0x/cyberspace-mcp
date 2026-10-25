@@ -420,7 +420,11 @@ describe('the operator\'s STOP (arkinox, 2026-10-25: HOLD becomes a real control
     expect(() => t.waker.requestAgain()).toThrow(/sent STOP/)
     expect(t.waker.gate('hop', false)).toMatch(/sent STOP/)
     expect(t.waker.gate('ride', false)).toMatch(/sent STOP/)
-    expect(t.waker.gate('whereami', true)).toBeNull()
+    // Only tools that answer from memory: never by the read-only mark alone (follow-up to #45).
+    expect(t.waker.gate('ride_status', true)).toBeNull()
+    for (const [name, readOnly] of [['say', false], ['message_operator', false], ['orders_waiting', true], ['wallet', true], ['listen', true], ['whereami', true], ['wait_for', true]] as const) {
+      expect(t.waker.gate(name, readOnly)).toMatch(/sent STOP/)
+    }
     await ticking
     expect(existsSync(join(t.dir, 'wake.again'))).toBe(false)
     expect(t.waker.gate('hop', false)).toBeNull()
@@ -713,4 +717,77 @@ describe('through the agent, over the fake relays', () => {
     expect(w.canonical.published.filter((e) => e.kind === 7)).toEqual([])
     expect(s.waker!.openWork).toBeNull()
   }, 60_000)
+
+  /** An agent on the fake relays whose operator follows it, with STOPs handed to a recorder. */
+  async function stoppable() {
+    const w = world()
+    const opSk = generateSecretKey()
+    const op = getPublicKey(opSk)
+    const agentSk = generateSecretKey()
+    const me = getPublicKey(agentSk)
+    w.general.seed(sign(opSk, 10050, [['relay', INBOX]]), sign(opSk, 3, [['p', me]]))
+    const a = await Agent.start({
+      stateDir: dirWithKey(agentSk), relays: [CANONICAL], operator: op, capCallSeconds: 30, capSessionSeconds: 120, maxSidestepHeight: 24, allowRespawn: false,
+      websocketImplementation: w.network.WebSocket, calibration: cal, relayMaxWaitMs: 1500, lookupRelays: [GENERAL], ordersPollMs: 0,
+    })
+    agents.push(a)
+    await a.identity({})
+    const dropped: string[] = []
+    a.onStop = (targets) => targets
+    a.onStoppedUnread = (ids) => { dropped.push(...ids) }
+    const dm = (content: string, at: number, tags: string[][] = [], kind = 14) => nip59.wrapEvent({ kind, content, tags: [['p', me], ...tags], created_at: at }, opSk, me) as NostrEvent
+    const idOf = (wrap: NostrEvent): string => (nip59.unwrapEvent(wrap, agentSk) as { id: string }).id
+    return { w, a, op, opSk, me, dm, idOf, dropped }
+  }
+
+  it('a STOP that names none covers by the server\'s sight: an order seen before it is dropped even when the STOP\'s clock is behind; a fresh order from a lagging clock seen after it is kept', async () => {
+    const { w, a, dm, idOf, dropped } = await stoppable()
+    const now = nowSeconds()
+    expect((await a.ordersWaiting()).data.orders).toBe(0)
+    // Seen first, then a STOP whose device clock is a minute behind it.
+    const seen = dm('build a tower', now - 10)
+    w.inbox.seed(seen)
+    expect((await a.ordersWaiting()).data.orders).toBe(1)
+    w.inbox.seed(dm('STOP', now - 70, [[...STOP_TAG]]))
+    expect((await a.ordersWaiting()).data.orders).toBe(0)
+    expect(dropped).toEqual([idOf(seen)])
+    // After the STOP was seen: an order from a device whose clock lags five minutes is fresh, and kept.
+    const lagging = dm('now plant flowers', now - 300)
+    w.inbox.seed(lagging)
+    expect((await a.ordersWaiting()).data.orders).toBe(1)
+    expect(dropped).toHaveLength(1)
+    expect(((await a.inbox()).data.messages as Array<{ text: string }>).map((m) => m.text)).toEqual(['now plant flowers'])
+  }, 60_000)
+
+  it('the halt is visible: orders_waiting, whereami and identity say since when, the operator gets one short DM when it begins, and only a DM or a chat order ends it, never a reaction', async () => {
+    const { w, a, op, opSk, dm } = await stoppable()
+    await a.whereami()
+    const now = nowSeconds()
+    w.inbox.seed(dm('STOP', now - 5, [[...STOP_TAG]]))
+    const waiting = await a.ordersWaiting()
+    expect(waiting.text).toContain('Held by your operator\'s STOP since ')
+    expect((waiting.data.halted as { since: string }).since).toMatch(/^\d{4}-\d\d-\d\dT/)
+    expect((await a.whereami()).text).toContain('Held by your operator\'s STOP since ')
+    expect((await a.identity({})).text).toContain('Held by your operator\'s STOP since ')
+    const told = (): string[] => toOperator(w.inbox, opSk, op).filter((r) => r.kind === 14).map((r) => r.content)
+    await until(() => told().length > 0)
+    expect(told()).toEqual(['Stopped. I\'ll wait for your next message.'])
+    // A second STOP while halted: no second DM.
+    w.inbox.seed(dm('STOP', now - 3, [[...STOP_TAG]]))
+    await a.ordersWaiting()
+    await new Promise((r) => setTimeout(r, 300))
+    expect(told()).toHaveLength(1)
+    // The operator's reaction to that DM is not a message: still halted.
+    w.inbox.seed(dm('👍', now - 2, [['e', 'ab'.repeat(32)]], 7))
+    await a.ordersWaiting()
+    await a.inbox()
+    expect(a.operatorChannel.halted()).toBe(true)
+    // A DM is: the halt ends, and nothing says held any more.
+    w.inbox.seed(dm('carry on', now))
+    await a.inbox()
+    expect(a.operatorChannel.halted()).toBe(false)
+    expect((await a.ordersWaiting()).data.halted).toBeNull()
+    expect((await a.whereami()).text).not.toContain('Held by')
+  }, 60_000)
+
 })

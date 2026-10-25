@@ -213,6 +213,9 @@ export interface HintInput {
   heights: [number, number, number]
 }
 
+/** The one DM when a STOP begins a halt: short, in the BRIEF style (follow-up to #45). */
+export const STOPPED_WORDS = 'Stopped. I\'ll wait for your next message.'
+
 export class Agent {
   readonly pubkey: string
   readonly npub: string
@@ -323,7 +326,7 @@ export class Agent {
       // The 👀 on each order, the first time the server sees it (arkinox, 2026-10-12).
       wrapReaction: (recipient, eventId, content, extraTags) => wrapReaction({ senderSk: this.sk, recipient, eventId, content, extraTags, now: nowSeconds() }),
       // The operator's STOP, carried out by the server, never by a model (arkinox, 2026-10-25).
-      onStop: (targets) => { void this.carryOutStop(targets) },
+      onStop: (targets, _id, haltBegan) => { void this.carryOutStop(targets, haltBegan) },
       onStoppedUnread: (ids) => { try { this.onStoppedUnread?.(ids) } catch { /* the jobs' bookkeeping never fails a read */ } },
       reactionRetryMs: config.reactionRetryMs,
       now: nowSeconds, log: this.log, maxWaitMs: config.relayMaxWaitMs,
@@ -1093,7 +1096,11 @@ export class Agent {
     }
     const words = ride.state === null ? '' : ` A ride to block ${ride.to} is ${said[ride.state]}.`
     const offWords = followSwitchedOff ? ` ${followOffWords(followSwitchedOff.reason)}` : ''
-    return { text: `${result.text}${words}${movedWords}${roamWords}${chatWords}${offWords}`, data: { ...result.data, ride, operatorMoved, roamDue, chatHeard, followSwitchedOff } }
+    // A STOP's halt, so whoever asks sees why nothing starts (follow-up to #45).
+    const since = this.operatorChannel.haltedSince()
+    const halted = since === null ? null : { since: new Date(since * 1000).toISOString() }
+    const haltWords = since === null ? '' : ` ${this.operatorChannel.haltLine()}`
+    return { text: `${result.text}${words}${movedWords}${roamWords}${chatWords}${offWords}${haltWords}`, data: { ...result.data, ride, operatorMoved, roamDue, chatHeard, followSwitchedOff, halted } }
   }
 
   /**
@@ -2449,21 +2456,30 @@ export class Agent {
    * The operator's STOP (arkinox, 2026-10-25: HOLD becomes a real control):
    * the jobs are stopped first (the waker kills the turn under way and
    * closes them, with ⏹️), then a ride computing in the background is
-   * paused, every finished leaf kept. Never throws; logs ids, never words.
+   * paused, every finished leaf kept. When the STOP begins a halt, the
+   * operator gets one short DM (follow-up to #45), so a STOP pressed days
+   * ago still says why the agent is idle. Never throws; logs ids, never words.
    */
-  async carryOutStop(targets: string[]): Promise<void> {
+  async carryOutStop(targets: string[], haltBegan = false): Promise<void> {
     try {
       const stopped = this.onStop?.(targets) ?? []
       this.log(`STOP: ${stopped.length} job(s) stopped`)
     } catch (err) {
       this.log(`STOP: the jobs could not be stopped: ${err instanceof Error ? err.message : String(err)}`)
     }
-    if (this.transit.rideState().state !== 'computing') return
+    if (this.transit.rideState().state === 'computing') {
+      try {
+        await this.transit.ride({ pause: true })
+        this.log('STOP: the ride is paused')
+      } catch (err) {
+        this.log(`STOP: the ride could not be paused: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+    if (!haltBegan) return
     try {
-      await this.transit.ride({ pause: true })
-      this.log('STOP: the ride is paused')
+      await this.operatorChannel.message(STOPPED_WORDS)
     } catch (err) {
-      this.log(`STOP: the ride could not be paused: ${err instanceof Error ? err.message : String(err)}`)
+      this.log(`STOP: could not tell the operator: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
 

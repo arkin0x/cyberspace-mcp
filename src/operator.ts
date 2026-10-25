@@ -47,9 +47,15 @@
 //     stops the turn, pauses the ride and closes the jobs. inbox never
 //     returns it and it wakes no turn. A STOP halts everything (the
 //     coordinator's ruling, 2026-10-25): halted() holds until the operator's
-//     next message of any kind, and an order it names, or for a STOP that
-//     names none, any order written before it, is read and dropped unread,
-//     never counted, so no turn starts for it. A fresh state directory does
+//     next message (a DM or an order in local chat; a reaction is not a
+//     message), and an order it covers is read and dropped unread, never
+//     counted, so no turn starts for it. A STOP covers the orders it names;
+//     one that names none covers the unread orders the server had seen
+//     before it saw the STOP, and, within that same check, those written
+//     strictly before it. Coverage goes by the server's sight, not by the
+//     operator's clocks, so a fresh order from a device whose clock lags is
+//     never dropped by a STOP the server saw first (follow-up to #45). When
+//     a STOP begins a halt, the operator gets one short DM saying so. A fresh state directory does
 //     not act on a STOP older than the read window, as it sends no 👀 there.
 //   - Job status (arkinox, 2026-10-25). status() sends the operator the same
 //     private kind 7 as the 👀, with the job's state as its content (⚙️, ✅,
@@ -132,13 +138,11 @@ interface DmsFile {
   stops: Record<string, number>
   /** Orders a STOP named, by rumor id, with our clock: read and dropped unread. */
   stoppedOrders: Record<string, number>
-  /** The newest STOP that named no order, its rumor created_at: every order written up to then is dropped unread. */
-  stoppedBefore: number | null
   /** Our clock when a STOP halted everything, until the operator's next message; null when not halted. */
   haltedAt: number | null
 }
 
-const EMPTY: DmsFile = { version: 1, strategy: null, seen: {}, waiting: {}, lastReadAt: null, ignoredTotal: 0, published: null, renewals: {}, reacted: {}, stops: {}, stoppedOrders: {}, stoppedBefore: null, haltedAt: null }
+const EMPTY: DmsFile = { version: 1, strategy: null, seen: {}, waiting: {}, lastReadAt: null, ignoredTotal: 0, published: null, renewals: {}, reacted: {}, stops: {}, stoppedOrders: {}, haltedAt: null }
 /** How long a 👀 mark is kept: longer than any read can return the message (a follow is waited for 30 days), plus a day. */
 const REACTED_KEPT_S = WAITING_KEPT_S + REREAD_WINDOW_S + 24 * 60 * 60
 /** How many 👀 marks are kept at most, newest first. */
@@ -210,7 +214,7 @@ export interface OperatorChannelDeps {
   /** Wrap a reaction (the 👀, or a job's status emoji) to the operator's message `eventId` with the agent's key, to them and to the agent itself; without it no reaction is sent. */
   wrapReaction?: (recipient: string, eventId: string, content?: string, extraTags?: string[][]) => WrappedMessage
   /** The operator's STOP, once per STOP: the orders it names (empty: every open job). Called after the read marks are saved. */
-  onStop?: (targets: string[], stopId: string) => void
+  onStop?: (targets: string[], stopId: string, haltBegan: boolean) => void
   /** Unread orders a STOP dropped, by rumor id, so they can show ⏹️. */
   onStoppedUnread?: (ids: string[]) => void
   /** How long a failed reaction waits before its one retry; for tests. */
@@ -245,6 +249,8 @@ export class OperatorChannel {
   private pollError: string | null = null
   /** Reactions being sent in the background. */
   private readonly sending = new Set<Promise<void>>()
+  /** STOPs claimed in this read that began a halt (none held before), until actOnStops hands them on. */
+  private readonly haltsBegun = new Set<string>()
   /** Who wants to know when a check finds unread orders (wait_for). */
   private readonly ordersListeners = new Set<(count: number) => void>()
 
@@ -254,7 +260,8 @@ export class OperatorChannel {
     this.state.reacted ??= {}
     this.state.stops ??= {}
     this.state.stoppedOrders ??= {}
-    this.state.stoppedBefore ??= null
+    // Coverage by a STOP's own clock was replaced by the server's sight (follow-up to #45): an old mark would drop fresh orders forever.
+    delete (this.state as Partial<DmsFile> & { stoppedBefore?: unknown }).stoppedBefore
     this.state.haltedAt ??= null
   }
 
@@ -281,9 +288,30 @@ export class OperatorChannel {
     return !!c && !this.deps.operatorProblem?.() && c.facts.operator === this.deps.operator() && c.facts.follows === true
   }
 
-  /** Whether a STOP dropped this order before it was read. */
-  private stoppedOrder(rumor: { id: string; created_at: number }): boolean {
-    return this.state.stoppedOrders[rumor.id] !== undefined || (this.state.stoppedBefore !== null && rumor.created_at <= this.state.stoppedBefore)
+  /** When a STOP's halt began (unix seconds, our clock), or null when nothing is halted. */
+  haltedSince(): number | null {
+    return this.state.haltedAt
+  }
+
+  /** The line the status tools show while a STOP holds, or null. */
+  haltLine(): string | null {
+    const at = this.state.haltedAt
+    return at === null ? null : `Held by your operator's STOP since ${new Date(at * 1000).toISOString()}: nothing starts until their next message (a DM, or an order in local chat).`
+  }
+
+  /**
+   * Whether a STOP covers this unread order: one that names it, or, for a
+   * STOP that names none read in this same check (`cut`, its created_at),
+   * one written strictly before it. Orders the server had already seen when
+   * it saw such a STOP were recorded in stoppedOrders then.
+   */
+  private stoppedOrder(rumor: { id: string; created_at: number }, cut: { at: number | null }): boolean {
+    return this.state.stoppedOrders[rumor.id] !== undefined || (cut.at !== null && rumor.created_at < cut.at)
+  }
+
+  /** The unread orders the newest check saw, by rumor id: what a STOP that names none covers by sight. */
+  private seenUnread(): Set<string> {
+    return new Set(this.lastCheck ? this.lastCheck.orders.values() : [])
   }
 
   private save(): void {
@@ -300,9 +328,13 @@ export class OperatorChannel {
   /** One line for the status tools: the standing orders, or that there are none. */
   strategyLine(): string {
     const s = this.strategy()
-    return s
+    const line = s
       ? `STRATEGY (your operator's standing orders, set ${new Date(s.at * 1000).toISOString()}; reread them every turn): ${s.text}`
       : 'STRATEGY: none set by your operator. Check inbox at the start of every turn.'
+    // An operator who pressed STOP days ago sees why the agent is idle (follow-up to #45).
+    const halt = this.haltLine()
+    return halt ? `${line}
+${halt}` : line
   }
 
   stop(): void {
@@ -435,14 +467,19 @@ export class OperatorChannel {
    * A STOP seen for the first time: recorded, so it acts once, ever. The
    * caller saves the record with the read marks, then calls actOnStops.
    */
-  private claimStop(rumor: Rumor, now: number): boolean {
+  private claimStop(rumor: Rumor, now: number, seen: Set<string>, cut: { at: number | null }): boolean {
     if (this.state.stops[rumor.id] !== undefined) return false
     this.state.stops[rumor.id] = now
     // The 👀 path's age rule: a fresh state directory reading old history acts on no STOP.
     if (this.state.lastReadAt === null && rumor.created_at < now - REREAD_WINDOW_S) return false
     const targets = stopTargets(rumor)
     for (const id of targets) this.state.stoppedOrders[id] = now
-    if (targets.length === 0) this.state.stoppedBefore = Math.max(this.state.stoppedBefore ?? 0, rumor.created_at)
+    if (targets.length === 0) {
+      // By sight: what the server had seen unread when it saw this STOP, and in this same check what was written strictly before it.
+      for (const id of seen) this.state.stoppedOrders[id] = now
+      cut.at = Math.max(cut.at ?? 0, rumor.created_at)
+    }
+    if (this.state.haltedAt === null) this.haltsBegun.add(rumor.id)
     this.state.haltedAt = now
     return true
   }
@@ -460,7 +497,8 @@ export class OperatorChannel {
     for (const r of stops) {
       const targets = stopTargets(r)
       this.deps.log(`STOP from the operator (${r.id.slice(0, 8)}...): ${targets.length ? `${targets.length} job(s)` : 'every open job'}`)
-      try { this.deps.onStop?.(targets, r.id) } catch (err) { this.deps.log(`STOP could not be carried out: ${err instanceof Error ? err.message : String(err)}`) }
+      const began = this.haltsBegun.delete(r.id)
+      try { this.deps.onStop?.(targets, r.id, began) } catch (err) { this.deps.log(`STOP could not be carried out: ${err instanceof Error ? err.message : String(err)}`) }
     }
   }
 
@@ -581,6 +619,8 @@ export class OperatorChannel {
     const reactTo: string[] = []
     const stopping: Rumor[] = []
     const droppedStopped: Rumor[] = []
+    const seenBefore = this.seenUnread()
+    const cut: { at: number | null } = { at: null }
     let ignored = 0
     let waiting = 0
     for (const wrap of mergeAnswers(answers)) {
@@ -600,14 +640,14 @@ export class OperatorChannel {
       this.state.seen[wrap.id] = wrap.created_at
       if (this.claimReaction(rumor, now)) reactTo.push(rumor.id)
       // A STOP is a control the server carries out, never an order the model reads.
-      if (isStop(rumor)) { if (this.claimStop(rumor, now)) stopping.push(rumor); continue }
-      if (this.stoppedOrder(rumor)) { droppedStopped.push(rumor); continue }
+      if (isStop(rumor)) { if (this.claimStop(rumor, now, seenBefore, cut)) stopping.push(rumor); continue }
+      if (this.stoppedOrder(rumor, cut)) { droppedStopped.push(rumor); continue }
       orders.push({ id: rumor.id, at: rumor.created_at, text: rumor.content, strategy: isStrategy(rumor), continue: isContinue(rumor) })
     }
     // A STOP read in this same batch drops the orders it covers, wherever they came in it.
-    for (const o of orders.filter((m) => this.stoppedOrder({ id: m.id, created_at: m.at }))) droppedStopped.push({ id: o.id, created_at: o.at } as Rumor)
+    for (const o of orders.filter((m) => this.stoppedOrder({ id: m.id, created_at: m.at }, cut))) droppedStopped.push({ id: o.id, created_at: o.at } as Rumor)
     // The same rumor can come in more than one wrap; it is one order.
-    const unique = [...new Map(orders.filter((m) => !this.stoppedOrder({ id: m.id, created_at: m.at })).map((o) => [o.id, o])).values()].sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : 1))
+    const unique = [...new Map(orders.filter((m) => !this.stoppedOrder({ id: m.id, created_at: m.at }, cut)).map((o) => [o.id, o])).values()].sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : 1))
     // Any message from the operator ends a STOP's halt.
     if (unique.length > 0 && this.state.haltedAt !== null) { this.state.haltedAt = null; this.deps.log('STOP: the halt is over (a new message from the operator)') }
     const newestStrategy = unique.filter((o) => o.strategy).at(-1)
@@ -734,6 +774,8 @@ export class OperatorChannel {
     const reactTo: string[] = []
     const stopping: Rumor[] = []
     const seenOrders: Array<{ wrap: NostrEvent; rumor: Rumor }> = []
+    const seenBefore = this.seenUnread()
+    const cut: { at: number | null } = { at: null }
     const now = this.deps.now()
     // From here to the save nothing is awaited, so inbox and this check never both claim one 👀.
     for (const wrap of mergeAnswers(answers)) {
@@ -748,7 +790,7 @@ export class OperatorChannel {
         if (!following) continue
         this.state.seen[wrap.id] = wrap.created_at
         if (this.claimReaction(rumor, now)) reactTo.push(rumor.id)
-        if (this.claimStop(rumor, now)) stopping.push(rumor)
+        if (this.claimStop(rumor, now, seenBefore, cut)) stopping.push(rumor)
         marked = true
         continue
       }
@@ -758,7 +800,7 @@ export class OperatorChannel {
     // An order a STOP covers (one it names, or any written before a STOP that names none) is read now and dropped: no count, no turn.
     const droppedStopped: Rumor[] = []
     for (const { wrap, rumor } of seenOrders) {
-      if (following && this.stoppedOrder(rumor)) {
+      if (following && this.stoppedOrder(rumor, cut)) {
         this.state.seen[wrap.id] = wrap.created_at
         droppedStopped.push(rumor)
         marked = true

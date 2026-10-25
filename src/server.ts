@@ -292,6 +292,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     title: 'Say',
     description: 'Say a line (up to 500 characters) into the h12 cube you stand in, sealed as a kind 23330 envelope, as ONOSENDAI does; ONOSENDAI\'s Chat chip shows it. One line per five seconds. Quiet rule: one unprompted line per arrival; a reply to a line that addressed you (pass its id as reply_to) is always allowed. A line addresses you only when it mentions you (an @mention tag, a nostr:npub or nostr:nprofile of you, or your name); answer those, never every line, your operator\'s included.',
     inputSchema: { text: z.string().max(500), reply_to: z.string().optional().describe('The id of a heard line this one answers.') },
+    annotations: { readOnlyHint: false, destructiveHint: false },
   }, async (args) => call(() => agent.say(args)))
 
   server.registerTool('listen', {
@@ -351,6 +352,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
       hint_heights: hintHeights.optional(),
       riddle: z.string().max(280).optional(),
     },
+    annotations: { readOnlyHint: false, destructiveHint: false },
   }, async (args) => call(() => agent.forgeItem(args)))
 
   server.registerTool('seal_chest', {
@@ -366,6 +368,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
       hint_heights: hintHeights.optional(),
       riddle: z.string().max(280).optional(),
     },
+    annotations: { readOnlyHint: false, destructiveHint: false },
   }, async (args) => call(() => agent.sealChest(args as Parameters<Agent['sealChest']>[0])))
 
   server.registerTool('open_chest', {
@@ -461,6 +464,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
       address: z.string().optional().describe('A public kind 33331 object: "33331:<pubkey hex>:<d>" or its naddr.'),
       clear: z.boolean().optional().describe('true to go back to the dodecahedron.'),
     },
+    annotations: { readOnlyHint: false, destructiveHint: false },
   }, async (args, extra) => call(() => agent.setAvatar(args, extra.signal)))
 
   server.registerTool('publish_object', {
@@ -592,7 +596,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     const done = hooks.workDone
     server.registerTool('work_done', {
       title: 'Work done',
-      description: 'Tell your waker that your operator\'s open orders (DM and chat) are carried out, or that nothing more can be done until your operator or a ride answers; each gets ✅. Until you call it, every order stays open: a work turn that ends without it is resumed while your turns make progress (a tool call that changes something in the world or in what you hold: a hop, a ride started or signed, something hidden, placed, moved, removed, sealed, forged, taken, opened, commented or published, a new avatar), and given up, with one DM to your operator, after a couple of turns in a row that make none, after a dozen work turns, or a day after the order came. A question answered or "stand by" needs nothing more: call it at once. Refused in a quick reply turn: only your work turn closes orders. Only present when this server runs a waker.',
+      description: 'Tell your waker that your operator\'s open orders (DM and chat) are carried out, or that nothing more can be done until your operator or a ride answers; each gets ✅. Until you call it, every order stays open: a work turn that ends without it is resumed while your turns make progress (a tool call that changes something in the world or in what you hold: a hop, a ride started or signed, something hidden, placed, moved, removed, sealed, forged, taken, opened, commented or published, a new avatar), and given up, with one DM to your operator, after a couple of turns in a row that make none, after a dozen work turns, or once it has been open a day (time waiting on a ride is not counted). A question answered or "stand by" needs nothing more: call it at once. Refused in a quick reply turn: only your work turn closes orders. Only present when this server runs a waker.',
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     }, async () => call(() => ({ text: done(), data: { workDone: true } })))
   }
