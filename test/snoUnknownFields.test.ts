@@ -21,6 +21,16 @@ describe('fields this tool does not know', () => {
     expect(v.payload).not.toHaveProperty('type')
   })
 
+  it('leave out `objects` too, which sno-core 0.1.20 knows: this tool writes no table until DECK-0003 1.10 is merged', () => {
+    const address = `33331:${'ab'.repeat(32)}:water`
+    const v = validateSnoPayload({ ...tri, refs: [['a', address]], parts: [[0, 0, 0, 0, 0, 0, 0, 0]], objects: { [address]: tri } })
+    expect(v.ok).toBe(true)
+    if (!v.ok) return
+    expect(v.ignored).toEqual(['objects'])
+    expect(v.shard).not.toHaveProperty('objects')
+    expect(v.payload).not.toHaveProperty('objects')
+  })
+
   it('are an empty list when there are none', () => {
     const v = validateSnoPayload(tri)
     expect(v.ok && v.ignored).toEqual([])
