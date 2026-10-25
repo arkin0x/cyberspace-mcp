@@ -243,7 +243,7 @@ describe('serve', () => {
     expect(readFileSync(join(dir, 'wake-work.json'), 'utf8')).not.toContain('fountain')
   })
 
-  it('a reply turn that calls work_done is the whole answer: no work turn', async () => {
+  it('a reply turn cannot close the order: its work_done is refused, and the work turn follows (arkinox, 2026-10-25)', async () => {
     const w = world()
     const opSk = generateSecretKey()
     const op = getPublicKey(opSk)
@@ -255,7 +255,7 @@ describe('serve', () => {
     writeFileSync(join(dir, 'config.json'), JSON.stringify({
       operator: nip19.npubEncode(op),
       wake: {
-        command: [process.execPath, FAKE, 'log', turns, '{prompt}'],
+        command: [process.execPath, FAKE, 'tools:inbox,work_done', turns, '{prompt}'],
         replyCommand: [process.execPath, FAKE, 'tools:inbox,work_done', turns, '{prompt}'],
         pollSeconds: 0.2,
       },
@@ -263,10 +263,16 @@ describe('serve', () => {
     const s = await serve(w, ['--state', dir])
     await s.agent.identity({ name: 'courier' })
     w.inbox.seed(nip59.wrapEvent({ kind: 14, content: 'stand by', tags: [['p', me]], created_at: nowSeconds() - 5 }, opSk, me) as NostrEvent)
-    await until(() => existsSync(turns) && readFileSync(turns, 'utf8').includes('"tool":"work_done"'))
-    await new Promise((r) => setTimeout(r, 1000))
-    const modes = readFileSync(turns, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { mode: string; args?: string[] }).filter((l) => l.args).map((l) => l.mode)
-    expect(modes).toEqual(['tools:inbox,work_done'])
+    type Line = { mode: string; args?: string[]; tool?: string; text?: string }
+    const lines = (): Line[] => (existsSync(turns) ? readFileSync(turns, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Line) : [])
+    await until(() => lines().filter((l) => l.tool === 'work_done').length >= 2)
+    const prompts = lines().filter((l) => l.args).map((l) => l.args![0])
+    expect(prompts).toHaveLength(2)
+    expect(prompts[0]).toContain('This is your quick reply turn')
+    expect(prompts[1]).toContain('Work turn from your waker')
+    const [reply, work] = lines().filter((l) => l.tool === 'work_done')
+    expect(reply.text).toContain('Not closed')
+    expect(work.text).toContain('1 order(s) closed')
     expect(s.waker!.openWork).toBeNull()
   })
 

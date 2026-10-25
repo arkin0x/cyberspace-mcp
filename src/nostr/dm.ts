@@ -21,6 +21,17 @@
 //     content "👀", tags ["e", <the rumor id reacted to>] and ["p", <its
 //     author>], nothing else. It is the NIP-17 private reaction ONOSENDAI
 //     unwraps and shows under the message.
+//   - A job's status (arkinox, 2026-10-25: "i like the status emojis so we
+//     can see the state"): the same private kind 7, from the agent, on the
+//     operator's order, with the state as its content: 👀 seen, ⚙️ working,
+//     ✅ done, ⚠️ given up, ⏹️ stopped. The newest one is the order's state.
+//     An order from local chat gets its status the same way, privately, with
+//     e = the chat line's id and ["k", "23333"] marking the channel: never a
+//     public reaction (v2 content stays sealed).
+//   - A STOP (arkinox, 2026-10-25: HOLD becomes a real control) is a kind 14
+//     from the operator carrying ["agent", "stop"], and an ["e", <rumor id>]
+//     per order it stops; with no e tag it stops every open job. It is a
+//     control, never an order: the server acts on it, no model reads it.
 //   - On receipt: unwrap, verify the seal's signature, and require the
 //     rumor's pubkey to be the seal's, and its kind a 14 or a 7. Anything
 //     else is dropped.
@@ -38,6 +49,19 @@ export const RUMOR_KIND = 14
 export const REACTION_KIND = 7
 /** What the agent reacts with when it first sees an order: "seen, working on it" (arkinox, 2026-10-12). */
 export const SEEN_REACTION = '👀'
+/**
+ * The states a job (an order from the operator) shows, each a reaction from
+ * the agent on the order (arkinox, 2026-10-25). Sent once per order per
+ * state; a client shows the newest one from the agent as the order's state.
+ */
+export const JOB_STATUS = {
+  seen: SEEN_REACTION,
+  working: '\u2699\ufe0f',
+  done: '\u2705',
+  gaveUp: '\u26a0\ufe0f',
+  stopped: '\u23f9\ufe0f',
+} as const
+export type JobState = keyof typeof JOB_STATUS
 export const SEAL_KIND = 13
 export const WRAP_KIND = 1059
 /** NIP-17 DM relay list: where a person reads its DMs. */
@@ -51,6 +75,12 @@ export const STRATEGY_TAG = ['agent', 'strategy'] as const
  * the words "keep going" without it renew nothing.
  */
 export const CONTINUE_TAG = ['agent', 'continue'] as const
+/**
+ * The marker tag of a STOP: the operator's control that stops jobs at once
+ * (arkinox, 2026-10-25), enforced by the server, never by the model. An
+ * ["e", <order rumor id>] per job it stops; none stops every open job.
+ */
+export const STOP_TAG = ['agent', 'stop'] as const
 /** How far into the past a seal's and a wrap's created_at may be pushed (NIP-59: up to two days). */
 export const MAX_BACKDATE_SECONDS = 2 * 24 * 60 * 60
 
@@ -95,8 +125,8 @@ export function wrapSeal(seal: NostrEvent, recipient: string, createdAt: number,
  * `eventId` written by `recipient`: kind 7, the content the reaction, and
  * exactly the two tags ONOSENDAI reads, the e tag first.
  */
-export function createReactionRumor(input: { senderPubkey: string; recipient: string; eventId: string; content?: string; createdAt: number }): Rumor {
-  const unsigned = { pubkey: input.senderPubkey, created_at: input.createdAt, kind: REACTION_KIND, tags: [['e', input.eventId], ['p', input.recipient]], content: input.content ?? SEEN_REACTION }
+export function createReactionRumor(input: { senderPubkey: string; recipient: string; eventId: string; content?: string; extraTags?: string[][]; createdAt: number }): Rumor {
+  const unsigned = { pubkey: input.senderPubkey, created_at: input.createdAt, kind: REACTION_KIND, tags: [['e', input.eventId], ['p', input.recipient], ...(input.extraTags ?? [])], content: input.content ?? SEEN_REACTION }
   return { id: getEventHash(unsigned), ...unsigned }
 }
 
@@ -120,9 +150,9 @@ export function wrapMessage(input: { senderSk: Uint8Array; recipient: string; te
 }
 
 /** A private reaction to the message `eventId` from `recipient`, ready to send, wrapped exactly as a message is (arkinox, 2026-10-12). */
-export function wrapReaction(input: { senderSk: Uint8Array; recipient: string; eventId: string; content?: string; now: number; random?: () => number }): WrappedMessage {
+export function wrapReaction(input: { senderSk: Uint8Array; recipient: string; eventId: string; content?: string; extraTags?: string[][]; now: number; random?: () => number }): WrappedMessage {
   const sender = getPublicKey(input.senderSk)
-  const rumor = createReactionRumor({ senderPubkey: sender, recipient: input.recipient, eventId: input.eventId, content: input.content, createdAt: input.now })
+  const rumor = createReactionRumor({ senderPubkey: sender, recipient: input.recipient, eventId: input.eventId, content: input.content, extraTags: input.extraTags, createdAt: input.now })
   return wrapRumor(rumor, input.senderSk, input.recipient, input.now, input.random)
 }
 
@@ -198,6 +228,16 @@ export function isStrategy(rumor: Pick<Rumor, 'tags'>): boolean {
 /** Whether a rumor carries the CONTINUE marker. */
 export function isContinue(rumor: Pick<Rumor, 'tags'>): boolean {
   return rumor.tags.some((t) => t[0] === CONTINUE_TAG[0] && t[1] === CONTINUE_TAG[1])
+}
+
+/** Whether a rumor carries the STOP marker. */
+export function isStop(rumor: Pick<Rumor, 'tags'>): boolean {
+  return rumor.tags.some((t) => t[0] === STOP_TAG[0] && t[1] === STOP_TAG[1])
+}
+
+/** The orders a STOP names (its e tags, valid ids only, each once); empty means every open job. */
+export function stopTargets(rumor: Pick<Rumor, 'tags'>): string[] {
+  return [...new Set(rumor.tags.filter((t) => t[0] === 'e' && typeof t[1] === 'string' && HEX_64.test(t[1])).map((t) => t[1]))]
 }
 
 /** The relays a kind 10050 names, valid ws(s) URLs only, in the order listed, each once. */

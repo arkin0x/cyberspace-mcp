@@ -16,6 +16,9 @@
 //   touch   says nothing, but appends to <log>.activity every 100 ms for
 //           1.5 s, as Hermes writes its state.db, then exits
 //   toucher the same, forever
+//   stubborn  ignores SIGTERM, and on it touches wake.again in
+//           $CYBERSPACE_MCP_STATE, as a dying turn that asks for more would;
+//           only SIGKILL ends it
 import { appendFileSync } from 'node:fs'
 
 const [mode, log, ...rest] = process.argv.slice(2)
@@ -54,6 +57,12 @@ if (mode === 'silent') {
 } else if (mode === 'touch') {
   const t = setInterval(touch, 100)
   setTimeout(() => { clearInterval(t); process.exit(0) }, 1500)
+} else if (mode === 'stubborn') {
+  process.on('SIGTERM', () => {
+    appendFileSync(`${process.env.CYBERSPACE_MCP_STATE}/wake.again`, '')
+    appendFileSync(log, JSON.stringify({ mode, sigterm: true }) + '\n')
+  })
+  setInterval(() => {}, 1 << 30)
 } else if (mode === 'toucher') {
   setInterval(touch, 100)
 } else {

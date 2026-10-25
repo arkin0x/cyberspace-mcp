@@ -26,7 +26,7 @@ function setup(mode: string, overrides: Partial<WakeSettings> = {}, replyMode?: 
     replyCommand: replyMode ? [process.execPath, FAKE, replyMode, log, '{prompt}'] : null,
     pollSeconds: 3600, idleKillMinutes: 10, maxTurnMinutes: 60, chatStrangerMinutes: 5, roamRewakeMinutes: 5,
     ordersRewakeMinutes: 10, maxContinuations: 12, continueDelaySeconds: 0.01, followSettleSeconds: 12, cwd: dir,
-    activityPaths: [], maxResumes: 3, resumeDelaySeconds: 60,
+    activityPaths: [], maxIdleTurns: 2, maxJobTurns: 12, resumeDelaySeconds: 60,
     ...overrides,
   }
   let data: WakeData = { orders: 0 }
@@ -64,7 +64,9 @@ describe('the waker', () => {
     expect(reply.args[0]).toContain('your operator has sent you new orders by DM (1 unread)')
     expect(reply.args[0]).toContain('This is your quick reply turn')
     expect(reply.args[0]).toContain('Do not start the work in this turn')
-    expect(reply.args[0]).toContain('call work_done so no work turn follows')
+    // Only the work turn closes orders (arkinox, 2026-10-25): the reply prompt no longer offers work_done.
+    expect(reply.args[0]).toContain('carries the orders out or closes them')
+    expect(reply.args[0]).not.toContain('call work_done')
     expect(reply.args[0]).toContain('cyberspace MCP server')
     expect(reply.args[0]).not.toMatch(/arkinox|call\.sh/)
     expect(reply.reason).toBe('1 order(s) waiting')
@@ -98,13 +100,18 @@ describe('the waker', () => {
     t.cleanup()
   })
 
-  it('skips the work turn when the reply turn called work_done', async () => {
+  it('the reply model cannot close an order: work_done in a reply turn is refused, and the work turn follows (arkinox, 2026-10-25)', async () => {
     const t = setup('log', {}, 'slow')
     t.set({ orders: 1 })
-    const done = setTimeout(() => t.waker.markDone(), 100)
+    let said = ''
+    const done = setTimeout(() => { t.waker.onInbox(inboxWith({ id: 'c3'.repeat(32), text: 'plant flowers around the disco floor' })); try { t.waker.markDone() } catch (err) { said = (err as Error).message } }, 100)
     await t.waker.tick()
     clearTimeout(done)
-    expect(t.turns().map((x) => x.mode)).toEqual(['slow'])
+    expect(said).toContain('Not closed: this is your quick reply turn')
+    expect(t.turns().map((x) => x.mode)).toEqual(['slow', 'log'])
+    expect(t.waker.openWork?.ids).toEqual(['c3'.repeat(32)])
+    // In a work turn (or with no reply command) work_done closes it.
+    expect(t.waker.markDone()).toContain('1 order(s) closed')
     t.cleanup()
   })
 
@@ -354,7 +361,7 @@ describe('open work (arkinox, 2026-10-22: a long STRATEGY stalled after "On it")
     t.cleanup()
   })
 
-  it('resumes a work turn that failed, rate limited, at most maxResumes times, then tells the operator once', async () => {
+  it('resumes a work turn that failed, rate limited, until maxIdleTurns turns in a row got nowhere, then tells the operator once', async () => {
     const t = setup('fail')
     t.waker.onInbox(inboxWith(ORDER))
     await t.waker.tick()
@@ -365,45 +372,25 @@ describe('open work (arkinox, 2026-10-22: a long STRATEGY stalled after "On it")
     t.advance(59_000)
     await t.waker.tick()
     expect(t.turns()).toHaveLength(1)
-    for (let n = 1; n <= 3; n++) {
-      t.advance(60_000)
-      await t.waker.tick()
-      expect(t.turns()).toHaveLength(1 + n)
-      expect(t.turns()[n].args[0]).toContain(`This is resume ${n} of at most 3`)
-      expect(t.turns()[n].args[0]).toContain('it exited with code 3')
-    }
+    t.advance(1_000)
+    await t.waker.tick()
+    expect(t.turns()).toHaveLength(2)
+    expect(t.turns()[1].args[0]).toContain('This is resume 1.')
+    expect(t.turns()[1].args[0]).toContain('it exited with code 3')
     expect(t.dms).toHaveLength(0)
     t.advance(60_000)
     await t.waker.tick()
-    expect(t.turns()).toHaveLength(4)
+    expect(t.turns()).toHaveLength(2)
     expect(t.dms).toHaveLength(1)
     expect(t.dms[0]).toContain('I stopped working on your STRATEGY')
+    expect(t.dms[0]).toContain('2 turn(s) in a row got nowhere')
     expect(t.dms[0]).toContain('it exited with code 3')
     expect(t.dms[0]).not.toContain('\u2014')
     expect(t.waker.openWork).toBeNull()
     // Nothing more, ever, for this work.
     for (let i = 0; i < 3; i++) { t.advance(10 * 60_000); await t.waker.tick() }
-    expect(t.turns()).toHaveLength(4)
+    expect(t.turns()).toHaveLength(2)
     expect(t.dms).toHaveLength(1)
-    t.cleanup()
-  })
-
-  it('a work turn that exits by itself without work_done gets one check turn, then the work is closed without a DM', async () => {
-    const t = setup('log')
-    t.waker.onInbox(inboxWith(ORDER))
-    await t.waker.tick()
-    t.advance(60_000)
-    await t.waker.tick()
-    expect(t.turns()).toHaveLength(2)
-    expect(t.turns()[1].args[0]).toContain('This is resume 1 of at most 1')
-    expect(t.turns()[1].args[0]).toContain('it ended without work_done')
-    t.advance(60_000)
-    await t.waker.tick()
-    t.advance(60_000)
-    await t.waker.tick()
-    expect(t.turns()).toHaveLength(2)
-    expect(t.dms).toHaveLength(0)
-    expect(t.waker.openWork).toBeNull()
     t.cleanup()
   })
 
@@ -435,7 +422,7 @@ describe('open work (arkinox, 2026-10-22: a long STRATEGY stalled after "On it")
     t.advance(60_000)
     await t.waker.tick()
     expect(t.turns()).toHaveLength(2)
-    expect(t.turns()[1].args[0]).toContain('This is resume 1 of at most 1')
+    expect(t.turns()[1].args[0]).toContain('This is resume 1.')
     t.cleanup()
   })
 
@@ -455,7 +442,7 @@ describe('open work (arkinox, 2026-10-22: a long STRATEGY stalled after "On it")
     t.cleanup()
   })
 
-  it('keeps the open work across a restart, by id and never by its words', async () => {
+  it('without a key to seal with, keeps the open work across a restart by id only, never its words', async () => {
     const t = setup('fail')
     t.waker.onInbox(inboxWith(ORDER))
     await t.waker.tick()
@@ -464,10 +451,10 @@ describe('open work (arkinox, 2026-10-22: a long STRATEGY stalled after "On it")
     expect(saved).not.toContain('fountain')
     const again = new Waker(t.waker.settings, { ordersWaiting: async () => ({ orders: 0 }), stateDir: t.dir, log: () => {}, now: () => 1_000_000 + 60_000 })
     expect(again.openWork?.resumeAt).not.toBeNull()
-    expect(again.onInbox(inboxWith()).text).toContain('1 order(s) read before a restart are still open')
+    expect(again.onInbox(inboxWith()).text).toContain('1 order(s) read before a restart are still open, and their words could not be kept')
     await again.tick()
     expect(t.turns()).toHaveLength(2)
-    expect(t.turns()[1].args[0]).toContain('This is resume 1 of at most 3')
+    expect(t.turns()[1].args[0]).toContain('This is resume 1.')
     t.cleanup()
   })
 
@@ -487,7 +474,7 @@ describe('open work (arkinox, 2026-10-22: a long STRATEGY stalled after "On it")
   })
 
   it('the same order read again (a second wrap) does not refill the budget; a new order does, and makes the work young again', async () => {
-    const t = setup('fail', { maxResumes: 1 })
+    const t = setup('fail', { maxIdleTurns: 5 })
     t.waker.onInbox(inboxWith(ORDER))
     await t.waker.tick()
     t.advance(60_000)
@@ -520,8 +507,8 @@ describe('open work (arkinox, 2026-10-22: a long STRATEGY stalled after "On it")
     t.cleanup()
   })
 
-  it('does not resume with maxResumes 0, and still says why it stopped', async () => {
-    const t = setup('fail', { maxResumes: 0 })
+  it('does not resume with maxIdleTurns 0, and still says why it stopped', async () => {
+    const t = setup('fail', { maxIdleTurns: 0 })
     t.waker.onInbox(inboxWith({ ...ORDER, strategy: false }))
     await t.waker.tick()
     t.advance(60_000)
@@ -622,7 +609,7 @@ describe('wake commands', () => {
     expect(serveSettingsFrom({}, {}).wake).toBeNull()
     expect(serveSettingsFrom({}, {}).port).toBe(7777)
     expect(s.wake?.activityPaths).toEqual([])
-    expect(s.wake?.maxResumes).toBe(3)
+    expect(s.wake?.maxIdleTurns).toBe(2)
     expect(s.wake?.resumeDelaySeconds).toBe(60)
   })
 
@@ -631,8 +618,11 @@ describe('wake commands', () => {
     expect(wake({ activityPaths: '/h/state.db' }).activityPaths).toEqual(['/h/state.db'])
     expect(wake({ activityPaths: ['/h/state.db', '/h/state.db-wal'] }).activityPaths).toEqual(['/h/state.db', '/h/state.db-wal'])
     expect(() => wake({ activityPaths: [3] })).toThrow(/activityPaths/)
-    expect(wake({ maxResumes: 0 }).maxResumes).toBe(0)
-    expect(wake({ maxResumes: -1 }).maxResumes).toBe(3)
+    expect(wake({ maxIdleTurns: 0 }).maxIdleTurns).toBe(0)
+    expect(wake({ maxIdleTurns: -1 }).maxIdleTurns).toBe(2)
+    // The older key still counts when the new one is not set.
+    expect(wake({ maxResumes: 4 }).maxIdleTurns).toBe(4)
+    expect(wake({ maxResumes: 4, maxIdleTurns: 1 }).maxIdleTurns).toBe(1)
     expect(wake({ resumeDelaySeconds: 5 }).resumeDelaySeconds).toBe(5)
   })
 })

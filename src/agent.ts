@@ -34,7 +34,7 @@ import { AVATAR_KIND, MAX_AVATAR_BYTES, avatarPrice, avatarSeconds, avatarTempla
 import { avatarThreads, mineAvatar } from './avatarMine.js'
 import { Chat, type ChatLine } from './chat.js'
 import {
-  HIDDEN_KIND, MAX_ABOUT, MAX_ITEM_NAME, carriedTags, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
+  CHAT_KIND, HIDDEN_KIND, MAX_ABOUT, MAX_ITEM_NAME, carriedTags, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
   audioLabel, itemLineage, keyInnerTemplate, messageInnerTemplate, messagePreview, objectTemplate, payloadBytes, referenceCount, referenceTo, rumorOf, shardInnerTemplate, unbag, wantsReference, entryKey,
   type BagEntry, type Hidden, type HiddenType, type KeyItem, type Reference, type Rumor,
 } from './hidden/bags.js'
@@ -255,6 +255,10 @@ export class Agent {
    * contents (arkinox, 2026-10-11).
    */
   private readonly objectsSeen = new Map<string, ShardModel>()
+  /** Who carries out the operator's STOP on the jobs (the waker, under serve); the ride is paused here whatever it says. */
+  onStop: ((targets: string[]) => string[]) | null = null
+  /** Who marks the unread orders a STOP dropped (the waker, for their ⏹️). */
+  onStoppedUnread: ((ids: string[]) => void) | null = null
 
   private constructor(readonly config: AgentConfig, dir: StateDir, sk: Uint8Array, release: () => void, calibration: Calibration) {
     this.dir = dir
@@ -317,7 +321,10 @@ export class Agent {
       wrap: (recipient, text) => wrapMessage({ senderSk: this.sk, recipient, text, now: nowSeconds() }),
       unwrap: (wrap) => unwrapMessage(wrap, this.sk),
       // The 👀 on each order, the first time the server sees it (arkinox, 2026-10-12).
-      wrapReaction: (recipient, eventId) => wrapReaction({ senderSk: this.sk, recipient, eventId, now: nowSeconds() }),
+      wrapReaction: (recipient, eventId, content, extraTags) => wrapReaction({ senderSk: this.sk, recipient, eventId, content, extraTags, now: nowSeconds() }),
+      // The operator's STOP, carried out by the server, never by a model (arkinox, 2026-10-25).
+      onStop: (targets) => { void this.carryOutStop(targets) },
+      onStoppedUnread: (ids) => { try { this.onStoppedUnread?.(ids) } catch { /* the jobs' bookkeeping never fails a read */ } },
       reactionRetryMs: config.reactionRetryMs,
       now: nowSeconds, log: this.log, maxWaitMs: config.relayMaxWaitMs,
       // The operator's CONTINUE (KEEP GOING), and only it, renews the session budget (arkinox, 2026-10-11).
@@ -1013,6 +1020,10 @@ export class Agent {
 
   /** Ride the line to a block: the work runs in the background, and the ride call after the proof is ready signs the hyperjump (DECK-0001 5). */
   async ride(input: { to?: number; budget_seconds?: number; wait_seconds?: number; as_of?: number; pause?: boolean; cancel?: boolean; forget?: boolean; prover?: 'local' | 'hosaka' } = {}, signal?: AbortSignal): Promise<ToolResult> {
+    // After the operator's STOP a ride is held, its proof unsigned and its work kept, until their next message (2026-10-25).
+    if (this.operatorChannel.halted() && !input.pause && !input.cancel && !input.forget) {
+      throw new Refusal('Held: your operator sent STOP. The ride waits, nothing computed is lost, and nothing is signed until their next message.')
+    }
     const result = await this.transit.ride(input, signal)
     const where = result.data.where as { hex?: string } | undefined
     if (result.data.action !== 'hyperjump' || !where?.hex) return result
@@ -2432,6 +2443,67 @@ export class Agent {
   /** Where the agent stands right now, without asking the relays. */
   here(): Place {
     return this.keeper.place()
+  }
+
+  /**
+   * The operator's STOP (arkinox, 2026-10-25: HOLD becomes a real control):
+   * the jobs are stopped first (the waker kills the turn under way and
+   * closes them, with ⏹️), then a ride computing in the background is
+   * paused, every finished leaf kept. Never throws; logs ids, never words.
+   */
+  async carryOutStop(targets: string[]): Promise<void> {
+    try {
+      const stopped = this.onStop?.(targets) ?? []
+      this.log(`STOP: ${stopped.length} job(s) stopped`)
+    } catch (err) {
+      this.log(`STOP: the jobs could not be stopped: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    if (this.transit.rideState().state !== 'computing') return
+    try {
+      await this.transit.ride({ pause: true })
+      this.log('STOP: the ride is paused')
+    } catch (err) {
+      this.log(`STOP: the ride could not be paused: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  /**
+   * Text sealed with NIP-44 v2 from the agent's key to itself (the
+   * conversation key of its own secret and public key, as the self copy of
+   * a NIP-17 seal is), for what the server keeps on disk about its jobs
+   * (arkinox, 2026-10-25). Only this key opens it.
+   */
+  sealToSelf(text: string): string {
+    return nip44.encrypt(text, nip44.utils.getConversationKey(this.sk, this.pubkey))
+  }
+
+  /** Open what sealToSelf sealed. Throws when it is not this key's. */
+  openFromSelf(payload: string): string {
+    return nip44.decrypt(payload, nip44.utils.getConversationKey(this.sk, this.pubkey))
+  }
+
+  /**
+   * The operator's unread lines in local chat that address the agent: its
+   * orders from the room (arkinox, 2026-10-25), by the signature's word
+   * (fromOperator), never the text's. Words are untrusted chat text, read
+   * as orders only because the operator's key said them.
+   */
+  operatorChatOrders(): Array<{ id: string; at: number; text: string }> {
+    const op = this.chat.operator()
+    // The rule a DM order needs holds here too: the operator follows the agent (kind 3), by the newest check.
+    if (!op || !this.operatorChannel.followedNow()) return []
+    return this.chat.lines.filter((l) => l.unread && !l.mine && l.addressed && l.from === op).map((l) => ({ id: l.id, at: l.at, text: l.text }))
+  }
+
+  /**
+   * A job's status on the order it came from (arkinox, 2026-10-25), always
+   * private: the NIP-17 kind 7 the 👀 is, to the operator, content the
+   * emoji, e the order's id (a DM's rumor id, or a chat line's id with
+   * ["k", "23333"] marking the channel). Never a public event: what the
+   * agent was told in the room stays in the room.
+   */
+  jobStatus(order: { id: string; channel: 'dm' | 'chat' }, emoji: string): Promise<void> {
+    return this.operatorChannel.status(order.id, emoji, order.channel === 'chat' ? [['k', String(CHAT_KIND)]] : [])
   }
 
   /**
