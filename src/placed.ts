@@ -24,6 +24,14 @@
 //     reference that changes region is sealed again to the new region under
 //     the same `d`, and the old version signed again is kept to put back if
 //     the new bag reaches no relay.
+//   - A change of a shard's WALK setting (constrain_placed, ONOSENDAI's
+//     EDIT row CONSTRAIN MOVEMENT IN WALK MODE, #461 and #476) writes that
+//     placement's payload again where it is (DECK-0003 1.12, "One placement,
+//     one setting"): an inline shard is signed again with its lineage and its
+//     bag rewritten in one step; a shard by reference is its own sealed
+//     object, sealed again to the same place under the same `d`, so the bag,
+//     which names it by its address, is not touched. A public object placed
+//     by reference is its author's, so its setting is theirs too: refused.
 //
 // Every rewrite reads the bag first: the newest version any relay that
 // answered returns, or that this server signed and still has in its outbox.
@@ -34,7 +42,7 @@
 
 import { coordToXyz, hexToCoord, type Plane } from 'cyberspace-core'
 import {
-  HIDDEN_KIND, OBJECT_KIND, PROTECTED_TAG, bagSettingsOf, bagTemplate, ciphertextOf, editedTemplate, entryKey, isReference, itemLineage, messagePreview, resealedObject, rumorOf, sealedAsRumor, unbag,
+  HIDDEN_KIND, OBJECT_KIND, PROTECTED_TAG, SHARD_KIND, bagSettingsOf, bagTemplate, ciphertextOf, editedTemplate, entryKey, isReference, itemLineage, messagePreview, resealedObject, rumorOf, sealedAsRumor, unbag,
   type BagEntry, type BagSettings, type Hidden, type HiddenType, type Reference, type Rumor,
 } from './hidden/bags.js'
 import { decryptForRegion } from './hidden/crypto.js'
@@ -48,6 +56,8 @@ import { objectHandle } from './render.js'
 import { parseCoordinate, placeOf, type CoordinateInput, type Place, type Position } from './space/coords.js'
 import type { EntrySummary, HeldKey, ItemPlace, KeyStore, OpenedBag } from './space/regionKeys.js'
 import { Refusal, type ToolResult } from './tool.js'
+import { readOpacity } from 'sno-core/shards'
+import { CONSTRAIN_WORDS, authoredConstrainOf, chosenConstrain, chosenConstrainOf, rawConstrain, rewritePayload, walkWords, withAuthoredConstrain, type Constrain } from './walkConstrain.js'
 
 /** The words an agent may use for "the thing I placed most recently". */
 const LAST_WORDS = new Set(['last', 'latest', 'newest', 'recent', 'most recent', 'the last one', 'it', 'this', 'that'])
@@ -57,6 +67,8 @@ const MAX_OWN_BAGS = 500
 const TYPE_WORDS: Record<string, HiddenType> = { shard: 'shard', object: 'shard', message: 'message', note: 'message', key: 'key', item: 'key', chest: 'chest', audio: 'audio', sound: 'audio' }
 /** How long a put-back waits between its tries, in ms. */
 const PUT_BACK_RETRY_MS = [500, 1500]
+/** The most shards one constrain_placed call changes: each is a signature, and a sealed one a publish of its own. */
+export const MAX_CONSTRAIN_PER_CALL = 100
 
 /** What `placed` lists for one thing in one of the agent's bags. */
 export interface PlacedEntry {
@@ -73,6 +85,8 @@ export interface PlacedEntry {
   /** How it is carried, when it is not inline: an object sealed to this place, or a public object placed by reference. */
   byReference?: 'sealed' | 'public'
   objectAddress?: string
+  /** A shard's WALK setting as its payload writes it (DECK-0003 1.12; null: none written, so walkers pass through) and its opacity (1.11, 100 when absent). */
+  walk?: { constrain: Constrain | null; opacity: number }
 }
 
 /** What `placed` lists for one of the agent's bags. */
@@ -420,7 +434,9 @@ export class Placements {
 
   private static publicRow(r: Row): PlacedEntry {
     const { id, lineage, type, label, at, plane, createdAt, byReference, objectAddress } = r
-    return { id, lineage, type, label, at, plane, createdAt, ...(byReference ? { byReference } : {}), ...(objectAddress ? { objectAddress } : {}) }
+    const shard = r.hidden?.shard
+    const walk = shard ? { constrain: chosenConstrainOf(shard) ?? null, opacity: readOpacity(shard.opacity) ?? 100 } : undefined
+    return { id, lineage, type, label, at, plane, createdAt, ...(byReference ? { byReference } : {}), ...(objectAddress ? { objectAddress } : {}), ...(walk ? { walk } : {}) }
   }
 
   private static rows(reading: Reading): Row[] {
@@ -495,11 +511,12 @@ export class Placements {
       for (const r of b.rows) {
         const how = r.byReference === 'sealed' ? ' [by reference, sealed to this place]' : r.byReference === 'public' ? ' [a public object placed by reference]' : ''
         const moved = r.lineage && r.lineage !== r.id && /^[0-9a-f]{64}$/.test(r.lineage) ? `, moved (lineage ${r.lineage.slice(0, 12)})` : ''
-        out.push(`  ${r.type} "${r.label}" id ${r.id.slice(0, 12)} at ${words(r.at)}${how}${moved}`)
+        const walk = r.hidden?.shard ? `, ${walkWords(r.hidden.shard)}` : ''
+        out.push(`  ${r.type} "${r.label}" id ${r.id.slice(0, 12)} at ${words(r.at)}${how}${moved}${walk}`)
       }
     }
     if (reading.silent.length) out.push(`Not answered: ${reading.silent.join('; ')}. A bag only those relays hold is not listed.`)
-    out.push('To take one down: remove_placed with its target (its id, its exact name, or "last" for the newest of any type; add type: "shard" for the newest shard); whole_bag: true takes down the bag it is in. To move one: move_placed with its target and by: { dz: 12 } for 12 gibsons toward Z+ (dx, dy, dz in gibsons, negative for X-, Y-, Z-), or to: a coordinate.')
+    out.push('To take one down: remove_placed with its target (its id, its exact name, or "last" for the newest of any type; add type: "shard" for the newest shard); whole_bag: true takes down the bag it is in. To move one: move_placed with its target and by: { dz: 12 } for 12 gibsons toward Z+ (dx, dy, dz in gibsons, negative for X-, Y-, Z-), or to: a coordinate. To turn collision in WALK on or off for shards: constrain_placed with their target (or match, bag, all: true) and constrain "opaque", "all" or "off".')
     return {
       text: out.join('\n'),
       data: {
@@ -731,11 +748,22 @@ export class Placements {
         // never signed, as when it was hidden (ONOSENDAI #409, DECK-0007 §3):
         // a signed hidden audio item would be a playable file post under
         // this key.
-        const next = editedTemplate({ kind: inner.kind, created_at: now, content: inner.content, tags: [['C', dest.hex], [...PROTECTED_TAG]] }, inner)
+        // A shard is written again, so it carries its WALK setting: the
+        // author's word, or "opaque" when nobody chose (ONOSENDAI #476,
+        // DECK-0003 1.12: "including one that is moved"); every other field
+        // of its payload as it was.
+        const content = inner.kind === SHARD_KIND ? (rewritePayload(inner.content) ?? inner.content) : inner.content
+        const next = editedTemplate({ kind: inner.kind, created_at: now, content, tags: [['C', dest.hex], [...PROTECTED_TAG]] }, inner)
         moved = sealedAsRumor(inner.kind) ? rumorOf(attributed(next), this.host.pubkey) : this.host.sign(next)
       } else {
         const ref = was as Reference
-        if (sealedOwn && !sameBag) {
+        // Sealed again to the new region; or inside its bag when it has no
+        // WALK setting yet, so the default reaches it as ONOSENDAI's EDIT
+        // reseals every reference it moves (review of #44, L2). One that
+        // already chose a word moves inside its bag without a reseal: its
+        // payload would be the same.
+        const needsDefault = sealedOwn && !!row.hidden?.shard && chosenConstrainOf(row.hidden.shard) === undefined
+        if (sealedOwn && (!sameBag || needsDefault)) {
           const old = referenced(row.hidden!.inner)
           const still = await this.addressStillThis(old)
           if (still !== 'this') throw new Refusal(still === 'newer' ? 'The relays hold a newer version of that shard\'s object than the one in your bag (moved from somewhere else?). Nothing was changed; call placed again.' : 'No relay answered about that shard\'s object, so sealing it again could overwrite a version this server cannot see. Nothing was changed; try again shortly.')
@@ -749,13 +777,27 @@ export class Placements {
         moved = [ref[0], ref[1], ref[2] ?? '', dest.hex]
       }
 
+      // What its payload says now, when this move wrote it (DECK-0003 1.12: a tool with no screen reports it; review of #44, L1).
+      const shard = row.hidden?.shard
+      const walk = shard && (!isReference(was) || object)
+        ? ` WALK: ${walkWords(withAuthoredConstrain(shard))}${chosenConstrainOf(shard) ? '' : ', the default, written since it had none'}; constrain_placed changes it.`
+        : ''
+
       // Inside one bag: one rewrite, which loses nothing whichever relays take it.
       if (sameBag) {
+        if (object && rollback) {
+          // The object first, and only into a bag the canonical relay can read it from: refused, the old version goes back and nothing moves.
+          const sent = await this.host.relays.publish(object).catch((err) => ({ ok: false as const, reason: err instanceof Error ? err.message : String(err), reasons: {} as Record<string, string> }))
+          if (!sent.ok || !sent.accepted.includes(this.canonical)) {
+            const back = await this.putBack(rollback)
+            throw new Refusal(`The canonical relay did not take the shard's object sealed again with its WALK setting (${sent.ok ? `only ${sent.accepted.join(', ') || 'no relay'} did` : sent.reason}${Object.entries(sent.reasons).length ? `; ${Object.entries(sent.reasons).map(([u, r]) => `${u}: ${r}`).join('; ')}` : ''}). Nothing was moved; it stays where it was.${back}`)
+          }
+        }
         const entries = mergeEntries(src.entries.filter((e) => entryKey(e) !== row.key), [moved])
         const settings = bagSettingsOf(src.current, height)
         const { event: newBag, entry } = await this.publishBag(entries, newKey, settings, dest, src.current)
         await this.noteOpened(newBag, newKey, settings)
-        return this.moved(row, moved, null, from, dest, oldKey, newKey, height, keyMs, true, `Same bag, rewritten in one step (${newBag.id.slice(0, 8)}..., ${entries.length} thing(s)): ${relayWords(entry)}.`, newBag, entry.accepted, entry.refused ?? {})
+        return this.moved(row, moved, object, from, dest, oldKey, newKey, height, keyMs, true, `Same bag, rewritten in one step (${newBag.id.slice(0, 8)}..., ${entries.length} thing(s)): ${relayWords(entry)}.${object ? ` Its sealed object was sealed again under the same d (${object.id.slice(0, 8)}...).` : ''}${walk}`, newBag, entry.accepted, entry.refused ?? {})
       }
 
       // To another bag: the destination's bag with it added, signed before anything goes out.
@@ -812,7 +854,7 @@ export class Placements {
           ? ` It was the last thing in its old bag, so that bag was deleted (kind 5 ${event.id.slice(0, 8)}...): ${relayWords(entry)}.`
           : ` The old bag's deletion reached no relay yet, so the old copy still shows until the outbox gets it through (${relayWords(entry)}).`
       }
-      return this.moved(row, moved, object, from, dest, oldKey, newKey, height, keyMs, false, `New place: your h${height} bag at base ${words(newKey.base)} (${newBag.id.slice(0, 8)}..., ${entries.length} thing(s)): ${relayWords(newEntry)}. Key cost ${keyMs.toFixed(0)} ms.${oldWords} Comments are sealed to a bag, so comments left in the old cube stay there.`, newBag, newEntry.accepted, newEntry.refused ?? {})
+      return this.moved(row, moved, object, from, dest, oldKey, newKey, height, keyMs, false, `New place: your h${height} bag at base ${words(newKey.base)} (${newBag.id.slice(0, 8)}..., ${entries.length} thing(s)): ${relayWords(newEntry)}. Key cost ${keyMs.toFixed(0)} ms.${oldWords} Comments are sealed to a bag, so comments left in the old cube stay there.${walk}`, newBag, newEntry.accepted, newEntry.refused ?? {})
     })
   }
 
@@ -835,6 +877,240 @@ export class Placements {
         from: { ...row.at, plane: row.plane, height: oldKey.height, lookupId: oldKey.lookupId },
         to: { x: place.x, y: place.y, z: place.z, plane: dest.plane, height, lookupId: newKey.lookupId },
         sameBag, bagId: newBag.id, accepted, refused, keyMs: Math.round(keyMs), objectEventId: object?.id ?? null,
+      },
+    }
+  }
+
+  // ---- constrain_placed ----------------------------------------------------------
+
+  /**
+   * The shards a constrain_placed call names: one target or a list of them
+   * (each as remove_placed and move_placed take one, of type shard unless
+   * said otherwise), every shard whose name contains `match`, every shard in
+   * one bag, or every shard placed. A target that cannot take the setting
+   * refuses the call; in a selection by match, bag or all it is skipped.
+   */
+  private pickShards(reading: Reading, input: { target?: string | string[]; type?: string; match?: string; bag?: string; all?: boolean }): { rows: Row[]; skipped: Array<{ row: Row; why: string }> } {
+    const editable = (r: Row): string | null => {
+      if (r.type !== 'shard') return `it is a ${r.type}, and only a shard has a WALK setting`
+      if (!r.hidden?.shard) return 'this server cannot read it'
+      if (r.byReference === 'public') {
+        return r.hidden.inner.pubkey === this.host.pubkey
+          ? 'it is your public object placed by reference: its setting is in the object itself, so publish_object again with its d and constrain in the payload, which changes it everywhere it is placed'
+          : 'it is a public object by someone else, placed by reference: its setting is its author\'s and is never changed here; to choose your own, place a copy of its payload (place with object, or with its id) and remove this placement'
+      }
+      if (r.byReference === 'sealed' && r.hidden.inner.pubkey !== this.host.pubkey) return 'its sealed object was signed by another key, so only that key can seal it again'
+      return null
+    }
+    // A sealed object is one thing however many entries name it: sealed again once, reported once (review of #44, N1).
+    const unique = (rows: Row[]): Row[] => [...new Map(rows.map((r) => [r.byReference === 'sealed' && r.objectAddress ? r.objectAddress : `${r.bag.lookupId}/${r.key}`, r])).values()]
+    if (input.target !== undefined) {
+      const targets = (Array.isArray(input.target) ? input.target : [input.target]).map((t) => String(t).trim())
+      if (targets.length === 0 || targets.some((t) => !t)) throw new Refusal('target is "last", an exact name or an id, or a list of them; none may be empty. Nothing was changed.')
+      const rows = unique(targets.map((t) => this.resolve(reading, t, input.type ?? 'shard')))
+      for (const r of rows) {
+        const why = editable(r)
+        if (why) throw new Refusal(`${r.type} "${r.label}" (id ${r.id.slice(0, 12)}): ${why}. Nothing was changed.`)
+      }
+      return { rows, skipped: [] }
+    }
+    let pool: Row[]
+    if (input.bag !== undefined) {
+      const want = String(input.bag).trim().toLowerCase()
+      if (!/^[0-9a-f]{8,64}$/.test(want)) throw new Refusal('bag is at least 8 hex characters of a lookup id or bag id, as placed lists them.')
+      const hits = reading.bags.filter((b) => b.lookupId.startsWith(want) || b.bagId.startsWith(want))
+      if (hits.length === 0) throw new Refusal(`None of your bags has a lookup id or bag id starting ${want}. placed lists them.`)
+      if (hits.length > 1) throw new Refusal(`${hits.length} of your bags start ${want}; give more of the id.`)
+      if (!hits[0].keyHeld) throw new Refusal('This server holds no key for that bag, so what is in it cannot be read or rewritten. Nothing was changed.')
+      pool = hits[0].rows
+    } else if (input.match !== undefined) {
+      const m = String(input.match).trim().toLowerCase()
+      if (!m) throw new Refusal('match is the words a shard\'s name contains; it must not be empty (all: true is every shard). Nothing was changed.')
+      pool = Placements.rows(reading).filter((r) => r.label.toLowerCase().includes(m))
+    } else {
+      pool = Placements.rows(reading)
+    }
+    const shards = pool.filter((r) => r.type === 'shard')
+    if (shards.length === 0) throw new Refusal(`You have no shard placed${input.match !== undefined ? ` whose name contains "${String(input.match).trim()}"` : input.bag !== undefined ? ' in that bag' : ''} that this server can open: placed lists what you placed. Nothing was changed.`)
+    const rows: Row[] = []
+    const skipped: Array<{ row: Row; why: string }> = []
+    for (const r of unique(shards)) {
+      const why = editable(r)
+      if (why) skipped.push({ row: r, why })
+      else rows.push(r)
+    }
+    return { rows, skipped }
+  }
+
+  /**
+   * constrain_placed: set the WALK setting (DECK-0003 1.12) and, if asked,
+   * the opacity (1.11) of shards placed, in place, as ONOSENDAI's EDIT writes
+   * them (#461, #476). Each bag is read fresh and changed by one call at a
+   * time; an inline shard is signed again with its lineage (d = its first
+   * id) and its bag rewritten in one step, keeping every other entry exactly
+   * as found; a shard hidden by reference has its own sealed object sealed
+   * again to the same place under the same d (its address, which comments
+   * and reactions name), only while the relays hold this very version, and
+   * put back when the canonical relay does not take the new one.
+   */
+  async constrain(input: { target?: string | string[]; type?: string; match?: string; bag?: string; all?: boolean; constrain?: string; opacity?: number }): Promise<ToolResult> {
+    const constrain = input.constrain === undefined ? undefined : chosenConstrain(input.constrain)
+    if (input.constrain !== undefined && !constrain) throw new Refusal('constrain is one of three words, lowercase: "opaque" (WALK cannot cross it while it is solid and fully opaque; the default), "all" (WALK cannot cross any face) or "off" (WALK passes through). Nothing was changed.')
+    if (input.opacity !== undefined && (!Number.isInteger(input.opacity) || input.opacity < 1 || input.opacity > 100)) throw new Refusal('opacity is a whole percent from 1 to 100: 100 is fully opaque, and 1 to 9 are drawn at 10. Nothing was changed.')
+    if (constrain === undefined && input.opacity === undefined) throw new Refusal('Say what to set: constrain ("opaque", "all" or "off"), opacity (1 to 100), or both. Nothing was changed.')
+    const selectors = [input.target !== undefined, input.match !== undefined, input.bag !== undefined, input.all === true].filter(Boolean).length
+    if (selectors !== 1) throw new Refusal('Say which shards with exactly one of: target ("last", an exact name or an id, or a list of them), match (every shard whose name contains these words), bag (every shard in one bag, by its lookup id or bag id from placed), or all: true (every shard you placed). Nothing was changed.')
+    if (input.type !== undefined && TYPE_WORDS[String(input.type).trim().toLowerCase()] !== 'shard') throw new Refusal('Only a shard has a WALK setting: type, when given, is "shard". Nothing was changed.')
+    const reading = await this.readAll()
+    const { rows, skipped } = this.pickShards(reading, input)
+
+    // What each shard will say, and the ones that already say it.
+    const wantOf = (r: Row): { constrain: Constrain; opacity: number | undefined } => ({
+      constrain: constrain ?? authoredConstrainOf(r.hidden!.shard!),
+      opacity: readOpacity(input.opacity !== undefined ? input.opacity : r.hidden!.shard!.opacity),
+    })
+    const already = rows.filter((r) => { const w = wantOf(r); return rawConstrain(r.hidden!.shard!) === w.constrain && readOpacity(r.hidden!.shard!.opacity) === w.opacity })
+    // The cap counts only what still needs changing, so the same call made again reaches the rest (review of #44, S1).
+    const needing = rows.filter((r) => !already.includes(r))
+    const todo = needing.slice(0, MAX_CONSTRAIN_PER_CALL)
+    const later = needing.length - todo.length
+    const byBag = new Map<string, Row[]>()
+    for (const r of todo) byBag.set(r.bag.lookupId, [...(byBag.get(r.bag.lookupId) ?? []), r])
+
+    type Changed = { row: Row; id: string; lineage: string | null; how: string }
+    const changed: Changed[] = []
+    const failed: Array<{ row: Row; why: string }> = []
+    const bagNotes: string[] = []
+    const bagsData: Array<{ lookupId: string; bagId: string | null; accepted: string[]; refused: Record<string, string> }> = []
+    const canonical = this.canonical
+
+    await this.withBags([...byBag.keys()], async () => {
+      for (const [lookupId, group] of byBag) {
+        try {
+          const key = this.keyOf(group[0].bag)
+          for (const r of group) this.unsentGuard([lookupId], isReference(r.entry) ? dOf(r.hidden!.inner) : null)
+          const src = await this.ownBag(lookupId, hexToBytes(key.keyHex))
+          const now = nowSeconds()
+          const replaced = new Map<string, NostrEvent>()
+          for (const r of group) {
+            const was = src.current ? src.entries.find((e) => entryKey(e) === r.key) : undefined
+            if (!was) { failed.push({ row: r, why: 'it is no longer in that bag (placed shows what is there now)' }); continue }
+            // What is written: the word, and the opacity as asked (100 is written as no field), or the shard's own when not asked.
+            const w = { constrain: wantOf(r).constrain, ...(input.opacity !== undefined ? { opacity: input.opacity } : {}) }
+            if (!isReference(was)) {
+              // Inline: the item signed again where it is, with its lineage, every other tag and its payload's every other field kept.
+              const inner = was as Rumor
+              const content = rewritePayload(inner.content, w)
+              if (content === null) { failed.push({ row: r, why: 'its payload does not read as SNO' }); continue }
+              const point = inner.tags.find((t) => t[0] === 'C')
+              replaced.set(r.key, this.host.sign(editedTemplate({ kind: inner.kind, created_at: now, content, tags: [...(point ? [[...point]] : []), [...PROTECTED_TAG]] }, inner)))
+              continue
+            }
+            // By reference: its own sealed object, sealed again to the same place under the same d. The bag names it by address and stays as it is.
+            const old = referenced(r.hidden!.inner)
+            const still = await this.addressStillThis(old)
+            if (still !== 'this') { failed.push({ row: r, why: still === 'newer' ? 'the relays hold a newer version of its object than the one in your bag; call placed again' : 'no relay answered about its object, so sealing it again could overwrite a version this server cannot see' }); continue }
+            const objectAt = Math.max(now, old.created_at + 1)
+            const t = await resealedObject(old, hexToBytes(key.keyHex), hexToBytes(key.keyHex), objectAt, w)
+            if (!t) { failed.push({ row: r, why: 'its object does not open with its bag\'s key' }); continue }
+            const object = this.host.sign(t)
+            // The old version, signed again a second newer: what goes back if the canonical relay does not take the new one (as move_placed does).
+            const rollback = this.host.sign({ kind: old.kind, created_at: objectAt + 1, content: old.content, tags: old.tags })
+            const sent = await this.host.relays.publish(object).catch((err) => ({ ok: false as const, reason: err instanceof Error ? err.message : String(err), reasons: {} as Record<string, string> }))
+            const said = Object.entries(sent.reasons).map(([u, why]) => `${u}: ${why}`).join('; ')
+            if (!sent.ok || !sent.accepted.includes(canonical)) {
+              const back = await this.putBack(rollback)
+              failed.push({ row: r, why: `the canonical relay did not take its object sealed again (${sent.ok ? `only ${sent.accepted.join(', ') || 'no relay'} did` : sent.reason}${said ? `; ${said}` : ''}), so it keeps its old setting.${back}` })
+              continue
+            }
+            changed.push({ row: r, id: object.id, lineage: r.objectAddress ?? null, how: `its sealed object was sealed again under the same d (${object.id.slice(0, 8)}...): accepted by ${sent.accepted.join(', ')}${said ? `; refused by ${said} (verbatim)` : ''}; the bag names it by its address and was not rewritten` })
+          }
+          if (replaced.size > 0) {
+            const entries = src.entries.map((e) => replaced.get(entryKey(e)) ?? e)
+            const settings = bagSettingsOf(src.current!, key.height)
+            const place = { position: { x: BigInt(key.base.x), y: BigInt(key.base.y), z: BigInt(key.base.z) }, plane: group[0].plane }
+            // Straight to the relays, as move_placed sends a new bag: the change
+            // counts only once the canonical relay took it, and only then is it
+            // recorded as the newest version (review of #44, B1: through the
+            // outbox a refusal still read as changed, here and in placed).
+            const event = await this.signBag(entries, key, settings, place, src.current)
+            const sent = await this.host.relays.publish(event).catch((err) => ({ ok: false as const, reason: err instanceof Error ? err.message : String(err), reasons: {} as Record<string, string> }))
+            const took = sent.ok ? sent.accepted : []
+            if (!took.includes(canonical)) {
+              const said = Object.entries(sent.reasons).map(([u, why]) => `${u}: ${why}`).join('; ')
+              // A lesser relay that took the new version would show the new
+              // setting and make a retry read "already set": the bag as it was
+              // goes out again over it, newer, so every relay ends where the
+              // canonical one is. Its entries are the ones the canonical relay holds.
+              let back = ''
+              if (took.length > 0 || !sent.ok) {
+                const restored = await this.publishBag(src.entries, key, settings, place, event)
+                await this.noteOpened(restored.event, key, settings)
+                back = ` ${took.length ? `${took.join(', ')} took the rewritten bag, so` : 'A relay whose answer timed out may have stored the rewritten bag, so'} the bag as it was went out again over it (${restored.event.id.slice(0, 8)}...): ${relayWords(restored.entry)}.`
+              }
+              for (const r of group) {
+                if (replaced.has(r.key)) failed.push({ row: r, why: `the canonical relay did not take the rewritten bag (${said || (sent.ok ? 'no answer' : sent.reason)}${said ? ', verbatim' : ''}), so it keeps its old setting.${back}` })
+              }
+              continue
+            }
+            this.host.keys.noteOwnBag(key, event.created_at, { bagId: event.id, event })
+            const entry = this.host.outbox.add(event)
+            await this.host.outbox.send(entry)
+            await this.noteOpened(event, key, settings)
+            // "last" keeps naming the same thing when that thing was signed again.
+            const noted = this.host.keys.lastPlaced
+            const next = noted && noted.lookupId === lookupId ? replaced.get(noted.entryKey) : undefined
+            if (noted && next) this.host.keys.notePlaced(lookupId, entryKey(next), noted.at)
+            for (const r of group) {
+              const n = replaced.get(r.key)
+              if (n) changed.push({ row: r, id: n.id, lineage: itemLineage(n), how: `signed again with its lineage ${String(itemLineage(n)).slice(0, 12)}` })
+            }
+            bagNotes.push(`Your h${key.height} bag at base ${words(key.base)} was rewritten in one step (${event.id.slice(0, 8)}..., ${entries.length} thing(s), ${replaced.size} signed again, every other entry kept as it was): ${relayWords(entry)}.`)
+            bagsData.push({ lookupId, bagId: event.id, accepted: entry.accepted, refused: entry.refused ?? {} })
+          }
+        } catch (err) {
+          const why = err instanceof Error ? err.message : String(err)
+          for (const r of group) if (!changed.some((c) => c.row === r) && !failed.some((f) => f.row === r)) failed.push({ row: r, why })
+        }
+      }
+    })
+
+    const setting = (r: Row): string => {
+      const w = wantOf(r)
+      return walkWords({ mode: r.hidden!.shard!.mode, opacity: w.opacity, extra: { constrain: w.constrain } }) + (input.opacity !== undefined ? `, opacity ${w.opacity ?? 100}` : '')
+    }
+    const name = (r: Row): string => `shard "${r.label}" at ${words(r.at)}${r.byReference === 'sealed' ? ' [by reference]' : ''}`
+    const asked = [constrain ? `constrain "${constrain}" (${CONSTRAIN_WORDS[constrain]})` : '', input.opacity !== undefined ? `opacity ${input.opacity}` : ''].filter(Boolean).join(' and ')
+    // Opacity alone still writes the shard again, so one that chose no WALK word gains "opaque" (review of #44, N2).
+    const gained = constrain === undefined ? changed.filter((c) => chosenConstrainOf(c.row.hidden!.shard!) === undefined).length : 0
+    const out: string[] = []
+    out.push(changed.length
+      ? `Set ${asked} on ${changed.length} shard(s), in place, as ONOSENDAI's EDIT does: each keeps its lineage, so its comments and reactions follow it.${gained ? ` ${gained} of them had no WALK setting, so they now carry constrain "opaque", the default every shard written again gets.` : ''}`
+      : failed.length
+        ? `Changed nothing: no shard took ${asked}.`
+        : already.length
+          ? `Nothing to change: every shard named already has ${asked}.`
+          : `Nothing to change: no shard named can take ${asked}.`)
+    for (const c of changed) out.push(`  ${name(c.row)}: now ${setting(c.row)}; new id ${c.id.slice(0, 12)}, ${c.how}.`)
+    out.push(...bagNotes)
+    if (already.length) out.push(`Already set, left as they are: ${already.map((r) => `"${r.label}" (id ${r.id.slice(0, 12)})`).join(', ')}.`)
+    for (const f of failed) out.push(`Not changed: ${name(f.row)} (id ${f.row.id.slice(0, 12)}): ${f.why}`)
+    for (const k of skipped) out.push(`Skipped: ${name(k.row)} (id ${k.row.id.slice(0, 12)}): ${k.why}.`)
+    if (later > 0) out.push(`${later} more shard(s) still need it: one call changes at most ${MAX_CONSTRAIN_PER_CALL}. Make the same call again for the rest; the ones already set are left alone.`)
+    if (reading.silent.length) out.push(`Not answered: ${reading.silent.join('; ')}. A shard only those relays hold was not seen.`)
+    const text = out.join('\n')
+    if (changed.length === 0 && failed.length > 0) throw new Refusal(text)
+    const row = (r: Row): PlacedEntry => Placements.publicRow(r)
+    return {
+      text,
+      data: {
+        constrain: constrain ?? null, opacity: input.opacity ?? null,
+        changed: changed.map((c) => ({ ...row(c.row), id: c.id, previousId: c.row.id, lineage: c.lineage, walk: { constrain: wantOf(c.row).constrain, opacity: wantOf(c.row).opacity ?? 100 } })),
+        already: already.map(row),
+        failed: failed.map((f) => ({ ...row(f.row), why: f.why })),
+        skipped: skipped.map((k) => ({ ...row(k.row), why: k.why })),
+        bags: bagsData,
+        remaining: later,
       },
     }
   }

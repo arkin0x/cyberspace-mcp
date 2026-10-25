@@ -39,7 +39,11 @@ const key = hexToBytes(fx.regionKeyHex)
 
 describe('templates, against ONOSENDAI #409', () => {
   it('shard, message, key and chest are ONOSENDAI\'s, tag for tag, each with `-` once', () => {
-    expect(shardInnerTemplate(shard, at, plane, T)).toEqual(fx.templates.shard)
+    // The fixture is from ONOSENDAI #409, before #476 wrote the WALK default
+    // ("constrain": "opaque", DECK-0003 1.12) at the end of every shard it
+    // hides: tag for tag the same, and the payload the same but for that
+    // field. constrainInterop.test.ts pins the payload against #476 itself.
+    expect(shardInnerTemplate(shard, at, plane, T)).toEqual({ ...fx.templates.shard, content: `${fx.templates.shard.content.slice(0, -1)},"constrain":"opaque"}` })
     expect(messageInnerTemplate('A fixed message.', at, plane, T)).toEqual(fx.templates.message)
     expect(keyInnerTemplate(fx.templates.keyInput, at, plane, T)).toEqual(fx.templates.key)
     expect(chestInnerTemplate(fx.templates.chestInput, at, plane, T)).toEqual(fx.templates.chest)
