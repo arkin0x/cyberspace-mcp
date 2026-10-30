@@ -7,7 +7,10 @@
 // adopted from the relays with a version 1 hop on it (signed before the
 // cutover; the exemption list is empty until the census) is reported and
 // never a stop. A version 1 hop a stopped server left unsent in the outbox
-// is dropped, never sent. Nothing leaves the process (test/fakeRelay.ts).
+// is dropped, never sent, with the chain events after it and never a note
+// beside it; when a relay already holds it (the crash window), the next hop
+// adopts and extends it, never a fork (review of #51). Nothing leaves the
+// process (test/fakeRelay.ts).
 
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -20,6 +23,7 @@ import { hopTemplate, spawnTemplate } from '../src/chain/builder.js'
 import { HopProofCheck, hopReportWords, isVersion1Hop } from '../src/chain/hopProofs.js'
 import { bytesToHex, signEvent, type NostrEvent } from '../src/nostr/event.js'
 import { DEFAULT_RESIDUE_RATES, cacheValid, hopResidueSeconds, hopSeconds, measureResidueRates, projectCantorMs, type Calibration } from '../src/space/calibration.js'
+import { positionHex } from '../src/space/coords.js'
 import { KEY_GENERATED_BY, StateDir } from '../src/state/dir.js'
 import { FakeNetwork } from './fakeRelay.js'
 import { fakeHopProof } from './fakeHop.js'
@@ -164,6 +168,79 @@ describe('version 1 hops around the cutover', () => {
     expect(levelOne(hops[1])).toEqual([])
     await stop(a)
   }, 60_000)
+})
+
+describe('version 1 hops left in the outbox (review of #51)', () => {
+  const prevOf = (e: NostrEvent): string | undefined => e.tags.find((t) => t[0] === 'e' && t[3] === 'previous')?.[1]
+  const v1Of = (t: ReturnType<typeof hopTemplate>, sk: Uint8Array): NostrEvent => signEvent({ ...t, tags: t.tags.filter((x) => x[0] !== 'mn' && x[0] !== 'mp') }, sk)
+
+  it('a version 1 hop, a hop chained after it and a kind 1 note: both chain events dropped and logged with the reason, the note sent, the head back where the relays saw it', async () => {
+    const network = new FakeNetwork()
+    const canonical = network.add(CANONICAL)
+    const sk = generateSecretKey()
+    const dir = dirWithKey(sk)
+    let a = await start(network, dir)
+    await a.hop({ target: { dx: 3 } })
+    const head = a.keeper.head()!
+    const genesis = a.keeper.chain()[0].id
+    const to1 = { x: head.position.x + 1n, y: head.position.y, z: head.position.z }
+    const v1 = v1Of(hopTemplate({ createdAt: head.createdAt + 1, genesisId: genesis, previousId: head.id, prevCoordHex: head.coordHex, to: to1, plane: head.plane, ...fakeHopProof() }), sk)
+    const after = signEvent(hopTemplate({ createdAt: head.createdAt + 2, genesisId: genesis, previousId: v1.id, prevCoordHex: positionHex(to1, head.plane), to: { ...to1, x: to1.x + 1n }, plane: head.plane, ...fakeHopProof('cd') }), sk)
+    const note = signEvent({ kind: 1, created_at: head.createdAt + 3, tags: [], content: 'a note beside the chain' }, sk)
+    a.keeper.record(v1, 'queued')
+    a.outbox.add(v1)
+    a.keeper.record(after, 'queued')
+    a.outbox.add(after)
+    a.outbox.add(note)
+    await stop(a)
+
+    const lines: string[] = []
+    a = await start(network, dir, (l) => lines.push(l))
+    const dropped = a.outbox.state().dropped
+    expect(dropped.map((e) => e.event.id).sort()).toEqual([v1.id, after.id].sort())
+    const why = (id: string): string => dropped.find((d) => d.event.id === id)!.dropped!
+    expect(why(v1.id)).toMatch(/a version 1 hop \(no mn and no mp\), with no relay's acceptance on record here/)
+    expect(why(v1.id)).toMatch(/with the 1 unsent event after it on the chain/)
+    expect(why(v1.id)).not.toMatch(/no relay has taken/)
+    expect(why(after.id)).toMatch(new RegExp(`dropped because the version 1 hop ${v1.id.slice(0, 8)}\\.\\.\\. ahead of it on the chain was dropped`))
+    expect(lines).toContain('outbox replay: 1 sent, 2 dropped, 0 waiting for the relays')
+    expect(lines.some((l) => l.startsWith(`dropped ${after.id.slice(0, 8)}: dropped because the version 1 hop`))).toBe(true)
+    expect(canonical.published.some((e) => e.id === v1.id || e.id === after.id)).toBe(false)
+    expect(canonical.published.some((e) => e.id === note.id)).toBe(true)
+    expect(a.keeper.head()?.id).toBe(head.id)
+    await stop(a)
+  }, 60_000)
+
+  it('the crash window: a relay already holds the version 1 hop the outbox thinks is unsent; it is dropped locally, the next hop extends it from the relays, and nothing forks', async () => {
+    const network = new FakeNetwork()
+    const canonical = network.add(CANONICAL)
+    const sk = generateSecretKey()
+    const dir = dirWithKey(sk)
+    let a = await start(network, dir)
+    await a.hop({ target: { dx: 3 } })
+    const head = a.keeper.head()!
+    const genesis = a.keeper.chain()[0].id
+    const v1 = v1Of(hopTemplate({ createdAt: head.createdAt + 1, genesisId: genesis, previousId: head.id, prevCoordHex: head.coordHex, to: { x: head.position.x + 1n, y: head.position.y, z: head.position.z }, plane: head.plane, ...fakeHopProof() }), sk)
+    a.keeper.record(v1, 'queued')
+    a.outbox.add(v1)
+    canonical.seed(v1)
+    await stop(a)
+
+    a = await start(network, dir)
+    expect(a.outbox.state().dropped.map((d) => d.event.id)).toEqual([v1.id])
+    await a.hop({ target: { dx: 1 } })
+    await a.hop({ target: { dx: 1 } })
+    const hops = hopsOn(canonical.published)
+    expect(hops).toHaveLength(3)
+    // The first hop after the restart extends the version 1 hop the relay holds, adopted from the relays.
+    expect(prevOf(hops[1])).toBe(v1.id)
+    for (const hop of hops) expect(levelOne(hop)).toEqual([])
+    const moves = canonical.all().filter((e) => e.kind === 3333)
+    const prevs = moves.map(prevOf).filter((p): p is string => !!p)
+    expect(new Set(prevs).size).toBe(prevs.length)
+    expect(a.keeper.status()).toBe('valid')
+    await stop(a)
+  }, 90_000)
 })
 
 describe('the Level 1 check of the agent\'s own chain', () => {

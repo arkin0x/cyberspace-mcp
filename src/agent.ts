@@ -264,6 +264,8 @@ export class Agent {
   private readonly objectsSeen = new Map<string, ShardModel>()
   /** Who carries out the operator's STOP on the jobs (the waker, under serve); the ride is paused here whatever it says. */
   onStop: ((targets: string[]) => string[]) | null = null
+  /** Unsent chain events dropped because a version 1 hop ahead of them was (dropVersion1Hop): event id to that hop's id, so the outbox can say why. */
+  private readonly droppedBehindV1 = new Map<string, string>()
   /** Who marks the unread orders a STOP dropped (the waker, for their ⏹️). */
   onStoppedUnread: ((ids: string[]) => void) | null = null
 
@@ -499,6 +501,11 @@ export class Agent {
    */
   private async guardChainEvent(event: NostrEvent): Promise<GuardVerdict> {
     if (event.kind !== ACTION_KIND) return { verdict: 'clear' }
+    const behind = this.droppedBehindV1.get(event.id)
+    if (behind) {
+      this.droppedBehindV1.delete(event.id)
+      return { verdict: 'fork', reason: `dropped because the version 1 hop ${behind.slice(0, 8)}... ahead of it on the chain was dropped: this event extends that hop, so it cannot be sent without it (spec 5.13); hop again from where the relays last saw you` }
+    }
     if (!this.keeper.events.some((e) => e.id === event.id)) return { verdict: 'fork', reason: 'this event is no longer on the chain this server keeps' }
     if (tagValue(event, 'A') === 'hop' && isVersion1Hop(event)) return this.dropVersion1Hop(event)
     let answers
@@ -540,19 +547,30 @@ export class Agent {
   }
 
   /**
-   * A version 1 hop (no mn, no mp) that no relay has taken, left in the
-   * outbox by a server that was stopped before this one: never sent. Under
-   * the chain rules this server implements it would be a version 1 hop off
-   * the exemption list, which ends the chain from it (spec 5.13, 8.7.3). It
-   * and every unpublished event after it on the chain are dropped, so the
-   * agent stands where the relays last saw it and its next hop is version 2.
+   * A version 1 hop (no mn, no mp) left in the outbox by a server that was
+   * stopped before this one, with no relay's acceptance on record: never sent
+   * by this server. Under the chain rules this server implements it would be
+   * a version 1 hop off the exemption list, which ends the chain from it
+   * (spec 5.13, 8.7.3). It and every unpublished event after it on the chain
+   * are dropped locally, so the agent stands where the relays last saw it
+   * and its next hop is version 2. A relay may still hold it (the old server
+   * may have stopped after sending it and before recording the answer); then
+   * the head confirmation before the next hop adopts it from the relays and
+   * the next hop extends it, so there is never a fork. The events after it
+   * are remembered, so their own drop says why (droppedBehindV1).
    */
   private dropVersion1Hop(event: NostrEvent): GuardVerdict {
     const chain = this.keeper.chain()
     const at = chain.findIndex((a) => a.id === event.id)
     const after = at >= 0 ? chain.slice(at).map((a) => a.id) : [event.id]
-    this.keeper.dropLocal(new Set(after.filter((id) => this.keeper.published[id] !== 'ok')))
-    return { verdict: 'fork', reason: 'a version 1 hop (no mn and no mp) that no relay has taken: every hop this server publishes is version 2 (spec 5.13), so it was dropped unsent with whatever came after it; hop again from where the relays last saw you' }
+    const dropped = after.filter((id) => this.keeper.published[id] !== 'ok')
+    for (const id of dropped) if (id !== event.id) this.droppedBehindV1.set(id, event.id)
+    this.keeper.dropLocal(new Set(dropped))
+    const others = dropped.length - 1
+    return {
+      verdict: 'fork',
+      reason: `a version 1 hop (no mn and no mp), with no relay's acceptance on record here: every hop this server publishes is version 2 (spec 5.13), so this server never sends it; dropped locally${others > 0 ? `, with the ${others} unsent event${others === 1 ? '' : 's'} after it on the chain` : ''}. If a relay already holds it, the next hop adopts it from the relays and extends it; otherwise hop again from where the relays last saw you`,
+    }
   }
 
   private sign(template: EventTemplate): NostrEvent {
