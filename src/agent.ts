@@ -15,7 +15,7 @@
 // chain is clear of it, and dropped when they show a fork.
 
 import { randomBytes } from 'node:crypto'
-import { computeHopProof, computeSidestepProof, encodeNonce, encodeOpenings, type Plane } from 'cyberspace-core'
+import { computeHopProofV2, computeSidestepProof, encodeNonce, encodeOpenings, type Plane } from 'cyberspace-core'
 import { nip19 } from 'nostr-tools'
 import type { Filter } from 'nostr-tools/filter'
 import { v2 as nip44 } from 'nostr-tools/nip44'
@@ -27,6 +27,7 @@ import { ACTION_KIND, chainTemplateProblem, hopTemplate, sidestepTemplate, spawn
 import { findDivergence } from './chain/divergence.js'
 import { CHAIN_RULES_REVISION, buildChain, chainStatus, newestSpawn, type ActionEvent } from './chain/events.js'
 import { Holders } from './chain/holders.js'
+import { hopEventProblems, isVersion1Hop } from './chain/hopProofs.js'
 import { ChainKeeper } from './chain/keeper.js'
 import { askChainEvents, parsePubkey } from './chain/resolve.js'
 import { causeWords, decideSelfCheck } from './chain/selfCheck.js'
@@ -433,7 +434,7 @@ export class Agent {
       if (!calibration) {
         const { calibration: c, measured } = loadOrMeasure(dir)
         calibration = c
-        log(measured ? `calibrated: hop ceiling h${hopCeiling(c.cantorMsByHeight)}, ${Math.round(c.sha256PerSec / 1000)}k SHA-256/s` : 'calibration loaded from the state directory')
+        log(measured ? `calibrated: hop ceiling h${hopCeiling(c.cantorMsByHeight)}, ${Math.round(c.sha256PerSec / 1000)}k SHA-256/s${c.residue ? `, hop residues ${c.residue.primeUs.toFixed(1)} us per prime and ${c.residue.attemptUs.toFixed(1)} us per re-roll attempt` : ''}` : 'calibration loaded from the state directory')
       }
       const agent = new Agent(config, dir, sk, held, calibration)
       if (agent.nonDefaultCanonical) {
@@ -475,6 +476,8 @@ export class Agent {
     const { sent, dropped, waiting } = await this.outbox.replay()
     if (sent.length || dropped.length || waiting.length) this.log(`outbox replay: ${sent.length} sent, ${dropped.length} dropped, ${waiting.length} waiting for the relays`)
     for (const d of dropped) this.log(`dropped ${d.event.id.slice(0, 8)}: ${d.dropped}`)
+    // The chain as kept, its hops checked at Level 1 in the background: a sanity check that is logged, never a stop (chain/hopProofs.ts).
+    void this.keeper.checkHopProofs().catch((err) => this.log(`hop proof check: ${err instanceof Error ? err.message : String(err)}`))
     this.settle()
     this.syncOperator()
     this.travel.start()
@@ -497,6 +500,7 @@ export class Agent {
   private async guardChainEvent(event: NostrEvent): Promise<GuardVerdict> {
     if (event.kind !== ACTION_KIND) return { verdict: 'clear' }
     if (!this.keeper.events.some((e) => e.id === event.id)) return { verdict: 'fork', reason: 'this event is no longer on the chain this server keeps' }
+    if (tagValue(event, 'A') === 'hop' && isVersion1Hop(event)) return this.dropVersion1Hop(event)
     let answers
     try {
       answers = await askChainEvents(this.relays, this.holders, this.pubkey, this.keeper.genesisId(), this.keeper.events)
@@ -533,6 +537,22 @@ export class Agent {
     }
     this.keeper.adopt(relayEvents)
     return { verdict: 'clear' }
+  }
+
+  /**
+   * A version 1 hop (no mn, no mp) that no relay has taken, left in the
+   * outbox by a server that was stopped before this one: never sent. Under
+   * the chain rules this server implements it would be a version 1 hop off
+   * the exemption list, which ends the chain from it (spec 5.13, 8.7.3). It
+   * and every unpublished event after it on the chain are dropped, so the
+   * agent stands where the relays last saw it and its next hop is version 2.
+   */
+  private dropVersion1Hop(event: NostrEvent): GuardVerdict {
+    const chain = this.keeper.chain()
+    const at = chain.findIndex((a) => a.id === event.id)
+    const after = at >= 0 ? chain.slice(at).map((a) => a.id) : [event.id]
+    this.keeper.dropLocal(new Set(after.filter((id) => this.keeper.published[id] !== 'ok')))
+    return { verdict: 'fork', reason: 'a version 1 hop (no mn and no mp) that no relay has taken: every hop this server publishes is version 2 (spec 5.13), so it was dropped unsent with whatever came after it; hop again from where the relays last saw you' }
   }
 
   private sign(template: EventTemplate): NostrEvent {
@@ -972,6 +992,11 @@ export class Agent {
     const problem = chainTemplateProblem(template, this.pubkey)
     if (problem) throw new Error(`refusing to sign a malformed chain event: ${problem}`)
     const event = this.sign(template)
+    // Level 1 of the hop as signed, with its own id (spec 5.11): milliseconds, and a hop that fails it is never recorded or sent.
+    if (step.kind === 'hop') {
+      const failed = hopEventProblems(event)
+      if (failed.length) throw new Error(`refusing to publish a hop whose proof fails Level 1 (${failed.join(', ')}); it was signed and discarded, never sent`)
+    }
     this.keeper.record(event, 'queued')
     const entry = this.outbox.add(event)
     const result = await this.outbox.send(entry)
@@ -983,12 +1008,22 @@ export class Agent {
    * The proof of one step, as the template it goes out as: the hop proof or
    * the sidestep proof from cyberspace-core, bound to the head's id. The
    * caller confirms the head before and after, because this is the work.
+   *
+   * A hop is version 2 (spec 5.9, 5.10, 5.13): computeHopProofV2 builds the
+   * trees as version 1 did and seals the residues of hop_n without building
+   * hop_n, on Node's BigInt and the core's WASM word kernel (its default in
+   * Node, where a synchronous compile is allowed); GMP is not needed here.
+   * Only the three tags it returns go into the hop; no version 1 proof_hash
+   * is computed or signed.
    */
   private prove(step: PricedStep, head: ActionEvent, genesisId: string): EventTemplate {
     const to = step.to
     if (step.kind === 'hop') {
-      const proof = computeHopProof(head.position.x, head.position.y, head.position.z, to.position.x, to.position.y, to.position.z, to.plane, head.id, this.ceilings().hop)
-      return hopTemplate({ createdAt: nowSeconds(), genesisId, previousId: head.id, prevCoordHex: head.coordHex, to: to.position, plane: to.plane, proofHash: proof.proofHash })
+      const proof = computeHopProofV2(head.position.x, head.position.y, head.position.z, to.position.x, to.position.y, to.position.z, to.plane, head.id, { maxComputeHeight: this.ceilings().hop })
+      return hopTemplate({
+        createdAt: nowSeconds(), genesisId, previousId: head.id, prevCoordHex: head.coordHex, to: to.position, plane: to.plane,
+        seal: proof.tags.proof, mnHex: proof.tags.mn, mpHex: proof.tags.mp,
+      })
     }
     const proof = computeSidestepProof(head.position.x, head.position.y, head.position.z, to.position.x, to.position.y, to.position.z, to.plane, head.id)
     return sidestepTemplate({

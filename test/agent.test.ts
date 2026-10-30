@@ -22,6 +22,7 @@ import { placeFromHex, placeOf } from '../src/space/coords.js'
 import type { EntrySummary, OpenedBag } from '../src/space/regionKeys.js'
 import { KEY_GENERATED_BY, LockHeldError, StateDir } from '../src/state/dir.js'
 import { FakeNetwork } from './fakeRelay.js'
+import { fakeHopProof } from './fakeHop.js'
 
 const CANONICAL = 'wss://canonical.example'
 const MINE = 'wss://mine.example'
@@ -107,7 +108,7 @@ describe('an agent on a fresh key', () => {
     expect(profile.refused?.['wss://canonical.example/']).toBe('blocked: not a member yet')
     expect(r.text).toContain('blocked: not a member yet')
     expect((r.data.chain as { status: string; rules: string }).status).toBe('none')
-    expect((r.data.chain as { rules: string }).rules).toBe('2026-09-28-virtual-brackets')
+    expect((r.data.chain as { rules: string }).rules).toBe('2026-10-08-residue-openings')
     expect(r.data.nonDefaultCanonical).toBe(true)
     expect(r.text).toContain('WARNING')
     const kind0 = mine.published.find((e) => e.kind === 0)!
@@ -167,7 +168,7 @@ describe('an agent on a fresh key', () => {
     const head = a.keeper.head()!
     const spawn = a.keeper.chain()[0]
     const to = { x: head.position.x + 1n, y: head.position.y, z: head.position.z }
-    const other = signEvent(hopTemplate({ createdAt: head.createdAt + 1, genesisId: spawn.id, previousId: head.id, prevCoordHex: head.coordHex, to, plane: head.plane, proofHash: 'cd'.repeat(32) }), skA)
+    const other = signEvent(hopTemplate({ createdAt: head.createdAt + 1, genesisId: spawn.id, previousId: head.id, prevCoordHex: head.coordHex, to, plane: head.plane, ...fakeHopProof('cd') }), skA)
     canonical.inject(other)
     const r = await a.whereami()
     expect((r.data.chain as { headId: string }).headId).toBe(other.id)
@@ -183,7 +184,7 @@ describe('an agent on a fresh key', () => {
       // Another device signs in as this identity and publishes from the confirmed head while the proof is being computed.
       const head = a.keeper.head()!
       const spawn = a.keeper.chain()[0]
-      other = signEvent(hopTemplate({ createdAt: head.createdAt + 1, genesisId: spawn.id, previousId: head.id, prevCoordHex: head.coordHex, to: { x: head.position.x + 7n, y: head.position.y, z: head.position.z }, plane: head.plane, proofHash: 'ef'.repeat(32) }), skA)
+      other = signEvent(hopTemplate({ createdAt: head.createdAt + 1, genesisId: spawn.id, previousId: head.id, prevCoordHex: head.coordHex, to: { x: head.position.x + 7n, y: head.position.y, z: head.position.z }, plane: head.plane, ...fakeHopProof('ef') }), skA)
       canonical.inject(other)
       return original(...args)
     })
@@ -308,7 +309,7 @@ describe('an agent on a fresh key', () => {
     // crossed into the next cube whenever A's random x ended an h5 cube, one
     // run in 32.
     const beside = { x: here.position.x ^ 1n, y: here.position.y, z: here.position.z }
-    const hopB = signEvent(hopTemplate({ createdAt: Math.floor(Date.now() / 1000), genesisId: spawnB.id, previousId: spawnB.id, prevCoordHex: pubB, to: beside, plane: here.plane, proofHash: 'ef'.repeat(32) }), skB)
+    const hopB = signEvent(hopTemplate({ createdAt: Math.floor(Date.now() / 1000), genesisId: spawnB.id, previousId: spawnB.id, prevCoordHex: pubB, to: beside, plane: here.plane, ...fakeHopProof('ef') }), skB)
     canonical.seed(spawnB)
     canonical.inject(hopB)
     b = await startAgent(dirWithKey(skB), { name: 'echo' })

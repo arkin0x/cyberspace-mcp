@@ -17,6 +17,7 @@ import { placeFromHex, spawnPlace, type Place } from '../space/coords.js'
 import type { StateDir } from '../state/dir.js'
 import { buildChain, chainStatus, firstBreak, newestSpawn, type ActionEvent, type ChainStatus } from './events.js'
 import type { Holders } from './holders.js'
+import { HopProofCheck, hopReportWords, type HopProofReport } from './hopProofs.js'
 import { askChainEvents, confirmChainEvents, mergeEvents } from './resolve.js'
 import { decideSelfCheck, type CheckVerdict } from './selfCheck.js'
 
@@ -38,6 +39,9 @@ export class ChainKeeper {
   events: NostrEvent[] = []
   published: Record<string, PublishStatus> = {}
   private movingSince: number | null = null
+  private readonly hopProofs: HopProofCheck
+  /** What the last Level 1 pass over this chain's hops found (hopProofs.ts), or null before the first. */
+  lastHopReport: HopProofReport | null = null
 
   constructor(
     private readonly dir: StateDir,
@@ -47,6 +51,7 @@ export class ChainKeeper {
     private readonly log: (line: string) => void = () => {},
   ) {
     if (!HEX_64.test(pubkey)) throw new Error('the keeper needs the identity\'s hex pubkey')
+    this.hopProofs = new HopProofCheck(pubkey)
     const saved = dir.readJson<ChainFile | null>(FILE, null)
     if (saved?.version === 1 && Array.isArray(saved.events)) {
       // Only authentic events of this identity take part (spec 8.7.3); anything else in the file is gone.
@@ -175,6 +180,18 @@ export class ChainKeeper {
     return HEAD_UNCONFIRMED_MESSAGE
   }
 
+  /**
+   * Level 1 over the hops of the chain as kept (spec 5.11), as a sanity
+   * check: logged, never a stop. Each hop is checked once per process.
+   */
+  async checkHopProofs(): Promise<HopProofReport> {
+    const report = await this.hopProofs.check(this.events)
+    this.lastHopReport = report
+    const words = hopReportWords(report)
+    if (words) this.log(words)
+    return report
+  }
+
   /** Whether this identity already has a chain on the relays: found (adopted), none, or unknown with a cause. */
   async selfCheck(): Promise<CheckVerdict> {
     const fallbacks = selfCheckFallbacks(this.relays.canonical).map((u) => normalizeURL(u)).filter((u) => !this.relays.urls.includes(u))
@@ -184,6 +201,8 @@ export class ChainKeeper {
       this.adopt(verdict.events)
       const configured = answers.some((a) => this.relays.urls.includes(normalizeURL(a.url)) && a.events.length > 0)
       if (!configured) this.log(`this identity's chain was found only on ${fallbacks.join(', ')}, the former default relay, and adopted. Add it as a second --relay so the server keeps reading it; its earlier events are not on ${this.relays.canonical}.`)
+      // The adopted chain's hops, checked in the background: a report, never a reason to refuse.
+      void this.checkHopProofs().catch((err) => this.log(`hop proof check: ${err instanceof Error ? err.message : String(err)}`))
     }
     return verdict
   }

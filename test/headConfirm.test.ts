@@ -17,6 +17,7 @@ import { Relays } from '../src/nostr/relays.js'
 import { placeFromHex } from '../src/space/coords.js'
 import { StateDir } from '../src/state/dir.js'
 import { FakeNetwork } from './fakeRelay.js'
+import { fakeHopProof } from './fakeHop.js'
 
 const CANONICAL = 'wss://canonical.example'
 const MINE = 'wss://mine.example'
@@ -29,7 +30,7 @@ function identity() {
   const hop = (previous: NostrEvent, dx: bigint, createdAt: number): NostrEvent => {
     const prevCoord = previous.tags.find((t) => t[0] === 'C')![1]
     const to = { x: home.position.x + dx, y: home.position.y, z: home.position.z }
-    return signEvent(hopTemplate({ createdAt, genesisId: spawn.id, previousId: previous.id, prevCoordHex: prevCoord, to, plane: home.plane, proofHash: 'ab'.repeat(32) }), sk)
+    return signEvent(hopTemplate({ createdAt, genesisId: spawn.id, previousId: previous.id, prevCoordHex: prevCoord, to, plane: home.plane, ...fakeHopProof('ab') }), sk)
   }
   return { sk, pubkey, spawn, hop }
 }

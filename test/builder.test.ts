@@ -18,10 +18,13 @@
 
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { computeHopProof, computeMovementProof, deriveRegionKeys, AXIS_CENTER } from 'cyberspace-core'
+import { createHash } from 'node:crypto'
+import { computeHopProof, computeHopProofV2, computeMovementProof, deriveRegionKeys, hexToCoord, coordToXyz, verifyHopLevel1, AXIS_CENTER } from 'cyberspace-core'
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { ACTION_KIND, chainTemplateProblem, enterHyperspaceTemplate, hopTemplate, hyperjumpTemplate, sidestepTemplate, spawnTemplate, type HyperjumpInput } from '../src/chain/builder.js'
-import { buildChain, chainStatus, firstBreak, parseAction } from '../src/chain/events.js'
+import { CHAIN_RULES_REVISION, buildChain, chainStatus, firstBreak, parseAction } from '../src/chain/events.js'
+import { hopEventProblems, isVersion1Hop } from '../src/chain/hopProofs.js'
+import { fakeHopProof } from './fakeHop.js'
 import { isAuthentic, signEvent, tagValue, type EventTemplate, type NostrEvent } from '../src/nostr/event.js'
 import { placeFromHex, positionHex, sectorTags } from '../src/space/coords.js'
 
@@ -34,6 +37,42 @@ describe('the spec worked example (section 5.7)', () => {
     expect(proof.proofHash).toBe('ed9d09ca697b2da29c9d042207ac8ef7aab40f6dde550e6467452aa0e2e8cac6')
     const region = computeMovementProof(0n, 0n, 0n, 4104n, 0n, 0n)
     expect(deriveRegionKeys(region.combined).lookupIdHex).toBe('8d2463eb22301d97a1f7e33b90e473ba2eec69079f418a72609c3e4d2981669b')
+  })
+})
+
+describe('version 2 of the hop proof, against the spec\'s golden vectors (5.10; arkin0x/cyberspace 8b45430, hop-residue-vectors.json as cyberspace-core 0692a12 carries it)', () => {
+  // The prover cases, as computeHopProofV2 must reproduce them through hopTemplate: the 5.7 movement and a three-axis hop.
+  const vectors = [
+    {
+      name: 'golden-5.7', prev: ZERO_ID,
+      c: '0'.repeat(64), C: '0000000000000000000000000000000000000000000000000000008000001000',
+      seal: 'c5524980e1b021dc49fb64d14a521456a48693d0711a886516c1f4ab733db5cb', mn: '0000000000000057',
+      mpSha256: '3d5d88eba8a384d134bba7ba00ea48b7188802c482f011fbef3b8100ccbc4e93', mpLength: 11264,
+    },
+    {
+      name: 'multi-axis-earth', prev: '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',
+      c: 'e000000000000000000000000000000000000000000000000000000049349b8e', C: 'e000000000000000000000000000000000000000000000000000000202800080',
+      seal: 'bc6d570133a294ba315e9b383c4cc8f8369325d72c1d132d9a90d89c66efcbe8', mn: '0000000000000058',
+      mpSha256: '115f290d04b21c7bbca6c58f4f280a8c34cc2dbf538d0ec75faa2f64aa546ab4', mpLength: 9216,
+    },
+  ]
+  for (const v of vectors) {
+    it(`${v.name}: the hop this server builds carries the vector's proof, mn and mp, and verifies at Level 1`, () => {
+      const from = coordToXyz(hexToCoord(v.c))
+      const to = coordToXyz(hexToCoord(v.C))
+      const proof = computeHopProofV2(from.x, from.y, from.z, to.x, to.y, to.z, to.plane, v.prev)
+      const t = hopTemplate({ createdAt: 1, genesisId: 'a'.repeat(64), previousId: v.prev, prevCoordHex: v.c, to, plane: to.plane, seal: proof.tags.proof, mnHex: proof.tags.mn, mpHex: proof.tags.mp })
+      expect(tagValue(t, 'C')).toBe(v.C)
+      expect(tagValue(t, 'proof')).toBe(v.seal)
+      expect(tagValue(t, 'mn')).toBe(v.mn)
+      expect(tagValue(t, 'mp')).toHaveLength(v.mpLength)
+      expect(createHash('sha256').update(tagValue(t, 'mp')!).digest('hex')).toBe(v.mpSha256)
+      expect(verifyHopLevel1({ from, to, previousEventIdHex: v.prev, proof: v.seal, nonce: v.mn, openings: tagValue(t, 'mp'), eventId: 'f'.repeat(64) })).toEqual([])
+    })
+  }
+
+  it('the chain rules are the residue openings revision (spec 8.12)', () => {
+    expect(CHAIN_RULES_REVISION).toBe('2026-10-08-residue-openings')
   })
 })
 
@@ -51,13 +90,20 @@ describe('the chain event builder', () => {
     expect(parseAction(ev)?.type).toBe('spawn')
   })
 
-  it('builds a hop with every read tag exactly once and the sector tags of its C', () => {
+  it('builds a version 2 hop: proof (the seal), mn and mp after C, in spec 8.4\'s order, every read tag exactly once, and it verifies with core', () => {
     const spawn = signEvent(spawnTemplate(pubkey, 1_700_000_000), sk)
     const to = { x: home.position.x + 3n, y: home.position.y, z: home.position.z }
-    const proof = computeHopProof(home.position.x, home.position.y, home.position.z, to.x, to.y, to.z, home.plane, spawn.id)
-    const t = hopTemplate({ createdAt: 1_700_000_001, genesisId: spawn.id, previousId: spawn.id, prevCoordHex: pubkey, to, plane: home.plane, proofHash: proof.proofHash })
+    const proof = computeHopProofV2(home.position.x, home.position.y, home.position.z, to.x, to.y, to.z, home.plane, spawn.id)
+    const t = hopTemplate({ createdAt: 1_700_000_001, genesisId: spawn.id, previousId: spawn.id, prevCoordHex: pubkey, to, plane: home.plane, seal: proof.tags.proof, mnHex: proof.tags.mn, mpHex: proof.tags.mp })
     expect(chainTemplateProblem(t, pubkey)).toBeNull()
-    for (const name of ['A', 'c', 'C', 'proof', 'X', 'Y', 'Z', 'S']) expect(t.tags.filter((x) => x[0] === name)).toHaveLength(1)
+    // Tag for tag, in order: what ONOSENDAI's hopTemplate writes (spec 8.4 at 8b45430).
+    expect(t.tags.map((x) => x[0])).toEqual(['A', 'e', 'e', 'c', 'C', 'proof', 'mn', 'mp', 'X', 'Y', 'Z', 'S'])
+    expect(t.tags.slice(0, 8)).toEqual([
+      ['A', 'hop'], ['e', spawn.id, '', 'genesis'], ['e', spawn.id, '', 'previous'], ['c', pubkey], ['C', positionHex(to, home.plane)],
+      ['proof', proof.tags.proof], ['mn', proof.tags.mn], ['mp', proof.tags.mp],
+    ])
+    expect(t.tags.slice(8)).toEqual(sectorTags(to))
+    for (const name of ['A', 'c', 'C', 'proof', 'mn', 'mp', 'X', 'Y', 'Z', 'S']) expect(t.tags.filter((x) => x[0] === name)).toHaveLength(1)
     expect(t.tags.filter((x) => x[0] === 'e' && x[3] === 'genesis')).toHaveLength(1)
     expect(t.tags.filter((x) => x[0] === 'e' && x[3] === 'previous')).toHaveLength(1)
     const hop = signEvent(t, sk)
@@ -65,16 +111,53 @@ describe('the chain event builder', () => {
     expect(chain).toHaveLength(2)
     expect(chainStatus(chain)).toBe('valid')
     expect(chain[1].position).toEqual(to)
-    // The proof tag is the proof of this very event: recomputed from its own c, C and e previous, nothing the builder was handed.
-    const c = placeFromHex(hop.tags.find((x) => x[0] === 'c')![1])
-    const C = placeFromHex(hop.tags.find((x) => x[0] === 'C')![1])
-    const previous = hop.tags.find((x) => x[0] === 'e' && x[3] === 'previous')![1]
-    const recomputed = computeHopProof(c.position.x, c.position.y, c.position.z, C.position.x, C.position.y, C.position.z, C.plane, previous)
-    expect(hop.tags.find((x) => x[0] === 'proof')![1]).toBe(recomputed.proofHash)
-    // And buildChain does not check it: a wrong proof tag still resolves, which is why the line above exists.
-    const forged = signEvent(hopTemplate({ createdAt: 1_700_000_001, genesisId: spawn.id, previousId: spawn.id, prevCoordHex: pubkey, to, plane: home.plane, proofHash: 'ab'.repeat(32) }), sk)
+    expect(chain[1].mn).toBe(proof.tags.mn)
+    expect(chain[1].mp).toBe(proof.tags.mp)
+    // The proof is the proof of this very event: Level 1 from its own c, C, e previous, proof, mn, mp and id, nothing the builder was handed.
+    expect(hopEventProblems(hop)).toEqual([])
+    expect(isVersion1Hop(hop)).toBe(false)
+    // And buildChain does not check it: a wrong proof still resolves, which is why the agent checks every hop it signs at Level 1.
+    const forged = signEvent(hopTemplate({ createdAt: 1_700_000_001, genesisId: spawn.id, previousId: spawn.id, prevCoordHex: pubkey, to, plane: home.plane, ...fakeHopProof('ab') }), sk)
     expect(chainStatus(buildChain([spawn, forged], pubkey))).toBe('valid')
-    expect(forged.tags.find((x) => x[0] === 'proof')![1]).not.toBe(recomputed.proofHash)
+    expect(hopEventProblems(forged).length).toBeGreaterThan(0)
+  })
+
+  it('never builds a version 1 hop: a missing or malformed seal, mn or mp is refused before anything is built', () => {
+    const base = { createdAt: 2, genesisId: 'a'.repeat(64), previousId: 'b'.repeat(64), prevCoordHex: pubkey, to: home.position, plane: home.plane }
+    const good = fakeHopProof()
+    expect(() => hopTemplate({ ...base, ...good })).not.toThrow()
+    expect(() => hopTemplate({ ...base, ...good, seal: 'ab' })).toThrow(/seal/)
+    expect(() => hopTemplate({ ...base, ...good, mnHex: '' })).toThrow(/re-roll nonce/)
+    expect(() => hopTemplate({ ...base, ...good, mnHex: '0123456789ABCDEF' })).toThrow(/re-roll nonce/)
+    expect(() => hopTemplate({ ...base, ...good, mpHex: '' })).toThrow(/residue openings/)
+    expect(() => hopTemplate({ ...base, ...good, mpHex: good.mpHex.slice(1) })).toThrow(/residue openings/)
+    expect(() => hopTemplate({ ...base, ...good, mpHex: good.mpHex.replace(/^0/, 'g') })).toThrow(/residue openings/)
+    // Built by hand around the template, a hop without mn and mp (version 1's shape) is named before it is signed.
+    const t = hopTemplate({ ...base, ...good })
+    const v1 = { ...t, tags: t.tags.filter((x) => x[0] !== 'mn' && x[0] !== 'mp') }
+    expect(chainTemplateProblem(v1, pubkey)).toMatch(/mn appears 0 times/)
+    expect(chainTemplateProblem({ ...t, tags: [...t.tags, ['mp', good.mpHex]] }, pubkey)).toMatch(/mp appears 2 times/)
+    expect(chainTemplateProblem({ ...t, tags: t.tags.map((x) => (x[0] === 'mn' ? ['mn', 'zz'] : x)) }, pubkey)).toMatch(/mn is not a re-roll nonce/)
+    expect(chainTemplateProblem({ ...t, tags: t.tags.map((x) => (x[0] === 'mp' ? ['mp', 'abc'] : x)) }, pubkey)).toMatch(/mp is not 16 residue openings/)
+  })
+
+  it('the reader keeps a hop\'s mn and mp, still reads a version 1 hop (the exemption list decides it, not the parser), and breaks on a doubled mn', () => {
+    const spawn = signEvent(spawnTemplate(pubkey, 1_700_000_000), sk)
+    const to = { x: home.position.x + 1n, y: home.position.y, z: home.position.z }
+    const t = hopTemplate({ createdAt: 1_700_000_001, genesisId: spawn.id, previousId: spawn.id, prevCoordHex: pubkey, to, plane: home.plane, ...fakeHopProof() })
+    const v1 = signEvent({ ...t, tags: t.tags.filter((x) => x[0] !== 'mn' && x[0] !== 'mp') }, sk)
+    expect(isVersion1Hop(v1)).toBe(true)
+    const read = parseAction(v1)!
+    expect(read.type).toBe('hop')
+    expect(read.mn).toBeUndefined()
+    expect(read.mp).toBeUndefined()
+    expect(chainStatus(buildChain([spawn, v1], pubkey))).toBe('valid')
+    // Not on the (empty, before the census) list, so Level 1 names the missing tags.
+    expect(hopEventProblems(v1)).toEqual(['form:mn', 'form:mp'])
+    const doubled = signEvent({ ...t, tags: [...t.tags, ['mn', '0'.repeat(16)]] }, sk)
+    const chain = buildChain([spawn, doubled], pubkey)
+    expect(chainStatus(chain)).toBe('frozen')
+    expect(chain[1].breaks).toMatch(/two mn tags/)
   })
 
   it('refuses a template with a doubled read tag or a wrong sector tag before it is signed', () => {
@@ -94,6 +177,9 @@ describe('the chain event builder', () => {
     expect(chainTemplateProblem(t, pubkey)).toBeNull()
     expect(t.tags.find((x) => x[0] === 'mr')?.[1]).toBe(['d'.repeat(64), 'e'.repeat(64), 'f'.repeat(64)].join(':'))
     expect(t.tags.find((x) => x[0] === 'hx')?.[1]).toBe('21')
+    // Its own tags in ONOSENDAI's order (8e4d0e3), unchanged by the version 2 hop: one mp and one mn, its own, never a hop's.
+    expect(t.tags.map((x) => x[0])).toEqual(['A', 'e', 'e', 'c', 'C', 'proof', 'mr', 'mp', 'mn', 'hx', 'hy', 'hz', 'X', 'Y', 'Z', 'S'])
+    expect(t.tags.find((x) => x[0] === 'proof')?.[1]).toBe('c'.repeat(64))
   })
 })
 
@@ -104,7 +190,7 @@ describe('the resolver (spec 8.7.3)', () => {
   const spawn = signEvent(spawnTemplate(pubkey, 1_700_000_000), sk)
   const step = (previousId: string, prevCoordHex: string, dx: bigint, createdAt: number) => {
     const to = { x: home.position.x + dx, y: home.position.y, z: home.position.z }
-    return signEvent(hopTemplate({ createdAt, genesisId: spawn.id, previousId, prevCoordHex, to, plane: home.plane, proofHash: 'ab'.repeat(32) }), sk)
+    return signEvent(hopTemplate({ createdAt, genesisId: spawn.id, previousId, prevCoordHex, to, plane: home.plane, ...fakeHopProof() }), sk)
   }
 
   it('a fork kills the chain: the identity stands at its spawn coordinate', () => {

@@ -16,7 +16,10 @@
 // per-pubkey linear chain of signed kind 3333 events (spec 8): one spawn,
 // then hops and sidesteps, each naming the one before it. The chain rules
 // this file implements are CHAIN_RULES_REVISION, as the spec states them at
-// origin/master 5bc9a4d.
+// origin/master 8b45430 (the hop's mn and mp, spec 8.4 and 8.8, are new
+// there; the rest is as at 5bc9a4d). Proofs are not checked by this file:
+// a hop's proof, mn and mp are read and kept, and chain/hopProofs.ts checks
+// them at Level 1 (spec 5.11) where the server wants to know.
 //
 // A candidate to move into cyberspace-core, so that ONOSENDAI and this server
 // resolve every chain with one implementation.
@@ -26,8 +29,8 @@ import { HEX_64, type NostrEvent } from '../nostr/event.js'
 import { sectorTags, type Position } from '../space/coords.js'
 import { ACTION_KIND } from './builder.js'
 
-/** The chain rules this server implements (spec 8.12). */
-export const CHAIN_RULES_REVISION = '2026-09-28-virtual-brackets'
+/** The chain rules this server implements (spec 8.12): version 2 hops, residue openings (spec 5.13). */
+export const CHAIN_RULES_REVISION = '2026-10-08-residue-openings'
 
 /**
  * The actions this server recognizes (spec 8.8, 8.9): the base protocol's
@@ -172,7 +175,7 @@ const LINK_TAGS = ['e:genesis', 'e:previous'] as const
 const READ_TAGS: Record<RecognizedAction | 'links', readonly string[]> = {
   links: LINK_TAGS,
   spawn: ['C'],
-  hop: [...LINK_TAGS, 'c', 'C', 'proof'],
+  hop: [...LINK_TAGS, 'c', 'C', 'proof', 'mn', 'mp'],
   sidestep: [...LINK_TAGS, 'c', 'C', 'proof', 'mr', 'mp', 'mn', 'hx', 'hy', 'hz'],
   'enter-hyperspace': [...LINK_TAGS, 'c', 'C', 'proof'],
   hyperjump: [...LINK_TAGS, 'c', 'C', 'from_height', 'B', 'proof', 'mp', 'mn'],
@@ -301,6 +304,11 @@ export function parseAction(ev: NostrEvent): ActionEvent | null {
     }
   }
   if (type === 'sidestep' && mn !== undefined) return { ...base, type, ...links, proofHash, mn }
+  if (type === 'hop') {
+    // A version 2 hop's mn and mp (spec 8.4), kept as written; a hop with neither is a version 1 hop, whose standing is the exemption list's to decide (spec 5.13), not the parser's.
+    const mp = tag(ev, 'mp')
+    return { ...base, type, ...links, proofHash, ...(mn !== undefined ? { mn } : {}), ...(mp !== undefined ? { mp } : {}) }
+  }
   return { ...base, type, ...links, proofHash }
 }
 

@@ -19,6 +19,7 @@ import type { Calibration } from '../src/space/calibration.js'
 import { placeFromHex } from '../src/space/coords.js'
 import { KEY_GENERATED_BY, StateDir } from '../src/state/dir.js'
 import { FakeNetwork } from './fakeRelay.js'
+import { fakeHopProof } from './fakeHop.js'
 
 const CANONICAL = 'wss://canonical.example'
 const cal: Calibration = { version: 1, at: Date.now(), fingerprint: 'test', cantorMsByHeight: { 12: 10, 14: 60, 16: 400 }, sha256PerSec: 2_000_000 }
@@ -48,7 +49,7 @@ describe('spawning again', () => {
     const home = placeFromHex(pubkey)
     // A fork on the relays: two hops from the spawn, so the chain is dead and the identity stands at its spawn.
     const spawn = signEvent(spawnTemplate(pubkey, 1_700_000_000), sk)
-    const branch = (dx: bigint, createdAt: number) => signEvent(hopTemplate({ createdAt, genesisId: spawn.id, previousId: spawn.id, prevCoordHex: pubkey, to: { x: home.position.x + dx, y: home.position.y, z: home.position.z }, plane: home.plane, proofHash: 'ab'.repeat(32) }), sk)
+    const branch = (dx: bigint, createdAt: number) => signEvent(hopTemplate({ createdAt, genesisId: spawn.id, previousId: spawn.id, prevCoordHex: pubkey, to: { x: home.position.x + dx, y: home.position.y, z: home.position.z }, plane: home.plane, ...fakeHopProof('ab') }), sk)
     canonical.seed(spawn, branch(1n, 1_700_000_001), branch(2n, 1_700_000_002))
     const dir = dirWithKey(sk)
 
@@ -90,7 +91,7 @@ describe('spawning again', () => {
     const home = placeFromHex(pubkey)
     // A valid chain (a spawn and one hop) on the former default only; the state directory has no chain.json.
     const spawn = signEvent(spawnTemplate(pubkey, 1_700_000_000), sk)
-    const hop = signEvent(hopTemplate({ createdAt: 1_700_000_001, genesisId: spawn.id, previousId: spawn.id, prevCoordHex: pubkey, to: { x: home.position.x + 1n, y: home.position.y, z: home.position.z }, plane: home.plane, proofHash: 'ab'.repeat(32) }), sk)
+    const hop = signEvent(hopTemplate({ createdAt: 1_700_000_001, genesisId: spawn.id, previousId: spawn.id, prevCoordHex: pubkey, to: { x: home.position.x + 1n, y: home.position.y, z: home.position.z }, plane: home.plane, ...fakeHopProof('ab') }), sk)
     feeds.seed(spawn, hop)
     const a = await start(network, dirWithKey(sk), false, [DEFAULT_RELAY])
     const r = await a.hop({ target: { dx: 1 } })

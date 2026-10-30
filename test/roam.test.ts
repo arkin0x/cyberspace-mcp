@@ -26,13 +26,13 @@ import { placeFromHex, placeOf, spawnPlace, type Place } from '../src/space/coor
 import type { PricedStep } from '../src/space/plan.js'
 import { KEY_GENERATED_BY, StateDir } from '../src/state/dir.js'
 import { FakeNetwork, type FakeRelay } from './fakeRelay.js'
+import { fakeHopProof } from './fakeHop.js'
 
 const CANONICAL = 'wss://canonical.example'
 const MINE = 'wss://mine.example'
 const GENERAL = 'wss://general.example'
 const INBOX = 'wss://inbox.example/'
 const cal: Calibration = { version: 1, at: Date.now(), fingerprint: 'test', cantorMsByHeight: { 12: 10, 14: 60, 16: 400 }, sha256PerSec: 2_000_000 }
-const PROOF = 'ab'.repeat(32)
 
 function dirWithKey(sk: Uint8Array): string {
   const dir = mkdtempSync(join(tmpdir(), 'cyberspace-mcp-roam-'))
@@ -85,7 +85,7 @@ function chainTo(sk: Uint8Array, to: Place): { spawn: NostrEvent; head: NostrEve
   const pubkey = getPublicKey(sk)
   const at = nowSeconds() - 600
   const spawn = signEvent(spawnTemplate(pubkey, at), sk)
-  const head = signEvent(hopTemplate({ createdAt: at + 1, genesisId: spawn.id, previousId: spawn.id, prevCoordHex: spawn.tags.find((t) => t[0] === 'C')![1], to: to.position, plane: to.plane, proofHash: PROOF }), sk)
+  const head = signEvent(hopTemplate({ createdAt: at + 1, genesisId: spawn.id, previousId: spawn.id, prevCoordHex: spawn.tags.find((t) => t[0] === 'C')![1], to: to.position, plane: to.plane, ...fakeHopProof() }), sk)
   return { spawn, head }
 }
 
