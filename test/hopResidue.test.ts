@@ -15,7 +15,7 @@
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { coordToXyz, hexToCoord, verifyHopLevel1, type HopCostEstimate } from 'cyberspace-core'
+import { GRANDFATHERED_V1_HOPS, coordToXyz, hexToCoord, isGrandfatheredV1Hop, verifyHopLevel1, type HopCostEstimate } from 'cyberspace-core'
 import { afterAll, describe, expect, it } from 'vitest'
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { Agent } from '../src/agent.js'
@@ -115,6 +115,13 @@ describe('every hop the agent publishes is version 2', () => {
 })
 
 describe('version 1 hops around the cutover', () => {
+  it('the embedded list is the census: a real old hop stands, and the two h24 hops that failed its audit do not', () => {
+    expect(GRANDFATHERED_V1_HOPS.size).toBeGreaterThanOrEqual(2658)
+    expect(isGrandfatheredV1Hop('a11938c376d8b53032d9a704a3db3fc1d82add779c164fe589f922889a88ab9f')).toBe(true)
+    expect(isGrandfatheredV1Hop('8a24c20a74102aa82f73a9c75cb55609ab8c8ea9050555e80a9f35b530cd3973')).toBe(false)
+    expect(isGrandfatheredV1Hop('97c4de2ffcda3e1ccfd433fc8862ba97c20572d9a8c40f34621c20aa9a5ed60a')).toBe(false)
+  })
+
   it('a chain adopted from the relays with an unlisted version 1 hop is reported, not a stop: the agent hops on, version 2', async () => {
     const network = new FakeNetwork()
     const canonical = network.add(CANONICAL)

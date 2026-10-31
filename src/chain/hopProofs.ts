@@ -12,10 +12,9 @@
 // A hop with neither mn nor mp is a version 1 hop. One on the exemption
 // list (grandfathered-v1-hops.txt, as cyberspace-core embeds it) stands. One
 // that is not listed is reported and never treated as this agent's fault:
-// until the census at the cutover fills the list, every version 1 hop this
-// server signed before it is unlisted, and the census lists every audited
-// one (spec 5.13). Anything else that fails Level 1 is reported by the step
-// that failed.
+// the censuses at the cutover list every audited version 1 hop (spec 5.13),
+// so an unlisted one is either newer than the embedded list or failed the
+// audit. Anything else that fails Level 1 is reported by the step that failed.
 
 import { hexToCoord, coordToXyz, isGrandfatheredV1Hop, verifyHopLevel1, type Xyz } from 'cyberspace-core'
 import type { NostrEvent } from '../nostr/event.js'
