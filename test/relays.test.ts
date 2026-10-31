@@ -3,10 +3,15 @@
 // any relay, refusals verbatim and never retried), and a live subscription
 // that hears what is published after it opened.
 
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { parseArgs, settingsFrom } from '../src/config.js'
-import { DEFAULT_RELAY, Relays, isDefaultRelay } from '../src/nostr/relays.js'
+import { DEFAULT_RELAY, RETIRED_RELAYS, Relays, isDefaultRelay, isRetiredRelay } from '../src/nostr/relays.js'
+import { Holders } from '../src/chain/holders.js'
+import { StateDir } from '../src/state/dir.js'
 import { signEvent } from '../src/nostr/event.js'
 import { FakeNetwork } from './fakeRelay.js'
 
@@ -20,6 +25,51 @@ function relaysOn(network: FakeNetwork, urls: string[], sk = generateSecretKey()
 }
 
 const note = (sk: Uint8Array, text: string, createdAt = 1_700_000_000) => signEvent({ kind: 1, created_at: createdAt, content: text, tags: [] }, sk)
+
+describe('a retired relay', () => {
+  const RETIRED = RETIRED_RELAYS[0]
+
+  it('is wss://onosendai.feeds.relay.tools (owner\'s ruling, 2026-10-31), however the URL is written', () => {
+    expect(RETIRED).toBe('wss://onosendai.feeds.relay.tools')
+    expect(isRetiredRelay('wss://onosendai.feeds.relay.tools/')).toBe(true)
+    expect(isRetiredRelay('WSS://Onosendai.Feeds.Relay.Tools')).toBe(true)
+    expect(isRetiredRelay(DEFAULT_RELAY)).toBe(false)
+    expect(isRetiredRelay('not a url at all')).toBe(false)
+  })
+
+  it('is dropped from config.json and from --relay, and an emptied list falls back to the default', () => {
+    const state = ['--state', '/x']
+    expect(settingsFrom(parseArgs(state), { relays: [DEFAULT_RELAY, `${RETIRED}/`] }).relays).toEqual([DEFAULT_RELAY])
+    expect(settingsFrom(parseArgs(state), { relays: [RETIRED] }).relays).toEqual([DEFAULT_RELAY])
+    expect(settingsFrom(parseArgs([...state, '--relay', DEFAULT_RELAY, '--relay', RETIRED]), {}).relays).toEqual([DEFAULT_RELAY])
+    expect(settingsFrom(parseArgs([...state, '--relay', RETIRED]), { relays: ['wss://mine.example'] }).relays).toEqual(['wss://mine.example'])
+  })
+
+  it('is never dialed, whichever list names it: a publish and a read cost it nothing and the others still count', async () => {
+    const network = new FakeNetwork()
+    const canonical = network.add(DEFAULT_RELAY)
+    const retired = network.add(RETIRED)
+    const sk = generateSecretKey()
+    const relays = relaysOn(network, [DEFAULT_RELAY, RETIRED], sk)
+    const event = note(sk, 'hello')
+    const published = await relays.publish(event)
+    expect(published.ok).toBe(true)
+    expect(canonical.published.map((e) => e.id)).toEqual([event.id])
+    const answers = await relays.queryEach({ kinds: [1], authors: [getPublicKey(sk)] })
+    expect(answers.find((a) => a.url === `${DEFAULT_RELAY}/`)?.outcome).toBe('answered')
+    expect(answers.find((a) => a.url === `${RETIRED}/`)?.outcome).toBe('unreachable')
+    expect(retired.received).toHaveLength(0)
+    relays.close()
+  })
+
+  it('is forgotten by a saved holders.json, on disk too, and the other holders stay', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cyberspace-mcp-holders-'))
+    writeFileSync(join(dir, 'holders.json'), JSON.stringify([`${RETIRED}/`, 'wss://mine.example/', `${DEFAULT_RELAY}/`]))
+    const holders = new Holders(StateDir.open(dir), `${DEFAULT_RELAY}/`).holders()
+    expect([...holders].sort()).toEqual([`${DEFAULT_RELAY}/`, 'wss://mine.example/'])
+    expect(JSON.parse(readFileSync(join(dir, 'holders.json'), 'utf8'))).toEqual(['wss://mine.example/', `${DEFAULT_RELAY}/`])
+  })
+})
 
 describe('the default canonical relay', () => {
   it('is ONOSENDAI\'s DEFAULT_RELAY, wss://cyberspace.nostr1.com (owner\'s ruling, 2026-10-22)', () => {

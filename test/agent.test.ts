@@ -78,16 +78,16 @@ describe('an agent on the default canonical relay', () => {
     expect(r.text).not.toContain('WARNING')
   })
 
-  it('warns at startup when the canonical relay is the old default, wss://onosendai.feeds.relay.tools', async () => {
-    const FEEDS = 'wss://onosendai.feeds.relay.tools'
-    network.add(FEEDS)
+  it('warns at startup when the canonical relay is not the default', async () => {
+    const OTHER = 'wss://other.example'
+    network.add(OTHER)
     const lines: string[] = []
-    const agent = await startAgent(dirWithKey(generateSecretKey()), { relays: [FEEDS, MINE], log: (l) => lines.push(l) })
+    const agent = await startAgent(dirWithKey(generateSecretKey()), { relays: [OTHER, MINE], log: (l) => lines.push(l) })
     expect(agent.nonDefaultCanonical).toBe(true)
-    expect(lines.find((l) => l.startsWith('WARNING'))).toContain(`the canonical relay is ${FEEDS}/, not the default ${DEFAULT_RELAY}`)
+    expect(lines.find((l) => l.startsWith('WARNING'))).toContain(`the canonical relay is ${OTHER}/, not the default ${DEFAULT_RELAY}`)
     const r = await agent.identity({})
     expect(r.data.nonDefaultCanonical).toBe(true)
-    expect(r.text).toContain(`WARNING: the chain's truth is being read from ${FEEDS}/, not the default canonical relay ${DEFAULT_RELAY}`)
+    expect(r.text).toContain(`WARNING: the chain's truth is being read from ${OTHER}/, not the default canonical relay ${DEFAULT_RELAY}`)
   })
 })
 

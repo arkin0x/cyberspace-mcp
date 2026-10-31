@@ -8,11 +8,13 @@
 // HEAD_CONFIRM_MS), and for no other. A relay holds the chain once it has
 // taken one of this identity's chain events (OK true on a publish) or sent
 // one back in a fetch, in this session or an earlier one. The canonical
-// relay always does. A relay is never dropped from the set.
+// relay always does. A relay is never dropped from the set, unless it is
+// retired (relays.ts): loading the file then rewrites it without that relay.
 
 import { normalizeURL } from 'nostr-tools/utils'
 import type { NostrEvent } from '../nostr/event.js'
 import type { RelayAnswer } from '../nostr/relayOutcome.js'
+import { isRetiredRelay } from '../nostr/relays.js'
 import type { StateDir } from '../state/dir.js'
 
 const FILE = 'holders.json'
@@ -22,7 +24,9 @@ export class Holders {
 
   constructor(private readonly dir: StateDir, private readonly canonical: string) {
     const saved = dir.readJson<unknown>(FILE, [])
-    this.set = new Set(Array.isArray(saved) ? saved.filter((u): u is string => typeof u === 'string').map((u) => normalizeURL(u)) : [])
+    const urls = Array.isArray(saved) ? saved.filter((u): u is string => typeof u === 'string').map((u) => normalizeURL(u)) : []
+    this.set = new Set(urls.filter((u) => !isRetiredRelay(u)))
+    if (urls.some(isRetiredRelay)) dir.writeJson(FILE, [...this.set])
   }
 
   /** The relays that hold the chain (normalized URLs), the canonical relay always among them. */

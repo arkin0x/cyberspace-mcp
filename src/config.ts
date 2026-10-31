@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { HOSAKA_DEFAULT_URL } from './hosaka.js'
 import { DEFAULT_CHAT_WAKE_MINUTES } from './chat.js'
-import { DEFAULT_RELAY } from './nostr/relays.js'
+import { DEFAULT_RELAY, isRetiredRelay } from './nostr/relays.js'
 import { parseNwc, Secret } from './nwc.js'
 import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS } from './wallet.js'
 import { DEFAULT_TRAVEL_PER_DAY, type TravelLogSettings } from './travel.js'
@@ -248,12 +248,14 @@ export function readWalletFile(stateDir: string): WalletFile {
 /** The settings: defaults, then the file, then the arguments. The wallet string: --nwc, then wallet.json, then config.json. */
 export function settingsFrom(args: ParsedArgs, file: FileConfig, walletFile: WalletFile = {}): Settings {
   if (!args.state) throw new Error('--state <dir> is required')
-  const fileRelays = Array.isArray(file.relays) ? file.relays.filter((r): r is string => typeof r === 'string') : []
+  // A retired relay in either list is dropped here, so a saved config stops dialing it with no edit.
+  const fileRelays = Array.isArray(file.relays) ? file.relays.filter((r): r is string => typeof r === 'string' && !isRetiredRelay(r)) : []
+  const argRelays = args.relays.filter((r) => !isRetiredRelay(r))
   const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v : undefined)
   const posNum = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined)
   return {
     stateDir: args.state,
-    relays: args.relays.length ? args.relays : fileRelays.length ? fileRelays : [...DEFAULTS.relays],
+    relays: argRelays.length ? argRelays : fileRelays.length ? fileRelays : [...DEFAULTS.relays],
     operator: args.operator ?? str(file.operator),
     name: args.name ?? str(file.name),
     about: args.about ?? str(file.about),

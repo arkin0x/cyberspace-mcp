@@ -15,6 +15,7 @@ import { nip19 } from 'nostr-tools'
 import { runDoctor, type Check } from '../src/doctor.js'
 import { runInit } from '../src/init.js'
 import { nowSeconds, type NostrEvent } from '../src/nostr/event.js'
+import { RETIRED_RELAYS } from '../src/nostr/relays.js'
 import { commandArgv } from '../src/serveConfig.js'
 import type { Calibration } from '../src/space/calibration.js'
 import { FakeNetwork, type FakeRelay } from './fakeRelay.js'
@@ -178,6 +179,24 @@ describe('doctor', () => {
     expect(check(r.checks, 'serve')?.verdict).toBe('warn')
     expect(r.code).toBe(0)
     expect(r.out).not.toContain(key.secret)
+  })
+
+  it('warns, and does not fail or dial, when config.json still lists a retired relay; init never writes one', async () => {
+    const w = world()
+    const retired = w.network.add(RETIRED_RELAYS[0])
+    const state = tmp()
+    const made = await init(w, ['--state', state, '--operator', nip19.npubEncode(getPublicKey(generateSecretKey())), '--name', 'courier', '--relay', CANONICAL, '--relay', RETIRED_RELAYS[0]])
+    expect(made.code).toBe(0)
+    const path = join(state, 'config.json')
+    const config = JSON.parse(readFileSync(path, 'utf8')) as { relays: string[] }
+    expect(config.relays).toEqual([CANONICAL])
+    writeFileSync(path, JSON.stringify({ ...config, relays: [CANONICAL, RETIRED_RELAYS[0]] }))
+    const r = await doctor(w, state)
+    const warned = r.checks.find((c) => c.name === 'relay' && c.detail.includes(RETIRED_RELAYS[0]))
+    expect(warned?.verdict).toBe('warn')
+    expect(warned?.fix).toContain('config.json')
+    expect(r.checks.filter((c) => c.name === 'relay' && c.verdict === 'fail')).toHaveLength(0)
+    expect(retired.received).toHaveLength(0)
   })
 
   it('fails a wake command that is not installed, and warns about a paused waker', async () => {

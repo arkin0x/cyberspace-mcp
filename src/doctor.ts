@@ -16,7 +16,7 @@ import { finalizeEvent, getPublicKey } from 'nostr-tools/pure'
 import { parsePubkey } from './chain/resolve.js'
 import { parseArgs, readFileConfig, readWalletFile, settingsFrom } from './config.js'
 import { readToken } from './http.js'
-import { GENERAL_RELAYS, Relays } from './nostr/relays.js'
+import { GENERAL_RELAYS, Relays, isRetiredRelay } from './nostr/relays.js'
 import { mergeAnswers } from './nostr/relayOutcome.js'
 import { defaultStateDir, mcpUrl, serveSettingsFrom, splitServeArgs, type ServeFileConfig } from './serveConfig.js'
 import { PAUSE_FILE } from './waker.js'
@@ -141,6 +141,9 @@ export async function runDoctor(argv: string[], deps: DoctorDeps): Promise<{ cod
     return done()
   }
   const file = readFileConfig(stateDir) as ServeFileConfig
+  const listed = readFileConfig(stateDir).relays
+  const retired = Array.isArray(listed) ? listed.filter((r): r is string => typeof r === 'string' && isRetiredRelay(r)) : []
+  if (retired.length) add({ name: 'relay', verdict: 'warn', detail: `${retired.join(', ')} is retired: config.json still lists it, and it is not dialed`, fix: `remove it from ${join(stateDir, 'config.json')}` })
   let serveSettings
   try {
     serveSettings = serveSettingsFrom(serve, file)
