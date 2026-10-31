@@ -50,19 +50,22 @@ export function isDefaultRelay(url: string): boolean {
 }
 
 /**
- * Relays this server never dials, whichever list names them: a flag, config.json,
+ * Hosts this server never dials, whichever list names them: a flag, config.json,
  * holders.json, a kind 10050, a hint. The owner ruled on 2026-10-31 that
  * wss://onosendai.feeds.relay.tools is down indefinitely: it answered HTTP 502 or
- * refused for days, and every read and write waited on it. Taking a relay off this
+ * refused for days, and every read and write waited on it. Taking a host off this
  * list is all it takes to dial it again.
  */
-export const RETIRED_RELAYS: readonly string[] = ['wss://onosendai.feeds.relay.tools']
+export const RETIRED_HOSTS: readonly string[] = ['onosendai.feeds.relay.tools']
 
-/** Whether a relay URL is retired, compared the way nostr-tools normalizes URLs. Not a URL at all: not retired. */
+/**
+ * Whether a relay URL is on a retired host, however it is written: by host, the
+ * way nostr-tools opens it, so a scheme, a path or a trailing dot cannot get
+ * around it. Not a URL at all: not retired.
+ */
 export function isRetiredRelay(url: string): boolean {
   try {
-    const norm = normalizeURL(url)
-    return RETIRED_RELAYS.some((r) => normalizeURL(r) === norm)
+    return RETIRED_HOSTS.includes(new URL(normalizeURL(url.trim())).hostname.replace(/\.+$/, ''))
   } catch {
     return false
   }

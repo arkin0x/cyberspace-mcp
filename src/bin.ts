@@ -13,7 +13,7 @@
 
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { Agent } from './agent.js'
-import { parseArgs, readFileConfig, readWalletFile, settingsFrom, USAGE } from './config.js'
+import { parseArgs, readFileConfig, readWalletFile, retiredCanonicalWarning, settingsFrom, USAGE } from './config.js'
 import { createServer } from './server.js'
 import { LockHeldError } from './state/dir.js'
 import { runDoctor } from './doctor.js'
@@ -51,6 +51,9 @@ async function stdio(argv: string[]): Promise<void> {
     process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n\n${USAGE}\n`)
     process.exit(2)
   }
+
+  const retired = retiredCanonicalWarning(args, args.state ? readFileConfig(args.state) : {}, settings)
+  if (retired) log(retired)
 
   let agent: Agent
   try {

@@ -245,6 +245,18 @@ export function readWalletFile(stateDir: string): WalletFile {
   return parsed && typeof parsed === 'object' ? (parsed as WalletFile) : {}
 }
 
+/**
+ * The words to log when the first relay listed, the canonical one, is retired and
+ * was dropped: another relay is canonical now, and a chain only on the retired
+ * one is out of reach. Null when that did not happen.
+ */
+export function retiredCanonicalWarning(args: ParsedArgs, file: FileConfig, settings: Settings): string | null {
+  const listed = args.relays.length ? args.relays : Array.isArray(file.relays) ? file.relays : []
+  const first: unknown = listed[0]
+  if (typeof first !== 'string' || !isRetiredRelay(first)) return null
+  return `WARNING: the first relay listed, ${first}, is retired and is not dialed, so the canonical relay is now ${settings.relays[0]}. A chain that lives only on the retired relay is out of reach: do not lose chain.json, and do not spawn over it. Remove it from --relay or config.json.`
+}
+
 /** The settings: defaults, then the file, then the arguments. The wallet string: --nwc, then wallet.json, then config.json. */
 export function settingsFrom(args: ParsedArgs, file: FileConfig, walletFile: WalletFile = {}): Settings {
   if (!args.state) throw new Error('--state <dir> is required')

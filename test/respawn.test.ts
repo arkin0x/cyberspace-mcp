@@ -12,7 +12,7 @@ import { generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { Agent, Refusal } from '../src/agent.js'
 import { hopTemplate, spawnTemplate } from '../src/chain/builder.js'
 import { bytesToHex, signEvent } from '../src/nostr/event.js'
-import { DEFAULT_RELAY, RETIRED_RELAYS } from '../src/nostr/relays.js'
+import { DEFAULT_RELAY, RETIRED_HOSTS } from '../src/nostr/relays.js'
 import type { Calibration } from '../src/space/calibration.js'
 import { placeFromHex } from '../src/space/coords.js'
 import { KEY_GENERATED_BY, StateDir } from '../src/state/dir.js'
@@ -83,7 +83,7 @@ describe('spawning again', () => {
   it('never dials a retired relay in the self-check, even with a chain on it', async () => {
     const network = new FakeNetwork()
     network.add(DEFAULT_RELAY)
-    const retired = network.add(RETIRED_RELAYS[0])
+    const retired = network.add(`wss://${RETIRED_HOSTS[0]}`)
     const sk = generateSecretKey()
     retired.seed(signEvent(spawnTemplate(getPublicKey(sk), 1_700_000_000), sk))
     const a = await start(network, dirWithKey(sk), false, [DEFAULT_RELAY])

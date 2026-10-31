@@ -24,7 +24,11 @@ export class Holders {
 
   constructor(private readonly dir: StateDir, private readonly canonical: string) {
     const saved = dir.readJson<unknown>(FILE, [])
-    const urls = Array.isArray(saved) ? saved.filter((u): u is string => typeof u === 'string').map((u) => normalizeURL(u)) : []
+    const urls: string[] = []
+    for (const u of Array.isArray(saved) ? saved : []) {
+      // One bad string must not stop the server from starting, or hide the holders after it.
+      if (typeof u === 'string') try { urls.push(normalizeURL(u)) } catch { /* not a URL */ }
+    }
     this.set = new Set(urls.filter((u) => !isRetiredRelay(u)))
     if (urls.some(isRetiredRelay)) dir.writeJson(FILE, [...this.set])
   }

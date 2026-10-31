@@ -338,7 +338,7 @@ The canonical relay is `wss://cyberspace.nostr1.com`, the same default ONOSENDAI
 
 Until 2026-10-22 the default was `wss://onosendai.feeds.relay.tools`. As of 2026-10-09 its policy for a new key, verified with a throwaway key, was: kinds 3333 (movement), 33331 (objects), 11333 (avatars) and 23330 (chat) can be published, and everything can be read; kinds 0 (profile), 33330 (bags), 5, 7, 1111, 10002 and 30003 are refused until the relay's owner opens the membership gate for the key.
 
-The owner ruled on 2026-10-31 that `wss://onosendai.feeds.relay.tools` is down indefinitely, so the server never dials it. A `--relay` flag or a `relays` list in `<state>/config.json` that names it keeps working without it, and a list left empty falls back to the default. `init` does not write it. `doctor` warns while `config.json` still lists it. `holders.json` forgets it on the next start.
+The owner ruled on 2026-10-31 that `wss://onosendai.feeds.relay.tools` is down indefinitely, so the server never dials it. A `--relay` flag or a `relays` list in `<state>/config.json` that names it keeps working without it, and a list left empty falls back to the default. `init` does not write it. `doctor` warns while `config.json` still lists it. When it was the first relay listed, the next one becomes canonical, and the server logs a warning at startup. `holders.json` forgets it on the next start.
 
 A chain that lives only on that relay is out of reach:
 
