@@ -140,7 +140,7 @@ describe('version 1 hops around the cutover', () => {
     await until(() => a.keeper.lastHopReport !== null)
     expect(a.keeper.lastHopReport!.unlisted).toEqual([v1.id])
     expect(a.keeper.lastHopReport!.failing).toEqual([])
-    expect(lines.some((l) => /1 version 1 not on the list \(signed before the cutover/.test(l))).toBe(true)
+    expect(lines.some((l) => /1 version 1 not on the list \(newer than the embedded list, or it failed the audit/.test(l))).toBe(true)
     // The new hop extends the adopted chain from the version 1 hop, and is version 2.
     const mine = hopsOn(canonical.published)
     expect(mine).toHaveLength(1)

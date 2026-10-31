@@ -113,7 +113,7 @@ export function hopReportWords(r: HopProofReport): string | null {
   if (r.checked === 0 && r.skipped === 0) return null
   const parts = [`hop proofs (Level 1, spec 5.11): ${r.checked} hop(s) checked, ${r.valid} version 2 valid`]
   if (r.listed) parts.push(`${r.listed} version 1 on the exemption list`)
-  if (r.unlisted.length) parts.push(`${r.unlisted.length} version 1 not on the list (signed before the cutover; the census lists every audited one, so this is not the agent's fault): newest ${r.unlisted.slice(0, 3).map((id) => `${id.slice(0, 8)}...`).join(', ')}`)
+  if (r.unlisted.length) parts.push(`${r.unlisted.length} version 1 not on the list (newer than the embedded list, or it failed the audit; reported, not a stop): newest ${r.unlisted.slice(0, 3).map((id) => `${id.slice(0, 8)}...`).join(', ')}`)
   if (r.failing.length) parts.push(`${r.failing.length} FAILING: ${r.failing.slice(0, 3).map((f) => `${f.id.slice(0, 8)}... (${f.failed.join(', ')})`).join('; ')}`)
   if (r.skipped) parts.push(`${r.skipped} left for the next pass (time budget)`)
   return parts.join('; ')
