@@ -29,13 +29,13 @@ import { distanceBetween, placeFromHex, placeOf, type Place } from '../src/space
 import { DEFAULT_AVATAR_RADIUS, avatarRadius, clearOf, nearestClear, spacingFor } from '../src/space/personalSpace.js'
 import { KEY_GENERATED_BY, StateDir } from '../src/state/dir.js'
 import { FakeNetwork, type FakeRelay } from './fakeRelay.js'
+import { fakeHopProof } from './fakeHop.js'
 
 const CANONICAL = 'wss://canonical.example'
 const MINE = 'wss://mine.example'
 const GENERAL = 'wss://general.example'
 const INBOX = 'wss://inbox.example/'
 const cal: Calibration = { version: 1, at: Date.now(), fingerprint: 'test', cantorMsByHeight: { 12: 10, 14: 60, 16: 400 }, sha256PerSec: 2_000_000 }
-const PROOF = 'ab'.repeat(32)
 
 /** XOR's avatar as he published it (2026-10-11): a stella octangula, unit 0, every vertex at a corner of the one-gibson cube. */
 const xorPayload = JSON.parse(readFileSync(new URL('./fixtures/xor-stella-octangula.json', import.meta.url), 'utf8')) as Record<string, unknown>
@@ -187,7 +187,7 @@ class Walker {
   hop(to: Place): NostrEvent {
     this.at = Math.max(this.at + 1, nowSeconds())
     const prevC = this.head.tags.find((t) => t[0] === 'C')![1]
-    this.head = signEvent(hopTemplate({ createdAt: this.at, genesisId: this.spawn.id, previousId: this.head.id, prevCoordHex: prevC, to: to.position, plane: to.plane, proofHash: PROOF }), this.sk)
+    this.head = signEvent(hopTemplate({ createdAt: this.at, genesisId: this.spawn.id, previousId: this.head.id, prevCoordHex: prevC, to: to.position, plane: to.plane, ...fakeHopProof() }), this.sk)
     return this.head
   }
 }

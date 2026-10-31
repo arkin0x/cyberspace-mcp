@@ -16,6 +16,7 @@ import { bytesToHex, signEvent, type NostrEvent } from '../src/nostr/event.js'
 import type { Calibration } from '../src/space/calibration.js'
 import { KEY_GENERATED_BY, StateDir } from '../src/state/dir.js'
 import { FakeNetwork } from './fakeRelay.js'
+import { fakeHopProof } from './fakeHop.js'
 
 const CANONICAL = 'wss://canonical.example'
 const cal: Calibration = { version: 1, at: Date.now(), fingerprint: 'test', cantorMsByHeight: { 12: 10, 14: 60, 16: 400 }, sha256PerSec: 2_000_000 }
@@ -47,7 +48,7 @@ async function stop(a: Agent): Promise<void> {
 function hopFrom(a: Agent, sk: Uint8Array, dx: bigint, createdAt: number, proof: string): NostrEvent {
   const head = a.keeper.head()!
   const spawn = a.keeper.chain()[0]
-  return signEvent(hopTemplate({ createdAt, genesisId: spawn.id, previousId: head.id, prevCoordHex: head.coordHex, to: { x: head.position.x + dx, y: head.position.y, z: head.position.z }, plane: head.plane, proofHash: proof }), sk)
+  return signEvent(hopTemplate({ createdAt, genesisId: spawn.id, previousId: head.id, prevCoordHex: head.coordHex, to: { x: head.position.x + dx, y: head.position.y, z: head.position.z }, plane: head.plane, ...fakeHopProof(proof) }), sk)
 }
 
 describe('the outbox guard', () => {
@@ -60,7 +61,7 @@ describe('the outbox guard', () => {
     await a.hop({ target: { dx: 3 } })
     const head = a.keeper.head()!
     // Signed, recorded, written to the outbox, and then the process died.
-    const unsent = hopFrom(a, sk, 1n, head.createdAt + 1, 'ab'.repeat(32))
+    const unsent = hopFrom(a, sk, 1n, head.createdAt + 1, 'ab')
     a.keeper.record(unsent, 'queued')
     a.outbox.add(unsent)
     await stop(a)
@@ -77,7 +78,7 @@ describe('the outbox guard', () => {
 
     // Another device signed in as this identity moved from the same head meanwhile.
     canonical.policy.reachable = true
-    const other = signEvent(hopTemplate({ createdAt: head.createdAt + 2, genesisId: a.keeper.chain()[0].id, previousId: head.id, prevCoordHex: head.coordHex, to: { x: head.position.x + 2n, y: head.position.y, z: head.position.z }, plane: head.plane, proofHash: 'cd'.repeat(32) }), sk)
+    const other = signEvent(hopTemplate({ createdAt: head.createdAt + 2, genesisId: a.keeper.chain()[0].id, previousId: head.id, prevCoordHex: head.coordHex, to: { x: head.position.x + 2n, y: head.position.y, z: head.position.z }, plane: head.plane, ...fakeHopProof('cd') }), sk)
     canonical.seed(other)
     a = await start(network, dir)
     expect(a.outbox.pending()).toHaveLength(0)
@@ -97,7 +98,7 @@ describe('the outbox guard', () => {
     let a = await start(network, dir)
     await a.hop({ target: { dx: 3 } })
     const head = a.keeper.head()!
-    const unsent = hopFrom(a, sk, 1n, head.createdAt + 1, 'ab'.repeat(32))
+    const unsent = hopFrom(a, sk, 1n, head.createdAt + 1, 'ab')
     a.keeper.record(unsent, 'queued')
     a.outbox.add(unsent)
     await stop(a)
@@ -110,7 +111,7 @@ describe('the outbox guard', () => {
 
     // Another unsent hop, and meanwhile a newer spawn for this identity on the relays: the old chain has ended.
     const head2 = a.keeper.head()!
-    const stale = hopFrom(a, sk, 1n, head2.createdAt + 1, 'ef'.repeat(32))
+    const stale = hopFrom(a, sk, 1n, head2.createdAt + 1, 'ef')
     a.keeper.record(stale, 'queued')
     a.outbox.add(stale)
     await stop(a)

@@ -10,9 +10,12 @@
 // this server.
 //
 // The templates follow ONOSENDAI's src/lib/events.ts tag for tag, so an
-// event this server signs is one ONOSENDAI would have signed: spawn, hop and
+// event this server signs is one ONOSENDAI would have signed: spawn and
 // sidestep from commit 8e4d0e3, enter-hyperspace and hyperjump from commit
-// 18eded9 (branch v2). The sixteen rides of DECK-0001 5.8 all carry their
+// 18eded9 (branch v2). The hop is version 2 of the hop proof (spec 5.13,
+// chain rules 2026-10-08-residue-openings): proof (the seal), mn, mp, in the
+// order spec 8.4 lists them at arkin0x/cyberspace 8b45430, the order
+// ONOSENDAI's feat/hop-residue-v2 (ono-1) writes them in. The sixteen rides of DECK-0001 5.8 all carry their
 // tags in the order hyperjumpTemplate writes them, less the mn they predate
 // (checked against the 2026-09-28 Level 2 audit corpus; four are fixtures).
 
@@ -20,8 +23,22 @@ import { coordToXyz, hexToCoord, type Plane } from 'cyberspace-core'
 import { HEX_64, tagValue, type EventTemplate } from '../nostr/event.js'
 import { positionHex, sectorTags, type Position } from '../space/coords.js'
 
-/** A re-roll nonce as the mn tag carries it: an unsigned 64-bit number as exactly 16 lowercase hex characters (spec 6.10, DECK-0001 5.2). */
+/** A re-roll nonce as the mn tag carries it: an unsigned 64-bit number as exactly 16 lowercase hex characters (spec 5.10, 6.10, DECK-0001 5.2). */
 const MN_HEX = /^[0-9a-f]{16}$/
+
+/**
+ * A hop's mp as spec 8.4 shapes it: lowercase hex, no separators, exactly
+ * HOP_SAMPLES (16) openings of 128 + 64 depth characters each. The depth
+ * follows from the hop's geometry, which the template does not derive, so
+ * this checks the shape every depth shares (a whole number of 64-character
+ * siblings past the 16 blocks of residues); the agent verifies the signed
+ * hop at Level 1 before it leaves (agent.ts), which checks the width exactly.
+ */
+function hopOpeningsShape(mp: string): boolean {
+  if (!/^[0-9a-f]+$/.test(mp) || mp.length % 16 !== 0) return false
+  const perOpening = mp.length / 16
+  return perOpening >= 128 && (perOpening - 128) % 64 === 0
+}
 
 /** A block height as the ride tags carry it, base 10. The same test the chain reader applies (events.ts parseAction), so the builder refuses exactly what the reader would not read. */
 const BLOCK_HEIGHT = /^\d+$/
@@ -44,7 +61,8 @@ export function spawnTemplate(pubkey: string, createdAt: number): EventTemplate 
   }
 }
 
-export interface HopInput {
+/** What every move (hop or sidestep) links to and where it lands. */
+interface MoveInput {
   createdAt: number
   genesisId: string
   previousId: string
@@ -52,30 +70,56 @@ export interface HopInput {
   prevCoordHex: string
   to: Position
   plane: Plane
-  proofHash: string
 }
 
-/** Spec 8.4. */
+/** A version 2 hop (spec 5.9, 5.10, 8.4): the three tags cyberspace-core's computeHopProofV2 returns. */
+export interface HopInput extends MoveInput {
+  /** The seal of spec 5.10, 64 lowercase hex: the proof tag. */
+  seal: string
+  /** The re-roll nonce of spec 5.10, 16 lowercase hex, big-endian: the mn tag. */
+  mnHex: string
+  /** The 16 residue openings of spec 5.10, lowercase hex with no separators: the mp tag. */
+  mpHex: string
+}
+
+/** The tags every move starts with, after its A tag: the two links, where it starts, where it lands, and its proof. */
+function moveTags(i: MoveInput, proof: string): string[][] {
+  return [
+    ['e', i.genesisId, '', 'genesis'],
+    ['e', i.previousId, '', 'previous'],
+    ['c', i.prevCoordHex],
+    ['C', positionHex(i.to, i.plane)],
+    ['proof', proof],
+  ]
+}
+
+/**
+ * Spec 8.4: a version 2 hop. Never a version 1 hop: a hop without its mn
+ * and mp is a version 1 hop, invalid unless its id is on the exemption list
+ * (spec 5.13), and no new event can be on it, so this refuses to build one.
+ */
 export function hopTemplate(i: HopInput): EventTemplate {
   checkLinks(i)
-  if (!HEX_64.test(i.proofHash)) throw new Error('a hop needs its 32-byte proof hash')
+  if (!HEX_64.test(i.seal)) throw new Error('a hop needs its 32-byte seal as the proof tag')
+  if (!MN_HEX.test(i.mnHex)) throw new Error('a hop needs its re-roll nonce as 16 lowercase hex characters')
+  if (!hopOpeningsShape(i.mpHex)) throw new Error('a hop needs its 16 residue openings as lowercase hex, 16 x (128 + 64 x depth) characters')
   return {
     kind: ACTION_KIND,
     created_at: i.createdAt,
     content: '',
     tags: [
       ['A', 'hop'],
-      ['e', i.genesisId, '', 'genesis'],
-      ['e', i.previousId, '', 'previous'],
-      ['c', i.prevCoordHex],
-      ['C', positionHex(i.to, i.plane)],
-      ['proof', i.proofHash],
+      ...moveTags(i, i.seal),
+      ['mn', i.mnHex],
+      ['mp', i.mpHex],
       ...sectorTags(i.to),
     ],
   }
 }
 
-export interface SidestepInput extends HopInput {
+export interface SidestepInput extends MoveInput {
+  /** The sidestep's proof hash (spec 6.6), 64 hex. */
+  proofHash: string
   /** Per-axis Merkle roots, 64 hex chars each. */
   merkleRoots: [string, string, string]
   /**
@@ -91,15 +135,18 @@ export interface SidestepInput extends HopInput {
 
 /** Spec 8.5. */
 export function sidestepTemplate(i: SidestepInput): EventTemplate {
-  const hop = hopTemplate(i)
-  if (!/^[0-9a-f]{16}$/.test(i.mnHex)) throw new Error('a sidestep needs its re-roll nonce as 16 lowercase hex characters')
+  checkLinks(i)
+  if (!HEX_64.test(i.proofHash)) throw new Error('a sidestep needs its 32-byte proof hash')
+  if (!MN_HEX.test(i.mnHex)) throw new Error('a sidestep needs its re-roll nonce as 16 lowercase hex characters')
   if (!i.merkleRoots.every((r) => HEX_64.test(r))) throw new Error('a sidestep needs three 32-byte Merkle roots')
   const [hx, hy, hz] = i.lcaHeights
   return {
-    ...hop,
+    kind: ACTION_KIND,
+    created_at: i.createdAt,
+    content: '',
     tags: [
       ['A', 'sidestep'],
-      ...hop.tags.slice(1, 6),
+      ...moveTags(i, i.proofHash),
       ['mr', i.merkleRoots.join(':')],
       ['mp', i.openings.join(':')],
       ['mn', i.mnHex],
@@ -242,10 +289,13 @@ const BUILT_ACTIONS: readonly BuiltAction[] = ['spawn', 'hop', 'sidestep', 'ente
  * A ride's as_of is not listed: the rules read it only on the first ride
  * after a boarding, which the template cannot tell from a later one, so
  * chainTemplateProblem checks it separately, at most once and well formed.
+ * A hop reads mn and mp beside its proof (spec 8.4, 8.8, chain rules
+ * 2026-10-08-residue-openings); a boarding keeps its own row without them,
+ * as spec 8.8 spells out, so it never inherits them from the hop's.
  */
 const READ_TAGS: Record<BuiltAction, readonly string[]> = {
   spawn: ['A', 'C', 'X', 'Y', 'Z', 'S'],
-  hop: ['A', 'e:genesis', 'e:previous', 'c', 'C', 'proof', 'X', 'Y', 'Z', 'S'],
+  hop: ['A', 'e:genesis', 'e:previous', 'c', 'C', 'proof', 'mn', 'mp', 'X', 'Y', 'Z', 'S'],
   sidestep: ['A', 'e:genesis', 'e:previous', 'c', 'C', 'proof', 'mr', 'mp', 'mn', 'hx', 'hy', 'hz', 'X', 'Y', 'Z', 'S'],
   'enter-hyperspace': ['A', 'e:genesis', 'e:previous', 'c', 'C', 'proof', 'X', 'Y', 'Z', 'S'],
   hyperjump: ['A', 'e:genesis', 'e:previous', 'c', 'C', 'from_height', 'B', 'proof', 'mp', 'mn', 'X', 'Y', 'Z', 'S'],
@@ -262,7 +312,9 @@ function countTag(t: EventTemplate, key: string): number {
  * every signature: exactly one A tag naming an action this module builds;
  * every tag the rules read exactly once with a value; the sector tags equal
  * to the ones computed from C; a spawn's C equal to the pubkey it is signed
- * by; a boarding's C equal to its c; a ride's from_height, B and as_of block
+ * by; a hop's proof a 32-byte seal, its mn a 16-hex nonce and its mp the
+ * shape of 16 residue openings (version 2, spec 8.4, so never a version 1
+ * hop); a boarding's C equal to its c; a ride's from_height, B and as_of block
  * heights in base 10, as_of at most once, B a different block from
  * from_height, and mn a 16-hex nonce. Each sentence names the one thing
  * wrong, so the log says what to fix and the relay never sees it.
@@ -283,6 +335,11 @@ export function chainTemplateProblem(t: EventTemplate, pubkey: string): string |
   const C = tagValue(t, 'C')!
   if (!HEX_64.test(C)) return 'C is not a 32-byte lowercase hex coordinate'
   if (name === 'spawn' && C !== pubkey) return 'a spawn\'s C must equal the pubkey'
+  if (name === 'hop') {
+    if (!HEX_64.test(tagValue(t, 'proof')!)) return 'a hop\'s proof is not a 32-byte lowercase hex seal'
+    if (!MN_HEX.test(tagValue(t, 'mn')!)) return 'a hop\'s mn is not a re-roll nonce of 16 lowercase hex characters'
+    if (!hopOpeningsShape(tagValue(t, 'mp')!)) return 'a hop\'s mp is not 16 residue openings in lowercase hex (spec 8.4)'
+  }
   if (name === 'enter-hyperspace' && tagValue(t, 'c') !== C) return 'a boarding\'s C must equal its c; boarding the line does not move the identity'
   if (name === 'hyperjump') {
     const ride = rideTagsProblem(t)

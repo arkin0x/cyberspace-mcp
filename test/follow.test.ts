@@ -25,13 +25,13 @@ import type { Calibration } from '../src/space/calibration.js'
 import { placeFromHex, placeOf, type Place } from '../src/space/coords.js'
 import { KEY_GENERATED_BY, StateDir } from '../src/state/dir.js'
 import { FakeNetwork, type FakeRelay } from './fakeRelay.js'
+import { fakeHopProof } from './fakeHop.js'
 
 const CANONICAL = 'wss://canonical.example'
 const MINE = 'wss://mine.example'
 const GENERAL = 'wss://general.example'
 const INBOX = 'wss://inbox.example/'
 const cal: Calibration = { version: 1, at: Date.now(), fingerprint: 'test', cantorMsByHeight: { 12: 10, 14: 60, 16: 400 }, sha256PerSec: 2_000_000 }
-const PROOF = 'ab'.repeat(32)
 
 function dirWithKey(sk: Uint8Array): string {
   const dir = mkdtempSync(join(tmpdir(), 'cyberspace-mcp-follow-'))
@@ -105,7 +105,7 @@ class Walker {
     // Signed now, as a live client signs; a subscription asks only for the last minute.
     this.at = Math.max(this.at + 1, nowSeconds())
     const prevC = prev.tags.find((t) => t[0] === 'C')![1]
-    return signEvent(hopTemplate({ createdAt: this.at, genesisId: this.spawn.id, previousId: prev.id, prevCoordHex: prevC, to: to.position, plane: to.plane, proofHash: PROOF }), this.sk)
+    return signEvent(hopTemplate({ createdAt: this.at, genesisId: this.spawn.id, previousId: prev.id, prevCoordHex: prevC, to: to.position, plane: to.plane, ...fakeHopProof() }), this.sk)
   }
 
   hop(to: Place): NostrEvent {

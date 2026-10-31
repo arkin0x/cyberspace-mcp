@@ -35,6 +35,7 @@ import { placeOf, spawnPlace, type Position } from '../src/space/coords.js'
 import { KEY_GENERATED_BY, StateDir } from '../src/state/dir.js'
 import { Transit } from '../src/transit.js'
 import { FakeNetwork } from './fakeRelay.js'
+import { fakeHopProof } from './fakeHop.js'
 import { MANIFEST_URL, fakeFetch, servedFor } from './hyperspace/lineFixture.js'
 
 const CANONICAL = 'wss://canonical.example'
@@ -377,7 +378,7 @@ describe('the hyperspace tools, on a fresh key over the fixture line', () => {
     // Another device leaves the line with a hop from the stop; this server adopts it on its next look at the relays.
     const stop = a.keeper.head()!
     const spawn = a.keeper.chain()[0]
-    const left = signEvent(hopTemplate({ createdAt: stop.createdAt + 1, genesisId: spawn.id, previousId: stop.id, prevCoordHex: stop.coordHex, to: beside(stop, 1n), plane: stop.plane, proofHash: 'cd'.repeat(32) }), sk)
+    const left = signEvent(hopTemplate({ createdAt: stop.createdAt + 1, genesisId: spawn.id, previousId: stop.id, prevCoordHex: stop.coordHex, to: beside(stop, 1n), plane: stop.plane, ...fakeHopProof('cd') }), sk)
     canonical.inject(left)
     await a.whereami()
     expect(a.keeper.head()!.id).toBe(left.id)
@@ -387,7 +388,7 @@ describe('the hyperspace tools, on a fresh key over the fixture line', () => {
     let other: NostrEvent | null = null
     const spy = vi.spyOn(a.transit, 'entryProof').mockImplementation((head: ActionEvent) => {
       // Another device signs in as this identity and hops from the confirmed head while the entry proof is being computed.
-      other = signEvent(hopTemplate({ createdAt: head.createdAt + 1, genesisId: spawn.id, previousId: head.id, prevCoordHex: head.coordHex, to: beside(head, 7n), plane: head.plane, proofHash: 'ef'.repeat(32) }), sk)
+      other = signEvent(hopTemplate({ createdAt: head.createdAt + 1, genesisId: spawn.id, previousId: head.id, prevCoordHex: head.coordHex, to: beside(head, 7n), plane: head.plane, ...fakeHopProof('ef') }), sk)
       canonical.inject(other)
       return Transit.prototype.entryProof.call(a.transit, head)
     })
@@ -418,7 +419,7 @@ describe('the hyperspace tools, on a fresh key over the fixture line', () => {
     await a.ride({ to })
     await until(() => a.transit.rideState().state === 'ready')
     // Another device signs in as this identity and hops from the head the proof was computed for.
-    const other = signEvent(hopTemplate({ createdAt: boarding.createdAt + 1, genesisId: spawn.id, previousId: boarding.id, prevCoordHex: boarding.coordHex, to: beside(boarding, 3n), plane: boarding.plane, proofHash: 'ab'.repeat(32) }), sk)
+    const other = signEvent(hopTemplate({ createdAt: boarding.createdAt + 1, genesisId: spawn.id, previousId: boarding.id, prevCoordHex: boarding.coordHex, to: beside(boarding, 3n), plane: boarding.plane, ...fakeHopProof('ab') }), sk)
     canonical.inject(other)
     await expect(a.ride({ to })).rejects.toThrow(/The head moved while the ride to block \d+ was in flight/)
     expect(a.keeper.head()!.id).toBe(other.id)
