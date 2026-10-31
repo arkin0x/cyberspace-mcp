@@ -13,7 +13,7 @@ import { Agent, type AgentConfig } from './agent.js'
 import { parsePubkey } from './chain/resolve.js'
 import { readFileConfig, readWalletFile, settingsFrom } from './config.js'
 import { ensureToken, TOKEN_FILE } from './http.js'
-import { DEFAULT_RELAY } from './nostr/relays.js'
+import { DEFAULT_RELAY, isRetiredRelay } from './nostr/relays.js'
 import { DEFAULT_PORT, PROMPT_PLACEHOLDER, defaultStateDir, mcpUrl } from './serveConfig.js'
 import { LockHeldError, StateDir } from './state/dir.js'
 import { getPublicKey } from 'nostr-tools/pure'
@@ -225,7 +225,8 @@ export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
   if (args.about !== undefined) config.about = args.about
   if (args.capCallSeconds !== undefined) config.capCallSeconds = args.capCallSeconds
   if (args.capSessionSeconds !== undefined) config.capSessionSeconds = args.capSessionSeconds
-  if (args.relays.length) config.relays = args.relays
+  const relays = args.relays.filter((r) => !isRetiredRelay(r))
+  if (relays.length) config.relays = relays
   const serve: Record<string, unknown> = { ...(existing.serve && typeof existing.serve === 'object' ? existing.serve as Record<string, unknown> : {}) }
   if (args.port !== undefined) serve.port = args.port
   if (args.token) serve.token = true

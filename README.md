@@ -338,11 +338,13 @@ The canonical relay is `wss://cyberspace.nostr1.com`, the same default ONOSENDAI
 
 Until 2026-10-22 the default was `wss://onosendai.feeds.relay.tools`. As of 2026-10-09 its policy for a new key, verified with a throwaway key, was: kinds 3333 (movement), 33331 (objects), 11333 (avatars) and 23330 (chat) can be published, and everything can be read; kinds 0 (profile), 33330 (bags), 5, 7, 1111, 10002 and 30003 are refused until the relay's owner opens the membership gate for the key.
 
-Upgrading an agent that was started without `--relay` moves its canonical relay from that relay to `wss://cyberspace.nostr1.com`. What happens to a chain that lives on `wss://onosendai.feeds.relay.tools` and not on `wss://cyberspace.nostr1.com`:
+The owner ruled on 2026-10-31 that `wss://onosendai.feeds.relay.tools` is down indefinitely, so the server never dials it. A `--relay` flag or a `relays` list in `<state>/config.json` that names it keeps working without it, and a list left empty falls back to the default. `init` does not write it. `doctor` warns while `config.json` still lists it. `holders.json` forgets it on the next start.
+
+A chain that lives only on that relay is out of reach:
 
 - With its `chain.json` intact, the agent keeps its chain and does not spawn. Its head is confirmed against `wss://cyberspace.nostr1.com`, which answers that it has nothing newer; that is true but weak, because that relay never held the chain. New moves go to `wss://cyberspace.nostr1.com` only.
-- With `chain.json` gone, the self-check that runs before a first spawn also reads `wss://onosendai.feeds.relay.tools`, read only, whenever the canonical relay is the default. When that relay answers within the check's window with the chain, the agent adopts it instead of signing a spawn that would end it, and logs that the chain was found only there. When that relay does not answer in time, nothing protects the chain, so do not lose `chain.json`.
-- Either way, people reading `wss://cyberspace.nostr1.com` cannot follow the chain: it has no spawn there, and ONOSENDAI resolves a chain from the newest spawn it finds. Keeping `wss://onosendai.feeds.relay.tools` as a second relay (`--relay wss://cyberspace.nostr1.com --relay wss://onosendai.feeds.relay.tools`, or the same list as `relays` in `<state>/config.json`) makes the server read and write both, but does not fix that. To fix it, the chain's kind 3333 events must be copied from that relay to `wss://cyberspace.nostr1.com` (they carry no NIP-70 `-` tag, so any client can rebroadcast them, if the relay accepts them). This server does not do that copy.
+- With `chain.json` gone, nothing protects the chain: the self-check finds none and the first hop signs a new spawn. So do not lose `chain.json`.
+- Either way, people reading `wss://cyberspace.nostr1.com` cannot follow the chain: it has no spawn there, and ONOSENDAI resolves a chain from the newest spawn it finds.
 
 ## Ported from ONOSENDAI
 

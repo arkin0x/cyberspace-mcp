@@ -11,8 +11,7 @@
 // the caller then sees a head that is not the one it meant to extend.
 
 import { HEX_64, isAuthentic, type NostrEvent } from '../nostr/event.js'
-import { normalizeURL } from 'nostr-tools/utils'
-import { selfCheckFallbacks, type Relays } from '../nostr/relays.js'
+import type { Relays } from '../nostr/relays.js'
 import { placeFromHex, spawnPlace, type Place } from '../space/coords.js'
 import type { StateDir } from '../state/dir.js'
 import { buildChain, chainStatus, firstBreak, newestSpawn, type ActionEvent, type ChainStatus } from './events.js'
@@ -194,13 +193,10 @@ export class ChainKeeper {
 
   /** Whether this identity already has a chain on the relays: found (adopted), none, or unknown with a cause. */
   async selfCheck(): Promise<CheckVerdict> {
-    const fallbacks = selfCheckFallbacks(this.relays.canonical).map((u) => normalizeURL(u)).filter((u) => !this.relays.urls.includes(u))
-    const answers = await askChainEvents(this.relays, this.holders, this.pubkey, this.genesisId(), this.events, fallbacks)
+    const answers = await askChainEvents(this.relays, this.holders, this.pubkey, this.genesisId(), this.events)
     const verdict = decideSelfCheck(answers, this.relays.canonical)
     if (verdict.status === 'found') {
       this.adopt(verdict.events)
-      const configured = answers.some((a) => this.relays.urls.includes(normalizeURL(a.url)) && a.events.length > 0)
-      if (!configured) this.log(`this identity's chain was found only on ${fallbacks.join(', ')}, the former default relay, and adopted. Add it as a second --relay so the server keeps reading it; its earlier events are not on ${this.relays.canonical}.`)
       // The adopted chain's hops, checked in the background: a report, never a reason to refuse.
       void this.checkHopProofs().catch((err) => this.log(`hop proof check: ${err instanceof Error ? err.message : String(err)}`))
     }
