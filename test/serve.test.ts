@@ -18,6 +18,7 @@ import * as nip59 from 'nostr-tools/nip59'
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { nip19 } from 'nostr-tools'
 import { bytesToHex, nowSeconds, type NostrEvent } from '../src/nostr/event.js'
+import { RETIRED_HOSTS } from '../src/nostr/relays.js'
 import { startServe, type Serving } from '../src/serve.js'
 import type { Calibration } from '../src/space/calibration.js'
 import { KEY_GENERATED_BY, LockHeldError, StateDir } from '../src/state/dir.js'
@@ -87,6 +88,20 @@ async function until(cond: () => boolean, ms = 10_000): Promise<void> {
 }
 
 describe('serve', () => {
+  it('logs a WARNING when the first relay in config.json is retired, naming the relay that is canonical now', async () => {
+    const w = world()
+    const dir = dirWithKey(generateSecretKey())
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ relays: [`wss://${RETIRED_HOSTS[0]}`, CANONICAL] }))
+    const logs: string[] = []
+    running.push(await startServe(['--port', '0', '--state', dir], {
+      log: (l) => logs.push(l),
+      print: () => {},
+      agent: { websocketImplementation: w.network.WebSocket, calibration: cal, relayMaxWaitMs: 1500, lookupRelays: [GENERAL], ordersPollMs: 0 },
+      waker: { watchdogMs: 50 },
+    }))
+    expect(logs.find((l) => l.startsWith('WARNING: the first relay listed'))).toContain(`canonical relay is now ${CANONICAL}`)
+  })
+
   it('serves the one agent over HTTP to any number of MCP clients, and holds the lock', async () => {
     const w = world()
     const op = getPublicKey(generateSecretKey())

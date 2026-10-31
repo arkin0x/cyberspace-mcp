@@ -8,7 +8,7 @@
 
 import { Agent, type AgentConfig } from './agent.js'
 import type { ChatLine } from './chat.js'
-import { parseArgs, readFileConfig, readWalletFile, settingsFrom } from './config.js'
+import { parseArgs, readFileConfig, readWalletFile, retiredCanonicalWarning, settingsFrom } from './config.js'
 import { ensureToken, readToken, startHttp, type HttpHandle } from './http.js'
 import { createServer } from './server.js'
 import { defaultStateDir, serveSettingsFrom, splitServeArgs, type ServeFileConfig, type ServeSettings } from './serveConfig.js'
@@ -44,6 +44,8 @@ export async function startServe(argv: string[], deps: ServeDeps): Promise<Servi
   const settings = settingsFrom(args, file, readWalletFile(stateDir))
   const serveSettings = serveSettingsFrom(serve, file as ServeFileConfig)
   const { log } = deps
+  const retired = retiredCanonicalWarning(args, file, settings)
+  if (retired) log(retired)
 
   const agent = await Agent.start({ ...settings, log, ...deps.agent })
   let token: string | null = null

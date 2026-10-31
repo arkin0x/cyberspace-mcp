@@ -49,21 +49,26 @@ export function isDefaultRelay(url: string): boolean {
   return normalizeURL(url) === normalizeURL(DEFAULT_RELAY)
 }
 
-/** The default canonical relay until 2026-10-22. */
-export const FORMER_DEFAULT_RELAY = 'wss://onosendai.feeds.relay.tools'
+/**
+ * Hosts this server never dials, whichever list names them: a flag, config.json,
+ * holders.json, a kind 10050, a hint. The owner ruled on 2026-10-31 that
+ * wss://onosendai.feeds.relay.tools is down indefinitely: it answered HTTP 502 or
+ * refused for days, and every read and write waited on it. Taking a host off this
+ * list is all it takes to dial it again.
+ */
+export const RETIRED_HOSTS: readonly string[] = ['onosendai.feeds.relay.tools']
 
 /**
- * The relays the own-chain self-check reads besides the configured ones:
- * the former default, while the canonical relay is the default. An agent
- * set up without --relay moved from it to the new default on upgrade; when
- * its chain lives only on the former default and its chain.json is gone,
- * this is what finds that chain, so the first hop adopts it instead of
- * signing a spawn that would end it. Read, never written: the self-check's
- * verdict is unchanged (any relay can say "found", only the canonical
- * relay can say "none"), and nothing is published there.
+ * Whether a relay URL is on a retired host, however it is written: by host, the
+ * way nostr-tools opens it, so a scheme, a path or a trailing dot cannot get
+ * around it. Not a URL at all: not retired.
  */
-export function selfCheckFallbacks(canonical: string): string[] {
-  return isDefaultRelay(canonical) ? [FORMER_DEFAULT_RELAY] : []
+export function isRetiredRelay(url: string): boolean {
+  try {
+    return RETIRED_HOSTS.includes(new URL(normalizeURL(url.trim())).hostname.replace(/\.+$/, ''))
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -177,6 +182,8 @@ export class Relays {
   async ensureRelay(url: string, connectionTimeout = 3000): Promise<AbstractRelay> {
     if (this.closed) throw new Error('relays closed')
     const norm = normalizeURL(url)
+    // Every connection comes through here, so no list can bring a retired relay back.
+    if (isRetiredRelay(norm)) throw new Error('retired relay, not dialed')
     let relay = this.pool.get(norm)
     if (!relay) {
       relay = new AbstractRelay(norm, {

@@ -164,12 +164,10 @@ const CHAIN_CHECK_MS = 6000
  * The same question, with each relay's answer kept: answered, refused or
  * unreachable, and every answer marked unreachable when the chain came back
  * with a hole. The self-check decides from these whether this identity has
- * a chain, has none, or cannot be told (selfCheck.ts). `alsoRead` names
- * relays asked besides the configured ones, read only (selfCheckFallbacks).
+ * a chain, has none, or cannot be told (selfCheck.ts).
  */
-export async function askChainEvents(relays: Relays, holders: Holders, pubkey: string, knownSpawnId?: string, have: NostrEvent[] = [], alsoRead: string[] = []): Promise<RelayAnswer[]> {
-  const urls = [...relays.urls, ...alsoRead]
-  const { got, whole } = await gatherChain((f) => relays.queryEach(f, CHAIN_CHECK_MS, urls), mergeAnswers, combineAnswers, pubkey, knownSpawnId, have,
+export async function askChainEvents(relays: Relays, holders: Holders, pubkey: string, knownSpawnId?: string, have: NostrEvent[] = []): Promise<RelayAnswer[]> {
+  const { got, whole } = await gatherChain((f) => relays.queryEach(f, CHAIN_CHECK_MS), mergeAnswers, combineAnswers, pubkey, knownSpawnId, have,
     (answers, author) => answers.map((a) => ({ ...a, events: ownEvents(a.events, author) })))
   holders.noteFrom(pubkey, got)
   return whole ? got : markPartial(got)
