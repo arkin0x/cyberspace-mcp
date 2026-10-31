@@ -12,10 +12,9 @@
 // A hop with neither mn nor mp is a version 1 hop. One on the exemption
 // list (grandfathered-v1-hops.txt, as cyberspace-core embeds it) stands. One
 // that is not listed is reported and never treated as this agent's fault:
-// until the census at the cutover fills the list, every version 1 hop this
-// server signed before it is unlisted, and the census lists every audited
-// one (spec 5.13). Anything else that fails Level 1 is reported by the step
-// that failed.
+// the censuses at the cutover list every audited version 1 hop (spec 5.13),
+// so an unlisted one is either newer than the embedded list or failed the
+// audit. Anything else that fails Level 1 is reported by the step that failed.
 
 import { hexToCoord, coordToXyz, isGrandfatheredV1Hop, verifyHopLevel1, type Xyz } from 'cyberspace-core'
 import type { NostrEvent } from '../nostr/event.js'
@@ -114,7 +113,7 @@ export function hopReportWords(r: HopProofReport): string | null {
   if (r.checked === 0 && r.skipped === 0) return null
   const parts = [`hop proofs (Level 1, spec 5.11): ${r.checked} hop(s) checked, ${r.valid} version 2 valid`]
   if (r.listed) parts.push(`${r.listed} version 1 on the exemption list`)
-  if (r.unlisted.length) parts.push(`${r.unlisted.length} version 1 not on the list (signed before the cutover; the census lists every audited one, so this is not the agent's fault): newest ${r.unlisted.slice(0, 3).map((id) => `${id.slice(0, 8)}...`).join(', ')}`)
+  if (r.unlisted.length) parts.push(`${r.unlisted.length} version 1 not on the list (newer than the embedded list, or it failed the audit; reported, not a stop): newest ${r.unlisted.slice(0, 3).map((id) => `${id.slice(0, 8)}...`).join(', ')}`)
   if (r.failing.length) parts.push(`${r.failing.length} FAILING: ${r.failing.slice(0, 3).map((f) => `${f.id.slice(0, 8)}... (${f.failed.join(', ')})`).join('; ')}`)
   if (r.skipped) parts.push(`${r.skipped} left for the next pass (time budget)`)
   return parts.join('; ')
