@@ -134,6 +134,16 @@ export const REFUSED = /^(blocked|invalid|duplicate|pow|restricted|error|mute)\b
 /** A relay's answer that may change by itself: not retried at once, left to the outbox's backoff. */
 export const TRANSIENT = /^(rate-limited|auth-required)\b/i
 
+/**
+ * NIP-01's "already have this event": the relay holds this exact id, so it
+ * took it. strfry (cyberspace.nostr1.com) says so with OK true, grain
+ * (relay.onosendai.tech, canonical since 2026-11-05) with OK false, which
+ * nostr-tools rejects. Taken for a refusal, the outbox settled the entry as
+ * refused by the canonical relay, the agent was told nothing took it, and the
+ * other relays were never asked again.
+ */
+export const DUPLICATE = /^duplicate:/i
+
 /** What nostr-tools is told to wait for an EOSE: far longer than any deadline of ours. */
 const NOSTR_TOOLS_EOSE_MS = 10 * 60_000
 
@@ -314,8 +324,10 @@ export class Relays {
     const reasons: Record<string, string> = {}
     results.forEach((r, i) => {
       const url = normalizeURL(urls[i])
-      if (r.status === 'fulfilled') accepted.push(url)
-      else reasons[url] = r.reason instanceof Error ? r.reason.message : String(r.reason ?? 'connection failure')
+      if (r.status === 'fulfilled') { accepted.push(url); return }
+      const why = r.reason instanceof Error ? r.reason.message : String(r.reason ?? 'connection failure')
+      if (DUPLICATE.test(why)) accepted.push(url)
+      else reasons[url] = why
     })
     if (accepted.length > 0) return { ok: true, accepted, reasons }
     const reason = Object.values(reasons).find(Boolean)

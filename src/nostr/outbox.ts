@@ -50,6 +50,13 @@ export const CANONICAL_RETRY_MS = 5_000
 const RETRY_MAX_MS = 60_000
 /** Refused and dropped entries kept for the outbox tool to show. */
 const HISTORY_KEPT = 50
+/**
+ * How long after signing an event the canonical relay took is still asked of
+ * the other configured relays that have not taken it (a second relay that was
+ * down then, as nostr1 is kept second after the 2026-11-05 switch). A day
+ * covers an outage without asking a relay gone for good forever.
+ */
+export const OTHERS_RETRY_S = 24 * 3600
 
 export interface OutboxOptions {
   log?: (line: string) => void
@@ -100,6 +107,21 @@ export class Outbox {
     return this.entries.filter((e) => !e.dropped && !this.settled(e))
   }
 
+  /**
+   * Whether the canonical relay took an entry signed in the last day that
+   * another configured relay has neither taken nor refused: it is asked of
+   * those relays again, on the same backoff.
+   */
+  private owedElsewhere(e: OutboxEntry, now: number = Math.floor(Date.now() / 1000)): boolean {
+    if (e.dropped || !e.accepted.includes(this.relays.canonical) || now - e.signedAt > OTHERS_RETRY_S) return false
+    return this.relays.urls.some((u) => !e.accepted.includes(u) && e.refused?.[u] === undefined)
+  }
+
+  /** Whether anything is left to ask of any relay. */
+  private owed(): boolean {
+    return this.pending().length > 0 || this.entries.some((e) => this.owedElsewhere(e))
+  }
+
   /** Record a signed event before anything is sent. */
   add(event: NostrEvent, now: number = Math.floor(Date.now() / 1000)): OutboxEntry {
     const entry: OutboxEntry = { event, signedAt: now, accepted: [], attempts: 0 }
@@ -128,7 +150,7 @@ export class Outbox {
     if (result.ok && newly.length === 0 && urls.length > 0) entry.lastError = Object.values(result.reasons)[0] ?? entry.lastError
     this.save()
     if (newly.length > 0) this.onAccepted?.(entry.event, newly)
-    if (!this.settled(entry)) this.scheduleRetry()
+    if (!this.settled(entry) || this.owedElsewhere(entry)) this.scheduleRetry()
     return result.ok && entry.accepted.length > 0 ? { ok: true, accepted: entry.accepted, reasons: result.reasons } : result
   }
 
@@ -153,7 +175,7 @@ export class Outbox {
   }
 
   private scheduleRetry(): void {
-    if (this.stopped || this.timer !== null || this.pending().length === 0) return
+    if (this.stopped || this.timer !== null || !this.owed()) return
     this.timer = setTimeout(() => { this.timer = null; void this.retry() }, this.backoff)
   }
 
@@ -184,7 +206,12 @@ export class Outbox {
       await this.send(entry).catch((err) => this.log(`retry failed: ${err instanceof Error ? err.message : String(err)}`))
       if (!this.settled(entry)) allSettled = false
     }
-    if (allSettled || this.pending().length === 0) { this.backoff = this.retryMs; return }
+    // What the canonical relay has, asked of the other relays that missed it (a day at most).
+    for (const entry of this.entries.filter((e) => this.owedElsewhere(e))) {
+      await this.send(entry).catch((err) => this.log(`retry failed: ${err instanceof Error ? err.message : String(err)}`))
+    }
+    const elsewhere = this.entries.some((e) => this.owedElsewhere(e))
+    if ((allSettled || this.pending().length === 0) && !elsewhere) { this.backoff = this.retryMs; return }
     this.backoff = Math.min(this.backoff * 2, RETRY_MAX_MS)
     if (this.timer === null && !this.stopped) this.timer = setTimeout(() => { this.timer = null; void this.retry() }, this.backoff)
   }
@@ -205,7 +232,7 @@ export class Outbox {
       await this.send(entry).catch((err) => this.log(`replay failed: ${err instanceof Error ? err.message : String(err)}`))
       sent.push(entry)
     }
-    if (waiting.length > 0) this.scheduleRetry()
+    if (waiting.length > 0 || this.owed()) this.scheduleRetry()
     return { sent, dropped, waiting }
   }
 
