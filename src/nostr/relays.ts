@@ -38,11 +38,23 @@ import { GuardedWebSocket } from './websocket.js'
 /**
  * The canonical relay (brief, ruling 9). Configurable; this is the default.
  * It is ONOSENDAI's DEFAULT_RELAY (src/store/useRelays.ts), so an agent and
- * the people it meets read the chain's truth from the same relay; the owner
- * ruled on 2026-10-22 that wss://cyberspace.nostr1.com stays canonical for
- * now. Before that the default here was wss://onosendai.feeds.relay.tools.
+ * the people it meets read the chain's truth from the same relay. Since
+ * 2026-11-05 it is the owner's own relay, wss://relay.onosendai.tech, which
+ * holds the verified history copied from wss://cyberspace.nostr1.com (the
+ * default from 2026-10-22). Before that the default was
+ * wss://onosendai.feeds.relay.tools.
  */
-export const DEFAULT_RELAY = 'wss://cyberspace.nostr1.com'
+export const DEFAULT_RELAY = 'wss://relay.onosendai.tech'
+
+/**
+ * The former canonical relay, kept second in the default list for about two
+ * weeks after the 2026-11-05 switch so every event still reaches people who
+ * read only it. Drop it from DEFAULT_RELAYS when the window closes.
+ */
+export const SECOND_RELAY = 'wss://cyberspace.nostr1.com'
+
+/** The relays a server uses when neither --relay nor config.json names any: the canonical one first. */
+export const DEFAULT_RELAYS: readonly string[] = [DEFAULT_RELAY, SECOND_RELAY]
 
 /** Whether a relay URL is the default canonical relay, compared the way nostr-tools normalizes URLs. */
 export function isDefaultRelay(url: string): boolean {

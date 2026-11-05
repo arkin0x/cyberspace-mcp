@@ -52,7 +52,7 @@ node dist/bin.js --state ~/cyberspace-agent --operator npub1...
 | Flag | Meaning | Default |
 |---|---|---|
 | `--state <dir>` | The state directory (required). One directory per agent, one agent per directory. | |
-| `--relay <url>` | A relay to publish to and read from. Repeatable. The first one given is the canonical relay. | `wss://cyberspace.nostr1.com` |
+| `--relay <url>` | A relay to publish to and read from. Repeatable. The first one given is the canonical relay. | `wss://relay.onosendai.tech`, then `wss://cyberspace.nostr1.com` |
 | `--operator <npub>` | The human responsible for this agent, named in the profile's `p` tag marked `operator`. | |
 | `--cap-call-seconds <n>` | The most compute a single `hop` may spend. | `60` |
 | `--cap-session-seconds <n>` | The most compute the whole session may spend. | `600` |
@@ -334,7 +334,9 @@ Chain status is decided by the chain rules that can be checked from links and ta
 
 ## Relay policy
 
-The canonical relay is `wss://cyberspace.nostr1.com`, the same default ONOSENDAI uses (`DEFAULT_RELAY` in its `src/store/useRelays.ts`), so an agent reads the chain's truth from the relay the people it meets read it from. The owner ruled on 2026-10-22 that it stays canonical for now. A relay may refuse some kinds from a new key until its owner admits the key. The server surfaces the relay's reason verbatim and does not retry a refusal. When the canonical relay refuses the agent's profile or its bags, give the agent a relay of its own with `--relay`; the first `--relay` is the canonical one, so list the canonical relay first and the agent's own relay second. When the canonical relay is not the default, the server warns at startup and in `identity`, because a spawn signed on a relay that shows no chain would end a chain the identity has on the default relay.
+The canonical relay is `wss://relay.onosendai.tech`, the same default ONOSENDAI uses (`DEFAULT_RELAY` in its `src/store/useRelays.ts`), so an agent reads the chain's truth from the relay the people it meets read it from. It is the owner's own relay, canonical since 2026-11-05, and holds the full verified history copied from `wss://cyberspace.nostr1.com`. Reads are open; it asks for NIP-42 AUTH only for protected (NIP-70) events, and the server answers a challenge with the agent's key. It takes events up to 512 KB.
+
+`wss://cyberspace.nostr1.com`, canonical from 2026-10-22 to 2026-11-05, stays second in the default list for about two weeks, so every event still reaches people who read only it. It needs NIP-42 AUTH for reads and publishes, and refuses events over about 262 KB, so a large bag can land on the canonical relay and still be refused by this one. A `config.json` that lists `wss://cyberspace.nostr1.com` first keeps it canonical and the server warns at startup; list `wss://relay.onosendai.tech` first. A relay may refuse some kinds from a new key until its owner admits the key. The server surfaces the relay's reason verbatim and does not retry a refusal. When the canonical relay refuses the agent's profile or its bags, give the agent a relay of its own with `--relay`; the first `--relay` is the canonical one, so list the canonical relay first and the agent's own relay second. When the canonical relay is not the default, the server warns at startup and in `identity`, because a spawn signed on a relay that shows no chain would end a chain the identity has on the default relay.
 
 Until 2026-10-22 the default was `wss://onosendai.feeds.relay.tools`. As of 2026-10-09 its policy for a new key, verified with a throwaway key, was: kinds 3333 (movement), 33331 (objects), 11333 (avatars) and 23330 (chat) can be published, and everything can be read; kinds 0 (profile), 33330 (bags), 5, 7, 1111, 10002 and 30003 are refused until the relay's owner opens the membership gate for the key.
 
@@ -342,9 +344,9 @@ The owner ruled on 2026-10-31 that `wss://onosendai.feeds.relay.tools` is down i
 
 A chain that lives only on that relay is out of reach:
 
-- With its `chain.json` intact, the agent keeps its chain and does not spawn. Its head is confirmed against `wss://cyberspace.nostr1.com`, which answers that it has nothing newer; that is true but weak, because that relay never held the chain. New moves go to `wss://cyberspace.nostr1.com` only.
+- With its `chain.json` intact, the agent keeps its chain and does not spawn. Its head is confirmed against the canonical relay, which answers that it has nothing newer; that is true but weak, because that relay never held the chain. New moves go only to the relays the server still dials.
 - With `chain.json` gone, nothing protects the chain: the self-check finds none and the first hop signs a new spawn. So do not lose `chain.json`.
-- Either way, people reading `wss://cyberspace.nostr1.com` cannot follow the chain: it has no spawn there, and ONOSENDAI resolves a chain from the newest spawn it finds.
+- Either way, people reading the canonical relay cannot follow the chain: it has no spawn there, and ONOSENDAI resolves a chain from the newest spawn it finds.
 
 ## Ported from ONOSENDAI
 
