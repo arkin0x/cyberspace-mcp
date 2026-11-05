@@ -129,8 +129,12 @@ export type PublishResult =
   | { ok: true; accepted: string[]; reasons: Record<string, string> }
   | { ok: false; reason: string; reasons: Record<string, string> }
 
-/** A relay's own final refusal (NIP-01 OK false prefixes): asking again would get the same answer. */
-export const REFUSED = /^(blocked|invalid|duplicate|pow|restricted|error|mute)\b/i
+/**
+ * A relay's own final refusal (NIP-01 OK false prefixes): asking again would
+ * get the same answer. strfry also says `replaced:` (it holds a newer version
+ * at that address) and `deleted:` (its author deleted it), RelayWriter.cpp.
+ */
+export const REFUSED = /^(blocked|invalid|duplicate|pow|restricted|error|mute|replaced|deleted)\b/i
 /** A relay's answer that may change by itself: not retried at once, left to the outbox's backoff. */
 export const TRANSIENT = /^(rate-limited|auth-required)\b/i
 
@@ -175,6 +179,14 @@ export class Relays {
   private readonly log: (line: string) => void
   private pool = new Map<string, AbstractRelay>()
   private authedFor = new Map<string, string>()
+  /**
+   * Publishes of one event on one relay socket, in flight. nostr-tools keeps
+   * a socket's open publishes by event id, so a second publish of the same
+   * event on it replaced the first one's promise, which then never settled:
+   * an outbox retry pass sending an entry while a tool call was still sending
+   * it hung that tool call. The second caller now waits on the first.
+   */
+  private publishing = new Map<AbstractRelay, Map<string, Promise<string>>>()
   private noChallenge = new Set<string>()
   private authSigning = new Map<string, number>()
   private registries = new Map<string, LiveRegistry>()
@@ -299,6 +311,20 @@ export class Relays {
     }
   }
 
+  /** `relay.publish`, shared by every caller publishing the same event on the same socket at once. */
+  private publishOn(relay: AbstractRelay, event: NostrEvent): Promise<string> {
+    let mine = this.publishing.get(relay)
+    if (!mine) { mine = new Map(); this.publishing.set(relay, mine) }
+    const had = mine.get(event.id)
+    if (had) return had
+    const sent = relay.publish(event).finally(() => {
+      mine.delete(event.id)
+      if (mine.size === 0 && this.publishing.get(relay) === mine) this.publishing.delete(relay)
+    })
+    mine.set(event.id, sent)
+    return sent
+  }
+
   private async publishOnce(urls: string[], event: NostrEvent): Promise<PublishResult> {
     this.beforePublish?.()
     await this.authAll(urls)
@@ -307,14 +333,14 @@ export class Relays {
       try {
         // Checked once more after every wait (a connect, an AUTH), the moment before the event leaves for each relay.
         this.beforePublish?.()
-        return await relay.publish(event)
+        return await this.publishOn(relay, event)
       } catch (err) {
         // A relay that wants AUTH before it takes an event (some DM inboxes do) and sent its challenge only now: answer it and send once more.
         if (!/^auth-required\b/i.test(err instanceof Error ? err.message : String(err))) throw err
         if (!(await this.challengeOf(relay, 1000))) throw err
         await relay.auth((t) => this.sign(t))
         this.beforePublish?.()
-        return relay.publish(event)
+        return this.publishOn(relay, event)
       }
     }))
     // A refusal by the lock (lock.ts) is no relay's answer: it stops the publish, whatever the relays said.
@@ -341,12 +367,18 @@ export class Relays {
    * event is sent once more over fresh ones. A refusal is never retried; a
    * rate limit or an auth demand is left to the outbox's backoff.
    */
-  async publishMany(urls: string[], event: NostrEvent): Promise<PublishResult> {
+  async publishMany(urls: string[], event: NostrEvent, opts: { fresh?: boolean } = {}): Promise<PublishResult> {
     if (urls.length === 0) return { ok: false, reason: 'no relays configured', reasons: {} }
     const first = await this.publishOnce(urls, event)
-    if (first.ok || REFUSED.test(first.reason) || TRANSIENT.test(first.reason)) return first
+    // `fresh: false`: one try only, for a caller that checked the relay is up just before (the outbox's other-relay pass).
+    if (first.ok || REFUSED.test(first.reason) || TRANSIENT.test(first.reason) || opts.fresh === false) return first
     this.dropRelays(urls)
     return this.publishOnce(urls, event)
+  }
+
+  /** Whether a relay can be connected to now (one socket, or the one already open). */
+  async reachable(url: string): Promise<boolean> {
+    try { await this.ensureRelay(url); return true } catch { return false }
   }
 
   /** Send one event to every configured relay. */

@@ -21,6 +21,14 @@ import type { StateDir } from '../state/dir.js'
 import type { NostrEvent } from './event.js'
 import { REFUSED, type PublishResult, type Relays } from './relays.js'
 
+/** An event's NIP-01 address: kind:pubkey:d for addressable kinds, kind:pubkey: for replaceable ones, null otherwise. */
+function addressOf(ev: NostrEvent): string | null {
+  const k = ev.kind
+  if (k >= 30000 && k < 40000) return `${k}:${ev.pubkey}:${ev.tags.find((t) => t[0] === 'd')?.[1] ?? ''}`
+  if (k === 0 || k === 3 || (k >= 10000 && k < 20000)) return `${k}:${ev.pubkey}:`
+  return null
+}
+
 export interface OutboxEntry {
   event: NostrEvent
   /** Unix seconds when it was signed. */
@@ -114,7 +122,32 @@ export class Outbox {
    */
   private owedElsewhere(e: OutboxEntry, now: number = Math.floor(Date.now() / 1000)): boolean {
     if (e.dropped || !e.accepted.includes(this.relays.canonical) || now - e.signedAt > OTHERS_RETRY_S) return false
-    return this.relays.urls.some((u) => !e.accepted.includes(u) && e.refused?.[u] === undefined)
+    return this.owedTo(e).length > 0 && !this.superseded(e)
+  }
+
+  /** The configured relays that have neither taken nor refused an entry. */
+  private owedTo(e: OutboxEntry): string[] {
+    return this.relays.urls.filter((u) => !e.accepted.includes(u) && e.refused?.[u] === undefined)
+  }
+
+  /**
+   * Whether a later entry makes an event pointless to send anywhere it has
+   * not gone: a deletion (kind 5) by its author naming its id or its address,
+   * or a newer version at the same address (NIP-01: newer created_at, or the
+   * same one and the lower id). A deleted event is never sent again.
+   */
+  private superseded(e: OutboxEntry): boolean {
+    const ev = e.event
+    const address = addressOf(ev)
+    return this.entries.some((o) => {
+      const other = o.event
+      if (other.id === ev.id || other.pubkey !== ev.pubkey || o.dropped) return false
+      if (other.kind === 5) {
+        return other.tags.some((t) => (t[0] === 'e' && t[1] === ev.id) || (address !== null && t[0] === 'a' && t[1] === address))
+      }
+      return address !== null && addressOf(other) === address
+        && (other.created_at > ev.created_at || (other.created_at === ev.created_at && other.id < ev.id))
+    })
   }
 
   /** Whether anything is left to ask of any relay. */
@@ -136,11 +169,15 @@ export class Outbox {
    * retry when the canonical relay did not take it and did not refuse it.
    */
   async send(entry: OutboxEntry): Promise<PublishResult> {
-    const urls = this.relays.urls.filter((u) => !entry.accepted.includes(u) && entry.refused?.[u] === undefined)
+    return this.sendTo(entry, this.relays.urls.filter((u) => !entry.accepted.includes(u) && entry.refused?.[u] === undefined))
+  }
+
+  /** `send`, to these relays only; `fresh: false` makes it one try, with no resend over fresh sockets. */
+  private async sendTo(entry: OutboxEntry, urls: string[], fresh = true): Promise<PublishResult> {
     entry.attempts++
     const result = urls.length === 0
       ? { ok: true as const, accepted: [], reasons: {} }
-      : await this.relays.publishMany(urls, entry.event)
+      : await this.relays.publishMany(urls, entry.event, { fresh })
     const newly = result.ok ? result.accepted.filter((u) => !entry.accepted.includes(u)) : []
     entry.accepted = [...new Set([...entry.accepted, ...newly])]
     for (const [url, reason] of Object.entries(result.reasons)) {
@@ -206,9 +243,19 @@ export class Outbox {
       await this.send(entry).catch((err) => this.log(`retry failed: ${err instanceof Error ? err.message : String(err)}`))
       if (!this.settled(entry)) allSettled = false
     }
-    // What the canonical relay has, asked of the other relays that missed it (a day at most).
-    for (const entry of this.entries.filter((e) => this.owedElsewhere(e))) {
-      await this.send(entry).catch((err) => this.log(`retry failed: ${err instanceof Error ? err.message : String(err)}`))
+    // What the canonical relay has, asked of the other relays that missed it
+    // (a day at most), relay by relay: one that cannot be reached is skipped
+    // for this pass after one try, not dialled again for each entry it is owed.
+    const owing = this.entries.filter((e) => this.owedElsewhere(e))
+    for (const url of [...new Set(owing.flatMap((e) => this.owedTo(e)))]) {
+      if (this.stopped || !(await this.relays.reachable(url))) continue
+      for (const entry of owing) {
+        if (!this.owedElsewhere(entry) || !this.owedTo(entry).includes(url)) continue
+        const result = await this.sendTo(entry, [url], false).catch((err) => { this.log(`retry failed: ${err instanceof Error ? err.message : String(err)}`); return null })
+        const why = result && !result.ok ? result.reason : null
+        // Gone since the check (not a refusal): the rest wait for the next pass.
+        if (result === null || (why !== null && !REFUSED.test(why))) break
+      }
     }
     const elsewhere = this.entries.some((e) => this.owedElsewhere(e))
     if ((allSettled || this.pending().length === 0) && !elsewhere) { this.backoff = this.retryMs; return }
