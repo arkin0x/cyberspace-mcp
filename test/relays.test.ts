@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { parseArgs, retiredCanonicalWarning, settingsFrom } from '../src/config.js'
-import { DEFAULT_RELAY, RETIRED_HOSTS, Relays, isDefaultRelay, isRetiredRelay } from '../src/nostr/relays.js'
+import { DEFAULT_RELAY, DEFAULT_RELAYS, RETIRED_HOSTS, SECOND_RELAY, Relays, isDefaultRelay, isRetiredRelay } from '../src/nostr/relays.js'
 import { Holders } from '../src/chain/holders.js'
 import { StateDir } from '../src/state/dir.js'
 import { signEvent } from '../src/nostr/event.js'
@@ -44,7 +44,7 @@ describe('a retired relay', () => {
   it('is dropped from config.json and from --relay, and an emptied list falls back to the default', () => {
     const state = ['--state', '/x']
     expect(settingsFrom(parseArgs(state), { relays: [DEFAULT_RELAY, `${RETIRED}/`] }).relays).toEqual([DEFAULT_RELAY])
-    expect(settingsFrom(parseArgs(state), { relays: [RETIRED] }).relays).toEqual([DEFAULT_RELAY])
+    expect(settingsFrom(parseArgs(state), { relays: [RETIRED] }).relays).toEqual([...DEFAULT_RELAYS])
     expect(settingsFrom(parseArgs([...state, '--relay', DEFAULT_RELAY, '--relay', RETIRED]), {}).relays).toEqual([DEFAULT_RELAY])
     expect(settingsFrom(parseArgs([...state, '--relay', RETIRED]), { relays: ['wss://mine.example'] }).relays).toEqual(['wss://mine.example'])
   })
@@ -98,31 +98,37 @@ describe('a retired relay', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cyberspace-mcp-holders-'))
     writeFileSync(join(dir, 'holders.json'), JSON.stringify(['bad url', 'wss://mine.example/', 7]))
     const holders = new Holders(StateDir.open(dir), `${DEFAULT_RELAY}/`).holders()
-    expect([...holders].sort()).toEqual([`${DEFAULT_RELAY}/`, 'wss://mine.example/'])
+    expect([...holders].sort()).toEqual([`${DEFAULT_RELAY}/`, 'wss://mine.example/'].sort())
   })
 
   it('is forgotten by a saved holders.json, on disk too, and the other holders stay', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cyberspace-mcp-holders-'))
     writeFileSync(join(dir, 'holders.json'), JSON.stringify([`${RETIRED}/`, 'wss://mine.example/', `${DEFAULT_RELAY}/`]))
     const holders = new Holders(StateDir.open(dir), `${DEFAULT_RELAY}/`).holders()
-    expect([...holders].sort()).toEqual([`${DEFAULT_RELAY}/`, 'wss://mine.example/'])
+    expect([...holders].sort()).toEqual([`${DEFAULT_RELAY}/`, 'wss://mine.example/'].sort())
     expect(JSON.parse(readFileSync(join(dir, 'holders.json'), 'utf8'))).toEqual(['wss://mine.example/', `${DEFAULT_RELAY}/`])
   })
 })
 
 describe('the default canonical relay', () => {
-  it('is ONOSENDAI\'s DEFAULT_RELAY, wss://cyberspace.nostr1.com (owner\'s ruling, 2026-10-22)', () => {
-    expect(DEFAULT_RELAY).toBe('wss://cyberspace.nostr1.com')
+  it('is ONOSENDAI\'s DEFAULT_RELAY, wss://relay.onosendai.tech (owner\'s switch, 2026-11-05)', () => {
+    expect(DEFAULT_RELAY).toBe('wss://relay.onosendai.tech')
   })
 
-  it('is what a server started without --relay or config.json relays uses', () => {
-    expect(settingsFrom(parseArgs(['--state', '/x']), {}).relays).toEqual(['wss://cyberspace.nostr1.com'])
+  it('keeps the former canonical relay second while the switch settles', () => {
+    expect(SECOND_RELAY).toBe('wss://cyberspace.nostr1.com')
+    expect(DEFAULT_RELAYS).toEqual(['wss://relay.onosendai.tech', 'wss://cyberspace.nostr1.com'])
+  })
+
+  it('is what a server started without --relay or config.json relays uses, the new relay first', () => {
+    expect(settingsFrom(parseArgs(['--state', '/x']), {}).relays).toEqual(['wss://relay.onosendai.tech', 'wss://cyberspace.nostr1.com'])
   })
 
   it('is recognized however the URL is written, and no other relay is', () => {
-    expect(isDefaultRelay('wss://cyberspace.nostr1.com')).toBe(true)
-    expect(isDefaultRelay('wss://cyberspace.nostr1.com/')).toBe(true)
-    expect(isDefaultRelay('WSS://Cyberspace.Nostr1.com')).toBe(true)
+    expect(isDefaultRelay('wss://relay.onosendai.tech')).toBe(true)
+    expect(isDefaultRelay('wss://relay.onosendai.tech/')).toBe(true)
+    expect(isDefaultRelay('WSS://Relay.Onosendai.Tech')).toBe(true)
+    expect(isDefaultRelay('wss://cyberspace.nostr1.com')).toBe(false)
     expect(isDefaultRelay('wss://onosendai.feeds.relay.tools')).toBe(false)
     expect(isDefaultRelay('wss://canonical.example')).toBe(false)
   })

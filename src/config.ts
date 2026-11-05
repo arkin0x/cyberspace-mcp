@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { HOSAKA_DEFAULT_URL } from './hosaka.js'
 import { DEFAULT_CHAT_WAKE_MINUTES } from './chat.js'
-import { DEFAULT_RELAY, isRetiredRelay } from './nostr/relays.js'
+import { DEFAULT_RELAY, DEFAULT_RELAYS, SECOND_RELAY, isRetiredRelay } from './nostr/relays.js'
 import { parseNwc, Secret } from './nwc.js'
 import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS } from './wallet.js'
 import { DEFAULT_TRAVEL_PER_DAY, type TravelLogSettings } from './travel.js'
@@ -44,7 +44,7 @@ export interface Settings {
 }
 
 const DEFAULTS = {
-  relays: [DEFAULT_RELAY],
+  relays: DEFAULT_RELAYS,
   capCallSeconds: 60,
   capSessionSeconds: 600,
   maxSidestepHeight: 24,
@@ -89,7 +89,7 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
                                                 The stdio MCP server, for a client that starts it itself.
 
   --state <dir>                 The state directory (required): the key, the chain, the outbox.
-  --relay <url>                 A relay; repeatable. The first is the canonical relay. Default ${DEFAULT_RELAY}
+  --relay <url>                 A relay; repeatable. The first is the canonical relay. Default ${DEFAULT_RELAY}, then ${SECOND_RELAY}
   --operator <npub>             The human responsible for this agent, named in its profile.
   --name <name>                 The profile name.
   --about <text>                The profile text.

@@ -35,6 +35,8 @@ export interface FakePolicy {
   protectWraps: boolean
   /** Events are taken only from an authenticated client; with challengeOnReq the challenge follows the refusal. */
   requireAuthToPublish: boolean
+  /** An event it already holds is answered OK false "duplicate:", as grain (relay.onosendai.tech) does; strfry says OK true. */
+  duplicateOkFalse: boolean
 }
 
 const DEFAULT_POLICY: FakePolicy = {
@@ -49,6 +51,7 @@ const DEFAULT_POLICY: FakePolicy = {
   challengeOnReq: false,
   protectWraps: false,
   requireAuthToPublish: false,
+  duplicateOkFalse: false,
 }
 
 interface Connection {
@@ -216,6 +219,10 @@ export class FakeRelay {
       const refusal = this.policy.refuse(ev)
       if (refusal) {
         this.reply(conn, ['OK', ev.id, false, refusal])
+        return
+      }
+      if (this.policy.duplicateOkFalse && [...this.events.values()].some((e) => e.id === ev.id)) {
+        this.reply(conn, ['OK', ev.id, false, 'duplicate: already have this event'])
         return
       }
       const fresh = this.store(ev)
