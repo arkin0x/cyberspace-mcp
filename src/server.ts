@@ -15,6 +15,7 @@ import { MAX_OPERATOR_MESSAGE } from './operator.js'
 import { RENDER_DEFAULT_SIZE, RENDER_MAX_SIZE, RENDER_MIN_SIZE } from './render.js'
 import { ROAM_DEFAULT_MINUTES, ROAM_MAX_MINUTES, ROAM_MIN_MINUTES } from './roam.js'
 import { MAX_TRAVEL_LOG } from './travel.js'
+import { startProgress, type CallProgress, type Progress, type ProgressExtra } from './progress.js'
 
 /** The seven rules with no undo (agents note 6), as the resource carries them. */
 const FATAL_RULES = [
@@ -204,6 +205,24 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
       return result
     }) as Handler)) as typeof server.registerTool
   }
+  // Every tool call that carries a progressToken hears a heartbeat while it runs (progress.ts), so a client with a short
+  // timeout sees the call is alive; hop also says what it is doing. Installed after the gate, so a refused call sends none.
+  const progressOf = new WeakMap<object, CallProgress>()
+  {
+    type Handler = (...args: never[]) => Promise<CallToolResult>
+    const register = server.registerTool.bind(server) as (name: string, config: unknown, cb: Handler) => unknown
+    server.registerTool = ((name: string, config: unknown, cb: Handler) => register(name, config, (async (...args: never[]) => {
+      const extra = args[args.length - 1] as unknown
+      const progress = startProgress(name, extra && typeof extra === 'object' ? extra as ProgressExtra : undefined)
+      if (extra && typeof extra === 'object') progressOf.set(extra, progress)
+      try {
+        return await cb(...args)
+      } finally {
+        progress.stop()
+      }
+    }) as Handler)) as typeof server.registerTool
+  }
+  const progress = (extra: object): Progress => progressOf.get(extra)?.report ?? (async () => {})
   const activity = (): void => { try { hooks.onActivity?.() } catch { /* the watchdog's bookkeeping never fails a tool */ } }
   // Every tool's answer ends with the notices: unread orders and an operator's tag in chat.
   const call = async (fn: () => Promise<ToolResult> | ToolResult): Promise<CallToolResult> => {
@@ -246,7 +265,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     description: 'Move one step toward a target: confirms the live head, reserves it, computes the proof, confirms again, signs, publishes to the canonical relay and your relays, and records the result. On a fresh key with no chain it signs your spawn first. Refuses if the step exceeds the cap or the head moved, and never lands where your avatar would overlap a person\'s (the refusal names the clear coordinate just outside). A target beyond a wall is reached one step per call; the result says how far remains.',
     inputSchema: { target: coordinate, cap_seconds: z.number().positive().optional().describe('Your own cap on compute for this call, in seconds; the server\'s cap applies too.') },
     annotations: { readOnlyHint: false, destructiveHint: false },
-  }, async (args) => call(() => agent.hop(args)))
+  }, async (args, extra) => call(() => agent.hop(args, progress(extra))))
 
   server.registerTool('station', {
     title: 'Station',

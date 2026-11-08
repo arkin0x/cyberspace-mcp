@@ -5,7 +5,10 @@
 // over the one shared Agent, so there is no session to leak when a
 // one-shot client (claude -p, a waker turn) exits without saying goodbye,
 // and the agent's state lives where it always did, in the Agent. Answers
-// are plain JSON.
+// are plain JSON, except a tool call that asks for progress (a
+// progressToken, and an Accept that takes text/event-stream): its answer is
+// a short event stream that carries the progress notifications and then
+// the result, since a JSON answer has nowhere to put them (progress.ts).
 //
 // Only this machine is served: the socket binds 127.0.0.1, the Host header
 // must name it (a DNS rebinding page cannot), a browser's Origin must be
@@ -66,9 +69,36 @@ function sameSecret(a: string, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y)
 }
 
-function deny(res: ServerResponse, status: number, message: string, headers: Record<string, string> = {}): void {
+function deny(res: ServerResponse, status: number, message: string, headers: Record<string, string> = {}, code = -32000): void {
   res.writeHead(status, { 'content-type': 'application/json', ...headers })
-  res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message }, id: null }))
+  res.end(JSON.stringify({ jsonrpc: '2.0', error: { code, message }, id: null }))
+}
+
+/** The most a request body may be, as the SDK's own limit. */
+const MAX_BODY = 4 * 1024 * 1024
+
+/** A JSON body, read here so the answer's form can be chosen from it; null when it is over MAX_BODY. Throws on JSON that does not parse. */
+async function readJson(req: IncomingMessage): Promise<{ body: unknown } | null> {
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length
+    if (size > MAX_BODY) return null
+    chunks.push(chunk as Buffer)
+  }
+  return { body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }
+}
+
+/** Whether a POST is a tools/call (alone or in a batch) that asked for progress and can take an event stream. */
+export function wantsProgressStream(body: unknown, accept: string | undefined): boolean {
+  if (!accept?.includes('text/event-stream')) return false
+  const messages = Array.isArray(body) ? body : [body]
+  return messages.some((m) => {
+    if (!m || typeof m !== 'object') return false
+    const { method, params } = m as { method?: unknown; params?: { _meta?: { progressToken?: unknown } } }
+    const token = params?._meta?.progressToken
+    return method === 'tools/call' && (typeof token === 'string' || typeof token === 'number')
+  })
 }
 
 /** Listen on 127.0.0.1:port and serve MCP at /mcp. Rejects with a sentence when the port is taken. */
@@ -90,14 +120,27 @@ export async function startHttp(opts: HttpOptions): Promise<HttpHandle> {
       if (!m || !sameSecret(m[1].trim(), opts.token)) return deny(res, 401, 'Unauthorized: send Authorization: Bearer <the token in the state directory file http-token>', { 'www-authenticate': 'Bearer' })
     }
     if (req.method !== 'POST') return deny(res, 405, 'Method not allowed: this server is stateless; send each request as a POST', { allow: 'POST' })
+    // A JSON body is read here to choose the answer's form; anything else goes to the transport as it came, which refuses it.
+    let parsed: { body: unknown } | undefined
+    if (/^application\/json\b/i.test(req.headers['content-type'] ?? '')) {
+      let read: { body: unknown } | null
+      try {
+        read = await readJson(req)
+      } catch {
+        return deny(res, 400, 'Parse error: Invalid JSON', {}, -32700)
+      }
+      if (!read) return deny(res, 413, `Payload too large: the most a request may be is ${MAX_BODY} bytes`)
+      parsed = read
+    }
+    const stream = parsed !== undefined && wantsProgressStream(parsed.body, req.headers.accept)
     const server = opts.createServer()
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: !stream })
     res.on('close', () => {
       void transport.close().catch(() => {})
       void server.close().catch(() => {})
     })
     await server.connect(transport)
-    await transport.handleRequest(req, res)
+    await transport.handleRequest(req, res, parsed?.body)
   }
 
   const http: Server = createHttpServer((req, res) => {
