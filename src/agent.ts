@@ -72,6 +72,7 @@ import type { Secret } from './nwc.js'
 import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS, Wallet } from './wallet.js'
 import { Placements } from './placed.js'
 import { DEFAULT_TRAVEL_PER_DAY, TravelLog, repeatsPrivate, type TravelLogSettings } from './travel.js'
+import type { Progress } from './progress.js'
 
 export { Refusal, type ToolResult } from './tool.js'
 
@@ -931,7 +932,8 @@ export class Agent {
     return { text, data: { refused: refusal, plan, target: describePlace(target), chainStatus: this.keeper.status() } }
   }
 
-  async hop(input: { target: CoordinateInput; cap_seconds?: number }): Promise<ToolResult> {
+  /** progress, when the client asked for it, hears what the hop is doing (progress.ts): above all, that the proof is computing. */
+  async hop(input: { target: CoordinateInput; cap_seconds?: number }, progress?: Progress): Promise<ToolResult> {
     const cap = input.cap_seconds
     if (cap !== undefined && (!Number.isFinite(cap) || cap <= 0)) throw new Refusal('cap_seconds must be a positive number of seconds.')
     let release: () => void
@@ -941,13 +943,13 @@ export class Agent {
       throw new Refusal(err instanceof Error ? err.message : String(err))
     }
     try {
-      return await this.move(input.target, cap)
+      return await this.move(input.target, cap, progress)
     } finally {
       release()
     }
   }
 
-  private async move(targetInput: CoordinateInput, cap: number | undefined): Promise<ToolResult> {
+  private async move(targetInput: CoordinateInput, cap: number | undefined, progress?: Progress): Promise<ToolResult> {
     await this.refreshChain()
     let status = this.keeper.status()
     let spawned: NostrEvent | null = null
@@ -994,10 +996,13 @@ export class Agent {
 
     const chain = this.keeper.chain()
     const head = chain[chain.length - 1]
+    // The proof holds this thread: nothing can be sent until it is done, so say so first.
+    await progress?.(`computing the proof (a ${step.kind} of h${step.maxHeight}, about ${Math.max(1, Math.round(step.seconds))} s here); the server answers nothing else until it is done`)
     const t0 = performance.now()
     const template = this.prove(step, head, chain[0].id)
     const seconds = (performance.now() - t0) / 1000
     this.budget.spendMove(seconds)
+    await progress?.(`proof done in ${seconds.toFixed(1)} s; confirming the head, then signing and publishing`)
 
     // Confirm again, immediately before the signature: the machine was busy, and another device may have moved.
     const again = await this.keeper.confirmHead()
