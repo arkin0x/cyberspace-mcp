@@ -41,7 +41,7 @@ npm i -g .           # the global command points into this folder; keep it
 
 `cyberspace-core` and `sno-core` are installed from GitHub at the exact commits ONOSENDAI pins, so the events this server builds are the events ONOSENDAI builds. Both are pinned as `git+https` URLs; npm records hosted GitHub dependencies as `git+ssh` in the lockfile by design and clones over https first, so `npm ci` needs no SSH key (ONOSENDAI's lockfile reads the same way).
 
-Then run it with a state directory. The directory is created if it does not exist; the key is created on the first run.
+Then run it. With no `--state` it uses `$CYBERSPACE_MCP_STATE`, else `~/.cyberspace-mcp`, the same directory `init` and `serve` use; pass `--state` for an agent of its own. The directory is created if it does not exist; the key is created on the first run.
 
 ```sh
 node dist/bin.js --state ~/cyberspace-agent --operator npub1...
@@ -51,7 +51,7 @@ node dist/bin.js --state ~/cyberspace-agent --operator npub1...
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--state <dir>` | The state directory (required). One directory per agent, one agent per directory. | |
+| `--state <dir>` | The state directory. One directory per agent, one agent per directory. A leading `~/` is your home directory even when no shell reads the line (an MCP client's `args`). | `$CYBERSPACE_MCP_STATE`, else `~/.cyberspace-mcp` (the one `init` and `serve` use) |
 | `--relay <url>` | A relay to publish to and read from. Repeatable. The first one given is the canonical relay. | `wss://relay.onosendai.tech`, then `wss://cyberspace.nostr1.com` |
 | `--operator <npub>` | The human responsible for this agent, named in the profile's `p` tag marked `operator`. | |
 | `--cap-call-seconds <n>` | The most compute a single `hop` may spend. | `60` |
@@ -112,7 +112,7 @@ In `claude_desktop_config.json`:
 
 | Command | Does |
 |---|---|
-| `cyberspace-mcp init` | The first run: makes the state directory (default `~/.cyberspace-mcp`, or `$CYBERSPACE_MCP_STATE`, or `--state`) and the key, writes `config.json` (operator, name, caps, relays, the wake command for `--client claude`, `hermes` or `none`), writes `claude-mcp.json` for Claude Code, publishes the profile (`bot: true`, the operator named), and prints the agent's npub, the MCP URL and the client snippets. Asks for what the flags leave out; `--yes` asks nothing. Run it again to change a setting. `init --help` lists the flags. |
+| `cyberspace-mcp init` | The first run: makes the state directory (default `~/.cyberspace-mcp`, or `$CYBERSPACE_MCP_STATE`, or `--state`) and the key, writes `config.json` (operator and name; caps, relays and `about` only when you pass their flags, since the defaults apply without them; the wake command for `--client claude` or `hermes`), writes `claude-mcp.json` for Claude Code, publishes the profile (`bot: true`, the operator named), and prints the agent's npub, the MCP URL and the client snippets. Asks for what the flags leave out; `--yes` asks nothing. Run it again to change a setting. `init --help` lists the flags. |
 | `cyberspace-mcp serve` | The server and its waker. Takes every agent flag of the stdio mode (`--operator`, `--cap-call-seconds`, ...) plus the ones below. |
 | `cyberspace-mcp doctor` | Checks the state directory, the key (never printed), the operator (set, named in the profile, following the agent), the operator's DM inbox (kind 10050) and the agent's own, the relays, the machine id and what the state directory's lock means (free, held here, left by this machine and taken over at the next start, or another machine's), whether serve answers, and whether the wake command runs (`--version`, so no model is called); prints `fix:` for each problem. Reads only; exit 1 when something failed. |
 | `cyberspace-mcp wake pause` / `resume` / `status` | Pauses the waker (the file `wake.pause` in the state directory), resumes it, or says whether it is paused and which process holds the state directory. |

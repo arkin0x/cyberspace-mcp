@@ -19,7 +19,7 @@ import { LockHeldError } from './state/dir.js'
 import { runDoctor } from './doctor.js'
 import { runInit } from './init.js'
 import { HelpRequested, startServe } from './serve.js'
-import { defaultStateDir, SERVE_USAGE } from './serveConfig.js'
+import { defaultStateDir, expandHome, SERVE_USAGE } from './serveConfig.js'
 import { PAUSE_FILE } from './waker.js'
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -44,15 +44,17 @@ async function stdio(argv: string[]): Promise<void> {
     process.stderr.write(`${USAGE}\n`)
     process.exit(0)
   }
+  // No --state: the same directory init and serve use.
+  args.state ??= defaultStateDir()
   let settings
   try {
-    settings = settingsFrom(args, args.state ? readFileConfig(args.state) : {}, args.state ? readWalletFile(args.state) : {})
+    settings = settingsFrom(args, readFileConfig(args.state), readWalletFile(args.state))
   } catch (err) {
     process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n\n${USAGE}\n`)
     process.exit(2)
   }
 
-  const retired = retiredCanonicalWarning(args, args.state ? readFileConfig(args.state) : {}, settings)
+  const retired = retiredCanonicalWarning(args, readFileConfig(args.state), settings)
   if (retired) log(retired)
 
   let agent: Agent
@@ -155,7 +157,7 @@ async function doctor(argv: string[]): Promise<void> {
 function wake(argv: string[]): void {
   const [verb, ...rest] = argv
   let state = defaultStateDir()
-  for (let i = 0; i < rest.length; i++) if (rest[i] === '--state' && rest[i + 1]) state = rest[++i]
+  for (let i = 0; i < rest.length; i++) if (rest[i] === '--state' && rest[i + 1]) state = expandHome(rest[++i])
   const file = join(state, PAUSE_FILE)
   if (verb === 'pause') {
     writeFileSync(file, `paused ${new Date().toISOString()}\n`)

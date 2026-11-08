@@ -14,7 +14,7 @@ import { parsePubkey } from './chain/resolve.js'
 import { readFileConfig, readWalletFile, settingsFrom } from './config.js'
 import { ensureToken, TOKEN_FILE } from './http.js'
 import { DEFAULT_RELAY, SECOND_RELAY, isRetiredRelay } from './nostr/relays.js'
-import { DEFAULT_PORT, PROMPT_PLACEHOLDER, defaultStateDir, mcpUrl } from './serveConfig.js'
+import { DEFAULT_PORT, PROMPT_PLACEHOLDER, defaultStateDir, expandHome, mcpUrl } from './serveConfig.js'
 import { LockHeldError, StateDir } from './state/dir.js'
 import { getPublicKey } from 'nostr-tools/pure'
 
@@ -79,7 +79,7 @@ function parseInitArgs(argv: string[]): InitArgs {
       return n
     }
     switch (a) {
-      case '--state': out.state = value(); break
+      case '--state': out.state = expandHome(value()); break
       case '--operator': out.operator = value(); break
       case '--name': out.name = value(); break
       case '--about': out.about = value(); break

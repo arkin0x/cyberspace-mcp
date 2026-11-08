@@ -1,7 +1,8 @@
 // config.ts: the server's settings, from the command line and from
 // config.json in the state directory. Arguments win over the file, and the
-// file over the defaults. Only --state is required; everything else has a
-// default that puts a fresh agent on the canonical relay with modest caps.
+// file over the defaults. Every setting has a default: the state directory is
+// $CYBERSPACE_MCP_STATE or ~/.cyberspace-mcp (the same one init and serve
+// use), and the rest puts a fresh agent on the canonical relay with modest caps.
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -12,6 +13,7 @@ import { parseNwc, Secret } from './nwc.js'
 import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS } from './wallet.js'
 import { DEFAULT_TRAVEL_PER_DAY, type TravelLogSettings } from './travel.js'
 import { DEFAULT_PUBLISH_PER_DAY } from './publicObject.js'
+import { expandHome } from './serveConfig.js'
 
 export interface Settings {
   stateDir: string
@@ -85,10 +87,12 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
                                                 with its waker (serve --help).
        cyberspace-mcp doctor                    Check what is missing, and how to fix it.
        cyberspace-mcp wake pause|resume|status  Pause or resume the waker.
-       cyberspace-mcp [stdio] --state <dir> [options]
+       cyberspace-mcp [stdio] [--state <dir>] [options]
                                                 The stdio MCP server, for a client that starts it itself.
 
-  --state <dir>                 The state directory (required): the key, the chain, the outbox.
+  --state <dir>                 The state directory: the key, the chain, the outbox. Default
+                                $CYBERSPACE_MCP_STATE, else ~/.cyberspace-mcp (where init puts it).
+                                A leading ~/ is your home directory, with or without a shell.
   --relay <url>                 A relay; repeatable. The first is the canonical relay. Default ${DEFAULT_RELAY}, then ${SECOND_RELAY}
   --operator <npub>             The human responsible for this agent, named in its profile.
   --name <name>                 The profile name.
@@ -168,7 +172,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     const a = argv[i]
     const next = (): string | undefined => argv[++i]
     switch (a) {
-      case '--state': out.state = next(); if (!out.state) throw new Error('--state needs a directory'); break
+      case '--state': out.state = next(); if (!out.state) throw new Error('--state needs a directory'); out.state = expandHome(out.state); break
       case '--relay': { const r = next(); if (!r) throw new Error('--relay needs a URL'); out.relays.push(r); break }
       case '--operator': out.operator = next(); if (!out.operator) throw new Error('--operator needs an npub'); break
       case '--name': out.name = next(); if (out.name === undefined) throw new Error('--name needs a value'); break
