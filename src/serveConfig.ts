@@ -26,11 +26,12 @@ export function defaultStateDir(env: NodeJS.ProcessEnv = process.env): string {
  * convenience a shell would add. MCP clients (Claude Desktop, OpenClaw)
  * start a stdio server with its arguments as written, without a shell, so
  * "--state ~/agent" would otherwise make a folder named ~ in whatever
- * directory the client started in. ~user is left as it is.
+ * directory the client started in. ~\ counts as ~/ (a Windows config).
+ * ~user is left as it is.
  */
 export function expandHome(path: string, home: string = homedir()): string {
   if (path === '~') return home
-  return path.startsWith('~/') ? join(home, path.slice(2)) : path
+  return path.startsWith('~/') || path.startsWith('~\\') ? join(home, path.slice(2)) : path
 }
 
 /** The URL a client connects to. */

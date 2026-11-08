@@ -10,7 +10,8 @@
 //
 // Nothing here changes what a tool does: a call without a progressToken
 // sends nothing, a notification that cannot be sent is dropped, and the
-// heartbeat stops when the call ends.
+// heartbeat stops when the call ends, however it ends (an answer, a throw),
+// or when the client cancels it.
 
 /** How often a long call says it is alive. Under every client timeout we know of. */
 export const HEARTBEAT_MS = 5_000
@@ -21,6 +22,8 @@ export type Progress = (phase: string) => Promise<void>
 /** The part of the SDK's RequestHandlerExtra this needs. */
 export interface ProgressExtra {
   _meta?: { progressToken?: string | number }
+  /** Aborts when the client cancels the call or goes away: the heartbeat stops then, even while the tool winds down. */
+  signal?: AbortSignal
   sendNotification: (notification: { method: 'notifications/progress'; params: { progressToken: string | number; progress: number; message?: string } }) => Promise<void>
 }
 
@@ -41,7 +44,7 @@ const idle: CallProgress = { report: async () => {}, stop: () => {} }
  */
 export function startProgress(tool: string, extra: ProgressExtra | undefined, intervalMs: number = HEARTBEAT_MS, now: () => number = () => performance.now()): CallProgress {
   const token = extra?._meta?.progressToken
-  if (!extra || token === undefined || token === null) return idle
+  if (!extra || token === undefined || token === null || extra.signal?.aborted) return idle
   const t0 = now()
   let last = 0
   let phase = 'working'
@@ -59,6 +62,12 @@ export function startProgress(tool: string, extra: ProgressExtra | undefined, in
   }
   const timer = setInterval(() => { void send() }, intervalMs)
   timer.unref?.()
+  const end = (): void => {
+    stopped = true
+    clearInterval(timer)
+    extra.signal?.removeEventListener('abort', end)
+  }
+  extra.signal?.addEventListener('abort', end, { once: true })
   return {
     report: async (next: string) => {
       if (stopped) return
@@ -68,9 +77,6 @@ export function startProgress(tool: string, extra: ProgressExtra | undefined, in
       // follows holds the thread, and nothing is written while it computes.
       await new Promise<void>((resolve) => setImmediate(resolve))
     },
-    stop: () => {
-      stopped = true
-      clearInterval(timer)
-    },
+    stop: end,
   }
 }
