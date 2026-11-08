@@ -25,10 +25,11 @@ function cli(home: string, argv: string[], env: Record<string, string> = {}): { 
 }
 
 describe('expandHome', () => {
-  it('reads a leading ~ or ~/ as the home directory and leaves everything else', () => {
+  it('reads a leading ~, ~/ or ~\\ as the home directory and leaves everything else', () => {
     expect(expandHome('~', '/home/a')).toBe('/home/a')
     expect(expandHome('~/agent', '/home/a')).toBe('/home/a/agent')
     expect(expandHome('~/x/y', '/home/a')).toBe('/home/a/x/y')
+    expect(expandHome('~\\agent', '/home/a')).toBe(join('/home/a', 'agent'))
     expect(expandHome('/abs/agent', '/home/a')).toBe('/abs/agent')
     expect(expandHome('rel/agent', '/home/a')).toBe('rel/agent')
     expect(expandHome('~bob/agent', '/home/a')).toBe('~bob/agent')

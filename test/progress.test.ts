@@ -89,6 +89,25 @@ describe('startProgress', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
+  it('stops when the call is cancelled, and starts nothing for a call already cancelled', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    const { extra, sent } = recorder('t')
+    const abort = new AbortController()
+    const p = startProgress('wait_for', { ...extra, signal: abort.signal })
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
+    expect(sent).toHaveLength(1)
+    abort.abort()
+    expect(vi.getTimerCount()).toBe(0)
+    await p.report('after the cancel')
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_MS * 2)
+    expect(sent).toHaveLength(1)
+    p.stop()
+    const late = startProgress('wait_for', { ...extra, signal: abort.signal })
+    await late.report('never sent')
+    expect(sent).toHaveLength(1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('never throws when a notification cannot be sent', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
     const { extra } = recorder('t', true)
@@ -122,6 +141,54 @@ describe('progress over MCP', () => {
     await vi.advanceTimersByTimeAsync(HEARTBEAT_MS * 2)
     expect(heard).toHaveLength(2)
     expect(vi.getTimerCount()).toBe(0)
+    await client.close()
+  })
+
+  it('a call that throws stops its heartbeat, and its answer is the error', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    let fail: () => void = () => {}
+    const stub = {
+      notices: () => null,
+      waitFor: () => new Promise((_, reject) => { fail = () => reject(new Error('the relay went away')) }),
+    } as unknown as Agent
+    const server = createServer(stub)
+    const [a, b] = InMemoryTransport.createLinkedPair()
+    await server.connect(a)
+    const client = new Client({ name: 'test', version: '0' })
+    await client.connect(b)
+    const heard: SdkProgress[] = []
+    const call = client.callTool({ name: 'wait_for', arguments: { timeout_seconds: 60 } }, undefined, { onprogress: (p) => heard.push(p) })
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_MS + 10)
+    expect(heard).toHaveLength(1)
+    fail()
+    const result = await call
+    expect(result.isError).toBe(true)
+    expect(JSON.stringify(result.content)).toContain('the relay went away')
+    expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_MS * 2)
+    expect(heard).toHaveLength(1)
+    await client.close()
+  })
+
+  it('a call the client cancels stops its heartbeat while the tool winds down', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    const stub = { notices: () => null, waitFor: () => new Promise(() => {}) } as unknown as Agent
+    const server = createServer(stub)
+    const [a, b] = InMemoryTransport.createLinkedPair()
+    await server.connect(a)
+    const client = new Client({ name: 'test', version: '0' })
+    await client.connect(b)
+    const heard: SdkProgress[] = []
+    const abort = new AbortController()
+    const call = client.callTool({ name: 'wait_for', arguments: { timeout_seconds: 60 } }, undefined, { signal: abort.signal, onprogress: (p) => heard.push(p) })
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_MS + 10)
+    expect(heard).toHaveLength(1)
+    abort.abort()
+    await expect(call).rejects.toThrow()
+    await vi.advanceTimersByTimeAsync(10)
+    expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_MS * 2)
+    expect(heard).toHaveLength(1)
     await client.close()
   })
 

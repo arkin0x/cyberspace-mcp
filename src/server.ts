@@ -96,6 +96,9 @@ function ruleTitles(guide: string): string[] | null {
   return titles.length > 0 ? titles : null
 }
 
+/** The instructions, read once when this module loads: serve makes a server per POST, and the guide does not change under a running server. */
+const INSTRUCTIONS = serverInstructions()
+
 const coordinate = z.union([
   z.string().describe('A 64-character lowercase hex coordinate (the 256-bit interleaved form).'),
   z.object({
@@ -215,7 +218,7 @@ export interface ServerHooks {
 }
 
 export function createServer(agent: Agent, log: (line: string) => void = () => {}, hooks: ServerHooks = {}): McpServer {
-  const server = new McpServer({ name: 'cyberspace-mcp', version: '0.0.1' }, { instructions: serverInstructions() })
+  const server = new McpServer({ name: 'cyberspace-mcp', version: '0.0.1' }, { instructions: INSTRUCTIONS })
   // Every tool call passes the gate first and its end is heard by onTool, wrapped once here rather than at each registration.
   if (hooks.onTool || hooks.gate) {
     const { onTool: heard, gate } = hooks
