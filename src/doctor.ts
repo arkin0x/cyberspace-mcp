@@ -18,6 +18,7 @@ import { parseArgs, readFileConfig, readWalletFile, settingsFrom } from './confi
 import { readToken } from './http.js'
 import { GENERAL_RELAYS, Relays, isRetiredRelay } from './nostr/relays.js'
 import { mergeAnswers } from './nostr/relayOutcome.js'
+import { MIN_NODE_MAJOR, nodeTooOld } from './nodeVersion.js'
 import { defaultStateDir, mcpUrl, serveSettingsFrom, splitServeArgs, type ServeFileConfig } from './serveConfig.js'
 import { PAUSE_FILE } from './waker.js'
 import { ForeignKeyError, StateDir } from './state/dir.js'
@@ -105,8 +106,7 @@ export async function runDoctor(argv: string[], deps: DoctorDeps): Promise<{ cod
     return { code: failed ? 1 : 0, checks }
   }
 
-  const major = Number(process.versions.node.split('.')[0])
-  add(major >= 22 ? { name: 'node', verdict: 'ok', detail: `v${process.versions.node}` } : { name: 'node', verdict: 'fail', detail: `v${process.versions.node}`, fix: 'install Node 22 or newer' })
+  add(nodeTooOld(process.versions.node) === null ? { name: 'node', verdict: 'ok', detail: `v${process.versions.node}` } : { name: 'node', verdict: 'fail', detail: `v${process.versions.node}`, fix: `install Node ${MIN_NODE_MAJOR} or newer` })
 
   // The state directory and the key.
   if (!existsSync(stateDir)) {
