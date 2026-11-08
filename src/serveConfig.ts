@@ -18,7 +18,19 @@ export const MCP_PATH = '/mcp'
 /** The state directory when none is named: $CYBERSPACE_MCP_STATE, else ~/.cyberspace-mcp. */
 export function defaultStateDir(env: NodeJS.ProcessEnv = process.env): string {
   const fromEnv = env.CYBERSPACE_MCP_STATE?.trim()
-  return fromEnv ? fromEnv : join(homedir(), '.cyberspace-mcp')
+  return fromEnv ? expandHome(fromEnv) : join(homedir(), '.cyberspace-mcp')
+}
+
+/**
+ * A path with a leading ~ or ~/ read as the home directory, the one
+ * convenience a shell would add. MCP clients (Claude Desktop, OpenClaw)
+ * start a stdio server with its arguments as written, without a shell, so
+ * "--state ~/agent" would otherwise make a folder named ~ in whatever
+ * directory the client started in. ~user is left as it is.
+ */
+export function expandHome(path: string, home: string = homedir()): string {
+  if (path === '~') return home
+  return path.startsWith('~/') ? join(home, path.slice(2)) : path
 }
 
 /** The URL a client connects to. */
@@ -158,7 +170,7 @@ export function splitCommand(line: string): string[] {
   }
   if (quote) throw new Error(`the command has an unclosed ${quote} quote`)
   if (has) out.push(cur)
-  return out.map((w) => (w.startsWith('~/') ? join(homedir(), w.slice(2)) : w))
+  return out.map((w) => expandHome(w))
 }
 
 /** A wake command as argv: from a string (split as above) or an array of strings. Throws a sentence when it is unusable. */
@@ -239,7 +251,7 @@ export function activityPathsOf(value: unknown): string[] {
   if (!Array.isArray(list) || !list.every((p) => typeof p === 'string' && p.trim() !== '')) {
     throw new Error('config.json wake.activityPaths must be a path or an array of paths')
   }
-  return (list as string[]).map((p) => (p.startsWith('~/') ? join(homedir(), p.slice(2)) : p))
+  return (list as string[]).map((p) => expandHome(p))
 }
 
 /** serve's settings: defaults, then config.json, then the flags. A wake command that is there and unusable stops serve with a sentence. */
