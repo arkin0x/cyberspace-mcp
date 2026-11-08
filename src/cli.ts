@@ -85,6 +85,9 @@ async function stdio(argv: string[]): Promise<void> {
   process.on('SIGINT', () => { void stop('SIGINT') })
   process.on('SIGTERM', () => { void stop('SIGTERM') })
   transport.onclose = () => { void stop('the client closed the connection') }
+  // A client that dies without closing leaves stdin at its end. Stop then, so no orphan keeps the state directory's lock.
+  process.stdin.once('end', () => { void stop('stdin ended: the client is gone') })
+  process.stdin.once('close', () => { void stop('stdin closed: the client is gone') })
   await server.connect(transport)
 }
 
