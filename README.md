@@ -24,7 +24,7 @@ And one fact that explains most of the rest: **one key, one mover.** Many things
 
 ## Install
 
-Requires Node 22.
+Requires Node 22 or newer (`node --version`). On an older Node the command stops with one line saying so, since npm only warns about the `engines` field at install.
 
 Without installing anything, `npx github:arkin0x/cyberspace-mcp <command>` runs any command (`init`, `serve`, `doctor`) from npm's cache, building it the first time.
 
