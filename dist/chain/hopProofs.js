@@ -1,0 +1,113 @@
+// hopProofs.ts: the hops of this agent's own chain, checked at Level 1.
+//
+// Version 2 of the hop proof (spec 5.9 to 5.13, chain rules
+// 2026-10-08-residue-openings) makes a hop cheap to check: one re-roll
+// attempt, 16 residues in word arithmetic and 16 short Merkle climbs, never
+// a Cantor root (about 15 ms at h20 on a desktop). So the server checks its
+// own chain with cyberspace-core's verifyHopLevel1 as a sanity check: on
+// load, and whenever the self-check adopts a chain from the relays. It
+// reports what it finds in the log and changes nothing: the chain reader
+// (events.ts) still decides where the identity stands.
+//
+// A hop with neither mn nor mp is a version 1 hop. One on the exemption
+// list (grandfathered-v1-hops.txt, as cyberspace-core embeds it) stands. One
+// that is not listed is reported and never treated as this agent's fault:
+// the censuses at the cutover list every audited version 1 hop (spec 5.13),
+// so an unlisted one is either newer than the embedded list or failed the
+// audit. Anything else that fails Level 1 is reported by the step that failed.
+import { hexToCoord, coordToXyz, isGrandfatheredV1Hop, verifyHopLevel1 } from 'cyberspace-core';
+import { buildChain } from './events.js';
+/** Level 1 of one hop event, from its own tags (spec 8.7.1). Empty means it holds. */
+export function hopEventProblems(ev) {
+    const tag = (name) => ev.tags.find((t) => t[0] === name)?.[1];
+    const c = tag('c');
+    const C = tag('C');
+    const previous = ev.tags.find((t) => t[0] === 'e' && t[3] === 'previous')?.[1];
+    if (!c || !C || !previous)
+        return ['form:links'];
+    const at = (hex) => coordToXyz(hexToCoord(hex));
+    return verifyHopLevel1({
+        from: at(c), to: at(C), previousEventIdHex: previous,
+        proof: tag('proof'), nonce: tag('mn'), openings: tag('mp'),
+        eventId: ev.id,
+    });
+}
+/** Whether a hop event carries neither mn nor mp: a version 1 hop (spec 5.13). */
+export function isVersion1Hop(ev) {
+    return !ev.tags.some((t) => t[0] === 'mn' || t[0] === 'mp');
+}
+/** By default a pass spends at most this long on proofs; the rest wait for the next pass. */
+export const HOP_CHECK_BUDGET_MS = 2_000;
+/**
+ * The checker, with a verdict per event id kept for the process: an event is
+ * immutable, so each hop is checked once however many passes see it.
+ */
+export class HopProofCheck {
+    pubkey;
+    verdicts = new Map();
+    constructor(pubkey) {
+        this.pubkey = pubkey;
+    }
+    /**
+     * Check the hops of the chain these events resolve to, newest first,
+     * yielding to the event loop between hops so the lock's heartbeat and the
+     * relays keep running. A pass stops after `budgetMs` of work.
+     */
+    async check(events, budgetMs = HOP_CHECK_BUDGET_MS) {
+        const byId = new Map(events.map((e) => [e.id, e]));
+        const hops = buildChain(events, this.pubkey).filter((a) => a.type === 'hop').reverse();
+        const t0 = performance.now();
+        let skipped = 0;
+        for (const action of hops) {
+            if (this.verdicts.has(action.id))
+                continue;
+            const ev = byId.get(action.id);
+            if (!ev)
+                continue;
+            if (isVersion1Hop(ev)) {
+                // A version 1 hop costs nothing to classify; the list decides.
+                this.verdicts.set(action.id, isGrandfatheredV1Hop(ev.id) ? { kind: 'listed' } : { kind: 'unlisted' });
+                continue;
+            }
+            if (performance.now() - t0 > budgetMs) {
+                skipped++;
+                continue;
+            }
+            const failed = hopEventProblems(ev);
+            this.verdicts.set(action.id, failed.length === 0 ? { kind: 'valid' } : { kind: 'failing', failed });
+            await new Promise((resolve) => setImmediate(resolve));
+        }
+        const report = { checked: 0, valid: 0, listed: 0, unlisted: [], failing: [], skipped };
+        for (const action of hops) {
+            const v = this.verdicts.get(action.id);
+            if (!v)
+                continue;
+            report.checked++;
+            if (v.kind === 'valid')
+                report.valid++;
+            else if (v.kind === 'listed')
+                report.listed++;
+            else if (v.kind === 'unlisted')
+                report.unlisted.push(action.id);
+            else
+                report.failing.push({ id: action.id, failed: v.failed });
+        }
+        return report;
+    }
+}
+/** The report as one log line, or null when there is no hop to speak of. */
+export function hopReportWords(r) {
+    if (r.checked === 0 && r.skipped === 0)
+        return null;
+    const parts = [`hop proofs (Level 1, spec 5.11): ${r.checked} hop(s) checked, ${r.valid} version 2 valid`];
+    if (r.listed)
+        parts.push(`${r.listed} version 1 on the exemption list`);
+    if (r.unlisted.length)
+        parts.push(`${r.unlisted.length} version 1 not on the list (newer than the embedded list, or it failed the audit; reported, not a stop): newest ${r.unlisted.slice(0, 3).map((id) => `${id.slice(0, 8)}...`).join(', ')}`);
+    if (r.failing.length)
+        parts.push(`${r.failing.length} FAILING: ${r.failing.slice(0, 3).map((f) => `${f.id.slice(0, 8)}... (${f.failed.join(', ')})`).join('; ')}`);
+    if (r.skipped)
+        parts.push(`${r.skipped} left for the next pass (time budget)`);
+    return parts.join('; ');
+}
+//# sourceMappingURL=hopProofs.js.map
