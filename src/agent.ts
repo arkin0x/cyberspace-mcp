@@ -51,7 +51,7 @@ import { unwrapMessage, wrapMessage, wrapReaction } from './nostr/dm.js'
 import { mergeAnswers } from './nostr/relayOutcome.js'
 import { DEFAULT_RELAY, GENERAL_RELAYS, Relays, isDefaultRelay, normalizeRelay, type PublishResult } from './nostr/relays.js'
 import { OperatorWatch, type OperatorMove } from './follow.js'
-import { ORDERS_POLL_MS, OperatorChannel } from './operator.js'
+import { ORDERS_POLL_MS, OperatorChannel, noOperatorWords } from './operator.js'
 import { Presence, neighborhoodFilter, sectorsApart, type Person } from './presence.js'
 import { ROAM_MAX_MINUTES, ROAM_MIN_MINUTES, Roam, roamCandidates, searchRoam } from './roam.js'
 import { profileTemplate, type ProfileFields, MAX_PICTURE_URL, pictureUrl, publishedFields } from './profile.js'
@@ -699,7 +699,7 @@ export class Agent {
       publish.status === 'unchanged' ? 'Profile: unchanged since it was last accepted; not republished.'
         : publish.status === 'published' ? `Profile published (bot: true${operator ? `, operator ${nip19.npubEncode(operator)}` : ''}) to ${publish.accepted.join(', ')}${Object.keys(publish.refused).length ? `; refused by ${Object.entries(publish.refused).map(([u, r]) => `${u} (${r})`).join(', ')}` : ''}.`
         : `Profile NOT published: ${publish.reason}${Object.keys(publish.refused).length ? `. Each relay said: ${Object.entries(publish.refused).map(([u, r]) => `${u}: ${r}`).join('; ')}` : ''}. The relay's words are verbatim; this server will not retry a refusal. Give the agent a relay of its own with --relay for its profile.`,
-      operator ? '' : 'No operator was given: pass --operator <npub> at startup or `operator` to this tool so the profile names your human.',
+      operator ? '' : 'No operator: you answer to whoever prompts you through your MCP client, and the operator tools (inbox, message_operator, follow_operator) refuse. A human who wants to give you orders by nostr DM is named with --operator <npub> at startup, or with `operator` to this tool.',
       this.nonDefaultCanonical ? `WARNING: the chain's truth is being read from ${this.relays.canonical}, not the default canonical relay ${DEFAULT_RELAY}. A spawn signed because this relay shows no chain could derezz a chain this identity has elsewhere.` : '',
       this.operatorChannel.strategyLine(),
     ].filter(Boolean).join('\n')
@@ -1230,7 +1230,7 @@ export class Agent {
     const problem = this.operatorProblem()
     if (problem) throw new Refusal(problem)
     const op = this.operatorOfProfile()
-    if (!op) throw new Refusal('Your profile names no operator, so there is nobody to follow. Call identity with operator (your human\'s npub), or have the server started with --operator.')
+    if (!op) throw new Refusal(noOperatorWords('follow'))
     // Any answer says why the server switched the watch off, so it is told once.
     this.follow.refresh()
     const off = this.follow.pendingOff()

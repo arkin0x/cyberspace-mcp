@@ -366,15 +366,24 @@ describe('operator DMs', () => {
     await stop(a)
   }, 60_000)
 
-  it('refuses when the profile names no operator', async () => {
+  it('without an operator: the operator tools refuse clearly, and the rest carries on', async () => {
     const w = world()
     const a = await Agent.start({
       stateDir: dirWithKey(generateSecretKey()), relays: [CANONICAL, MINE], capCallSeconds: 30, capSessionSeconds: 120, maxSidestepHeight: 24, allowRespawn: false,
       websocketImplementation: w.network.WebSocket, calibration: cal, relayMaxWaitMs: 1500, lookupRelays: [GENERAL],
     })
     running.push(a)
-    expect(await refusal(a.inbox())).toMatch(/names no operator/)
-    expect(await refusal(a.messageOperator({ text: 'x' }))).toMatch(/names no operator/)
+    expect(await refusal(a.inbox())).toMatch(/has no operator.*MCP client/)
+    expect(await refusal(a.messageOperator({ text: 'x' }))).toMatch(/has no operator/)
+    expect(await refusal(a.followOperator({ on: true }))).toMatch(/has no operator.*nobody to follow/)
+    expect(await refusal(a.ordersWaiting())).toMatch(/has no operator/)
+    // identity publishes the profile: bot, and no operator tag.
+    const id = await a.identity({})
+    expect(id.text).toContain('No operator')
+    expect(id.data.operator).toBeNull()
+    const profile = w.canonical.published.find((e) => e.kind === 0 && e.pubkey === a.pubkey)
+    expect(profile?.tags.some((t) => t[0] === 'p')).toBe(false)
+    expect(JSON.parse(profile!.content).bot).toBe(true)
     await stop(a)
   }, 30_000)
 })
