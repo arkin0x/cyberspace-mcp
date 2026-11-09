@@ -15,6 +15,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { findLcaHeight } from 'cyberspace-core'
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { fromPayload } from 'sno-core/shards'
 import { Agent } from '../src/agent.js'
@@ -24,9 +25,10 @@ import { AvatarSizes } from '../src/avatarSizes.js'
 import { hopTemplate, spawnTemplate } from '../src/chain/builder.js'
 import { bytesToHex, nowSeconds, signEvent, type NostrEvent } from '../src/nostr/event.js'
 import { validateSnoPayload } from '../src/sno.js'
-import type { Calibration } from '../src/space/calibration.js'
+import { hopCeiling, type Calibration } from '../src/space/calibration.js'
 import { distanceBetween, placeFromHex, placeOf, type Place } from '../src/space/coords.js'
 import { DEFAULT_AVATAR_RADIUS, avatarRadius, clearOf, nearestClear, spacingFor } from '../src/space/personalSpace.js'
+import { MAX_COMPUTE_HEIGHT } from '../src/space/regionKeys.js'
 import { KEY_GENERATED_BY, StateDir } from '../src/state/dir.js'
 import { FakeNetwork, type FakeRelay } from './fakeRelay.js'
 import { fakeHopProof } from './fakeHop.js'
@@ -192,12 +194,33 @@ class Walker {
   }
 }
 
+/**
+ * An agent key whose spawn leaves room for this file's routes: every target
+ * here is at most 110 gibsons east and 4 north of the spawn, and each must be
+ * one hop from where the agent stands, so plan_hop judges the target itself.
+ * With a random key the walk could cross a wall above the hop ceiling (h18
+ * with `cal`): the step then stops at the wall's leaf, short of the
+ * target, and that landing is judged instead. CI drew such a key
+ * (2026-11-09): north across an h19 wall, the step stopped 2 gibsons from
+ * the star, inside its box, and the clear target 4 north was refused for it.
+ * The rule for a landing short of the target is the product's, and right;
+ * it is just not what these tests are about.
+ */
+function roomyKey(): Uint8Array {
+  const ceiling = Math.min(MAX_COMPUTE_HEIGHT, hopCeiling(cal.cantorMsByHeight))
+  for (;;) {
+    const sk = generateSecretKey()
+    const p = placeFromHex(getPublicKey(sk)).position
+    if (findLcaHeight(p.x, p.x + 110n) <= ceiling && findLcaHeight(p.y, p.y + 4n) <= ceiling) return sk
+  }
+}
+
 const east = (p: Place, dx: bigint, dy = 0n): Place => placeOf({ x: p.position.x + dx, y: p.position.y + dy, z: p.position.z }, p.plane)
 const profile = (sk: Uint8Array, content: Record<string, unknown>): NostrEvent => finalizeEvent({ kind: 0, created_at: nowSeconds(), tags: [], content: JSON.stringify(content) }, sk) as NostrEvent
 
 describe('the agent near people, by their avatars', () => {
   const w = world()
-  const agentSk = generateSecretKey()
+  const agentSk = roomyKey()
   const home = placeFromHex(getPublicKey(agentSk))
   const bigSk = generateSecretKey()
   const big = new Walker(bigSk)
@@ -294,7 +317,7 @@ describe('following an operator with a large avatar', () => {
   const w = world()
   const opSk = generateSecretKey()
   const op = getPublicKey(opSk)
-  const agentSk = generateSecretKey()
+  const agentSk = roomyKey()
   const me = getPublicKey(agentSk)
   const home = placeFromHex(me)
   const operator = new Walker(opSk)
