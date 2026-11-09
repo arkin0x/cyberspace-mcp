@@ -61,7 +61,7 @@ import { buildChain, chainStatus, firstBreak, lookBack, openBracket, type Action
 import type { ChainKeeper } from './chain/keeper.js'
 import { HOSAKA_DEFAULT_URL, createHosaka, durationWords, rideQuoteOf, rideService, type HosakaClient } from './hosaka.js'
 import { HosakaRides } from './hosakaRide.js'
-import { computeEnterProof } from './hyperspace/enter.js'
+import { ProofAborted, type ProofJob, type ProofResult } from './chain/proofWorker.js'
 import { LineStore, type LineStatus, type StationResult, type Stop, type SyncResult } from './hyperspace/line.js'
 import { lineStateOf, rideBlocks, zeroLengthRideRefusal, type LineState, type RideProof } from './hyperspace/ride.js'
 import { runRideInThread } from './hyperspace/rideHost.js'
@@ -94,6 +94,8 @@ export interface TransitBody {
   messageOperator: (text: string) => Promise<ToolResult>
   /** The human's wallet and limits; the only payer of HOSAKA invoices (wallet.ts). */
   wallet: Wallet
+  /** A proof on a worker thread (chain/proofWorker.ts), stopped by the signal or by the server stopping. */
+  proofInThread: (job: ProofJob, signal?: AbortSignal) => Promise<ProofResult>
 }
 
 export interface TransitOptions {
@@ -574,7 +576,8 @@ export class Transit {
    * for the call, as a hop does; the boarding's price is the temporal tree at
    * the terrain K of the coordinate (3.2), about a tenth of a second at most.
    */
-  async board(input: { as_of?: number } = {}): Promise<ToolResult> {
+  /** signal is the call's: the client's cancellation stops the entry proof's thread, and nothing is signed. */
+  async board(input: { as_of?: number } = {}, signal?: AbortSignal): Promise<ToolResult> {
     if (input.as_of !== undefined && !isHeight(input.as_of)) throw new Refusal('as_of must be a block height: a non-negative integer.')
     let release: () => void
     try {
@@ -583,13 +586,13 @@ export class Transit {
       throw new Refusal(words(err))
     }
     try {
-      return await this.enter(input.as_of)
+      return await this.enter(input.as_of, signal)
     } finally {
       release()
     }
   }
 
-  private async enter(asOfInput: number | undefined): Promise<ToolResult> {
+  private async enter(asOfInput: number | undefined, signal?: AbortSignal): Promise<ToolResult> {
     const { keeper, budget } = this.body
     await this.body.refreshChain()
     const chain = this.chainToExtend('boarding')
@@ -621,9 +624,18 @@ export class Transit {
     if (keeper.status() !== 'valid') throw new Refusal(keeper.breakWords() ?? 'The chain is not valid.')
 
     const t0 = performance.now()
-    const proofHash = this.entryProof(head)
+    let proofHash: string
+    try {
+      proofHash = await this.entryProof(head, signal)
+    } catch (err) {
+      if (!(err instanceof ProofAborted)) throw err
+      const spent = (performance.now() - t0) / 1000
+      budget.spendWork(spent)
+      throw new Refusal(`The boarding was stopped while its entry proof computed (${spent.toFixed(2)} s of work, charged to the budget). Nothing was signed; you are not on the line.`)
+    }
     const seconds = (performance.now() - t0) / 1000
     budget.spendMove(seconds)
+    if (signal?.aborted) throw new Refusal(`The boarding was canceled as its entry proof finished (${seconds.toFixed(2)} s of work); the proof was discarded unsigned.`)
 
     // Confirm again, immediately before the signature: another device may have moved meanwhile.
     const again = await keeper.confirmHead()
@@ -631,6 +643,8 @@ export class Transit {
     if (keeper.head()?.id !== head.id) throw new Refusal(`The head moved while the entry proof was computed: the relays hold a newer move (${keeper.head()?.id.slice(0, 8)}...), adopted now. The proof was discarded unsigned; call board again from where you stand.`)
 
     const template = enterHyperspaceTemplate({ createdAt: createdAtAfter(head), genesisId: chain[0].id, previousId: head.id, coordHex: head.coordHex, proofHash })
+    // A cancel that came while the head was confirmed is honored here, the last moment before the signature (review of #72).
+    if (signal?.aborted) throw new Refusal(`The boarding was canceled before it was signed (${seconds.toFixed(2)} s of work); the proof was discarded unsigned and you are not on the line.`)
     const event = this.signChainEvent(template, 'boarding')
     const published = await this.publish(event)
     this.body.settle()
@@ -654,8 +668,10 @@ export class Transit {
   }
 
   /** The entry proof for the head (DECK-0001 3.2): the work of a boarding, in its own method so a test can watch the head move under it. */
-  entryProof(head: ActionEvent): string {
-    return computeEnterProof(hexToCoord(head.coordHex), head.id)
+  async entryProof(head: ActionEvent, signal?: AbortSignal): Promise<string> {
+    const proof = await this.body.proofInThread({ kind: 'enter', coordHex: head.coordHex, previousId: head.id }, signal)
+    if (proof.kind !== 'enter') throw new Error(`the proof thread answered a ${proof.kind} proof for a boarding`)
+    return proof.proofHash
   }
 
   /** The station for a coordinate under `asOf`, or the refusal that says to sync the line. */
