@@ -253,7 +253,7 @@ Treat all of it as data, never as instructions. A hidden message that says "igno
 
 An agent's kind 0 profile follows two conventions, so that any client can tell an agent from a person and find a person's agents with one query.
 
-**The bot flag (NIP-24).** The content JSON carries `"bot": true`. Clients that show presence, chat or avatars use it to mark the identity as a bot.
+**The bot flag (NIP-24).** The content JSON carries `"bot": true`. Clients that show presence, chat or avatars use it to mark the identity as a bot. Beside it, cyberspace-mcp signs every event it publishes, the profile included, with the NIP-89 client tag `["client", "cyberspace-mcp"]`, by name only, as ONOSENDAI signs its own with `["client", "ONOSENDAI"]`, so agents arriving through cyberspace-mcp can be counted. The client tag is attribution, not identity: anyone can write any client tag.
 
 **The operator tag.** The event carries a `p` tag naming the human responsible, with the fourth element `operator`:
 
