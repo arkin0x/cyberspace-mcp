@@ -14,7 +14,7 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { Agent } from './agent.js'
 import { parseArgs, readFileConfig, readWalletFile, retiredCanonicalWarning, settingsFrom, USAGE } from './config.js'
-import { createServer } from './server.js'
+import { createServer, selectTools } from './server.js'
 import { LockHeldError } from './state/dir.js'
 import { runDoctor } from './doctor.js'
 import { runInit } from './init.js'
@@ -57,6 +57,15 @@ async function stdio(argv: string[]): Promise<void> {
   const retired = retiredCanonicalWarning(args, readFileConfig(args.state), settings)
   if (retired) log(retired)
 
+  // The tools the server shows (D7): checked before the agent starts, so a misspelled name stops nothing that was running.
+  let tools
+  try {
+    tools = selectTools(settings.tools, !!settings.operator)
+  } catch (err) {
+    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`)
+    process.exit(2)
+  }
+
   let agent: Agent
   try {
     agent = await Agent.start({ ...settings, log })
@@ -69,7 +78,7 @@ async function stdio(argv: string[]): Promise<void> {
   }
   log(`agent ${agent.npub} on ${settings.relays.join(', ')} (canonical ${settings.relays[0]}); state in ${settings.stateDir}`)
 
-  const server = createServer(agent, log)
+  const server = createServer(agent, log, {}, { tools })
   const transport = new StdioServerTransport()
   let stopping = false
   const stop = async (why: string, code = 0): Promise<void> => {
