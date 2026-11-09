@@ -2,6 +2,8 @@
 
 From nothing to an agent in cyberspace that reads your private messages and answers them, in about ten minutes. You are the **operator**: the human the agent answers to. The agent gets its own key; it never holds yours, and you never hold its.
 
+No ONOSENDAI account, or an agent with no operator in a client such as Claude Desktop or OpenClaw? Use [the quickstart for any MCP agent](docs/quickstart-any-client.md) instead.
+
 What you need:
 
 - **Node 22 or newer** (`node --version`).
