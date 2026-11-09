@@ -4,7 +4,7 @@ A release is three files on a GitHub Release, built from a version tag:
 
 | File | What it is |
 |---|---|
-| `cyberspace-mcp-<version>.tar.gz` | The self-contained bundle: one folder, `cyberspace-mcp-<version>/`, with `dist/` built from `src/`, the production `node_modules` installed from the lockfile, `package.json`, the lockfile, README, QUICKSTART, LICENSE and `docs/agents.md`. |
+| `cyberspace-mcp-<version>.tar.gz` | The self-contained bundle: one folder, `cyberspace-mcp-<version>/`, with the committed `dist/` (checked against `src/`), the production `node_modules` installed from the lockfile, `package.json`, the lockfile, README, QUICKSTART, LICENSE and `docs/agents.md`. |
 | `cyberspace-mcp-<version>.tar.gz.sha256` | Its SHA-256, in `sha256sum` format. |
 | `cyberspace-mcp-<version>.tar.gz.sig.json` | The release key's BIP-340 signature over a manifest holding that hash (added by the key's holder after a local rebuild; see step 4). |
 
@@ -43,7 +43,7 @@ Point an MCP client at `node /absolute/path/to/cyberspace-mcp-<version>/dist/bin
    git push origin v<x.y.z>
    ```
 3. **The `release` workflow** (`.github/workflows/release.yml`) runs on the tag, in two jobs. **build** (a read-only token, not kept in `.git`) runs `npm ci`, typecheck, the tests and `check:dist`; then `scripts/release-bundle.mjs` builds the bundle, refusing a tag that is not `v` plus `package.json`'s version; then `scripts/smoke-bundle.mjs` checks it with no network (its sha256, no `typescript`, no symlinks, `--help`, an MCP initialize and tool list over stdio, and two worker entries loading). It uploads the tarball and the `.sha256` as a workflow artifact. **attach** (the only job that can write, and it runs no repository code) downloads the artifact and attaches both files to a **draft** release for the tag. A draft is visible only to the repository's writers, so nobody downloads a release before it is signed. If a release for the tag exists already, the files are added only if it is still a draft, and an existing file is never replaced (a replaced file would no longer match its signature).
-4. **Rebuild locally and sign**, on the machine that holds the release key (never in CI). The signer does not trust CI's build: in a clean checkout of the tag, after `npm ci`, it rebuilds the bundle with `scripts/release-bundle.mjs` and refuses to sign unless the local sha256 equals the draft's. The bundle is reproducible (the same commit gives the same bytes), so a mismatch means CI built something else. Then attach the `.sig.json` to the draft. The commands, the file format and how anyone verifies it are in [signing.md](signing.md). The rebuild needs GNU tar (Linux) and Node 22 with its bundled npm, as the workflow uses.
+4. **Rebuild locally and sign**, on the machine that holds the release key (never in CI). The signer does not trust CI's build: in a clean checkout of the tag, after `npm ci --ignore-scripts`, it rebuilds the bundle with `scripts/release-bundle.mjs` and refuses to sign unless the local sha256 equals the draft's. The bundle is reproducible (the same commit gives the same bytes), so a mismatch means CI built something else. Then attach the `.sig.json` to the draft. The commands, the file format and how anyone verifies it are in [signing.md](signing.md). The rebuild needs GNU tar (Linux) and Node 22 with its bundled npm, as the workflow uses.
 5. **Check the draft**: download it as a stranger would and run `verify-manifest.mjs release` on it.
 6. **Publish the draft** on GitHub (Releases, Edit, Publish release), or `gh release edit v<x.y.z> --draft=false`.
 7. **Re-pin the OpenClaw skill** (`skills/cyberspace/SKILL.md`): set the version and the bundle's sha256 in its install spec and its `openclaw mcp add` line, re-sign the skill's manifest, and open a PR.
@@ -52,7 +52,7 @@ Point an MCP client at `node /absolute/path/to/cyberspace-mcp-<version>/dist/bin
 
 `scripts/release-bundle.mjs [--tag vX.Y.Z] [--out release]` (run `npm ci` first, for `tsc`):
 
-- compiles `src/` with `tsconfig.build.json` into a fresh temporary folder (never the working tree's `dist/`), and marks `dist/bin.js` executable;
+- ships the committed `dist/` after checking it: it compiles `src/` into a scratch folder and refuses unless that gives the same files and every `.js` byte for byte. The committed `dist/` is shipped rather than the scratch build because its source maps name their sources relative to the repository (`../src/bin.ts`), while a compile into another folder writes that folder's path into every map, which would make CI's bundle and the key holder's rebuild differ. Then it marks `dist/bin.js` executable;
 - copies `package.json`, the lockfile and what `package.json`'s `files` lists;
 - runs `npm ci --omit=dev --omit=optional --ignore-scripts --no-bin-links` there (no `node_modules/.bin` symlinks, which Windows tar cannot unpack; the script refuses to pack any symlink). `--omit=optional` keeps out `typescript`, which the lockfile marks `devOptional` (a devDependency here and an optional peer of nostr-tools); the script refuses to run if the lockfile ever gains a genuine optional production dependency, which that flag would drop;
 - packs with GNU tar, entries sorted, mtimes set to the commit's time (`SOURCE_DATE_EPOCH`, else HEAD's commit time), owner 0:0, normalized modes, and `gzip -n`;

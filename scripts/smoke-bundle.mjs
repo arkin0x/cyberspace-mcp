@@ -56,7 +56,11 @@ if (links.length) fail(`symlinks in the bundle: ${links.slice(0, 5).join(', ')}$
 ok('no typescript, no symlinks')
 
 const bin = join(root, 'dist', 'bin.js')
-execFileSync(process.execPath, [bin, '--help'], { stdio: 'ignore' })
+try {
+  execFileSync(process.execPath, [bin, '--help'], { stdio: ['ignore', 'ignore', 'pipe'] })
+} catch (e) {
+  fail(`--help exited ${e.status ?? e.signal ?? e.message}${e.stderr?.length ? `: ${String(e.stderr).trim().split('\n').pop()}` : ''}`)
+}
 ok('--help')
 
 // The stdio server: initialize, then tools/list.
