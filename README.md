@@ -38,6 +38,8 @@ Neither builds anything: `dist/` is committed, the package has no `build` or `pr
 
 If `npm i -g` asks for root, set a prefix of your own first: `npm config set prefix ~/.npm-global` and add `~/.npm-global/bin` to your PATH.
 
+**For an exact, reproducible install, use a release bundle** ([docs/releasing.md](docs/releasing.md)): one tarball with every dependency installed from the lockfile, its sha256 and the release key's signature, needing only Node (no git, no npm, no network). A git install pins this package's commit but not its dependencies: npm installs a package from git without its lockfile, so the semver ranges in `package.json` resolve to whatever is newest that day.
+
 To work on it, use a clone:
 
 ```sh
