@@ -137,7 +137,7 @@ describe('serve', () => {
     await expect(connect(s.http.url, { authorization: 'Bearer wrong' })).rejects.toThrow()
     const c = await connect(s.http.url, { authorization: `Bearer ${token}` })
     // No operator configured: the starter set (D7).
-    expect((await c.listTools()).tools.length).toBe(10)
+    expect((await c.listTools()).tools.length).toBe(9)
     await c.close()
     // A page that rebinds a name to 127.0.0.1, and a page on another origin, are refused.
     const auth = { authorization: `Bearer ${token}` }

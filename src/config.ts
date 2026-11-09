@@ -121,7 +121,7 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
   --publish-max-per-day <n>     The most public objects publish_object may publish in any 24 hours.
                                 Default ${DEFAULTS.publishMaxPerDay}
   --tools <which>               The tools the server shows: starter (identity, whereami, look,
-                                plan_hop, hop, say, listen, find, budget, inbox), all, or a
+                                plan_hop, hop, say, listen, find, budget), all, or a
                                 comma-separated list (config.json "tools": "all", "starter" or a list).
                                 Default: starter, or all when an operator is configured.
   --machine-id <id>             This machine's id, which the state directory's lock records so a

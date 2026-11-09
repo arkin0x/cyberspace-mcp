@@ -8,7 +8,7 @@
 import { Agent } from './agent.js';
 import { parseArgs, readFileConfig, readWalletFile, retiredCanonicalWarning, settingsFrom } from './config.js';
 import { ensureToken, readToken, startHttp } from './http.js';
-import { createServer } from './server.js';
+import { createServer, selectTools } from './server.js';
 import { defaultStateDir, serveSettingsFrom, splitServeArgs } from './serveConfig.js';
 import { Waker } from './waker.js';
 /** Start serve from its argv (without the word serve). Throws a sentence on a bad flag; LockHeldError when the state directory is in use. */
@@ -26,6 +26,7 @@ export async function startServe(argv, deps) {
     const retired = retiredCanonicalWarning(args, file, settings);
     if (retired)
         log(retired);
+    const tools = selectTools(settings.tools, !!settings.operator);
     const agent = await Agent.start({ ...settings, log, ...deps.agent });
     let token = null;
     if (serveSettings.token) {
@@ -52,7 +53,7 @@ export async function startServe(argv, deps) {
                     onTool: (name, ok, args, data) => waker.noteTool(name, ok, args, data),
                     gate: (name, readOnly) => waker.gate(name, readOnly),
                 } : {}),
-            }),
+            }, { tools }),
         });
     }
     catch (err) {
