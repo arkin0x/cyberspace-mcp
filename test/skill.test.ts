@@ -15,7 +15,8 @@ const body = text.slice(text.indexOf('\n---\n', 4) + 5)
 const metadata = JSON.parse(/^metadata:\n([\s\S]*)$/m.exec(frontmatter)?.[1] ?? 'null') as {
   openclaw: { requires: { bins: string[] }; install: Record<string, unknown>[] }
 }
-const STARTER = ['identity', 'whereami', 'look', 'plan_hop', 'hop', 'say', 'listen', 'find', 'budget', 'inbox']
+// The starter set without inbox, which refuses without an operator (owner's decision, 2026-11-09).
+const STARTER = ['identity', 'whereami', 'look', 'plan_hop', 'hop', 'say', 'listen', 'find', 'budget']
 
 describe('skills/cyberspace/SKILL.md', () => {
   it('has the frontmatter OpenClaw reads', () => {
@@ -53,7 +54,13 @@ describe('skills/cyberspace/SKILL.md', () => {
 
   it('keeps spending tools out of the include list, and does not pass off --approval as a safeguard', () => {
     const include = /--include '([^']*)'/.exec(body)?.[1]?.split(',') ?? []
-    for (const t of ['ride', 'board', 'hide', 'place', 'publish_object', 'set_avatar']) expect(include).not.toContain(t)
+    const spending = ['ride', 'board', 'hide', 'place', 'publish_object', 'set_avatar', 'wallet', 'roam', 'visit', 'comment', 'seal_chest', 'forge_item', 'take', 'move_placed', 'remove_placed', 'constrain_placed', 'message_operator', 'log_travel']
+    for (const t of spending) {
+      expect(include).not.toContain(t)
+      expect(body, t).toContain(`\`${t}\``)
+    }
+    expect(include).not.toContain('inbox')
+    expect(body).toContain("deny them with OpenClaw's tool policy")
     expect(/openclaw mcp add cyberspace[^`]*/.exec(body)?.[0]).not.toContain('--approval')
     expect(body).toContain('`--approval` only sets the approval mode for OpenClaw\'s Codex harness')
   })

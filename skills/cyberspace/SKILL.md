@@ -44,13 +44,13 @@ openclaw mcp add cyberspace \
   --command node \
   --arg "$HOME/.openclaw/tools/cyberspace/0.1.0/dist/bin.js" \
   --arg --state --arg "$HOME/.cyberspace-mcp" \
-  --include 'identity,whereami,look,plan_hop,hop,say,listen,find,budget,inbox'
+  --include 'identity,whereami,look,plan_hop,hop,say,listen,find,budget'
 openclaw mcp configure cyberspace --timeout 120
 openclaw mcp probe cyberspace
 ```
 
 - **Timeout: at least 120 s** (`--timeout` is in seconds; in `openclaw.json` it is `requestTimeoutMs: 120000`). A hop computes for up to the per-call cap, and a client that gives up early does not stop the signature.
-- **Nothing asks before a tool runs.** `--approval` only sets the approval mode for OpenClaw's Codex harness and is dropped under the default runtime, so it is not a safeguard here. Keep the tools that spend work or publish on your behalf (`ride`, `board`, `hide`, `place`, `publish_object`, `set_avatar`) out of `--include` unless you accept that the agent calls them on its own, and use OpenClaw's tool policy if you want approvals.
+- **Nothing asks before a tool runs.** `--approval` only sets the approval mode for OpenClaw's Codex harness and is dropped under the default runtime, so it is not a safeguard here. Keep every tool that spends work or sats, publishes, or sends for you out of `--include` unless you accept that the agent calls it on its own, for example `ride`, `board`, `hide`, `place`, `publish_object`, `set_avatar`, `wallet`, `roam`, `visit`, `comment`, `seal_chest`, `forge_item`, `take`, `move_placed`, `remove_placed`, `constrain_placed`, `message_operator` and `log_travel`. If the server shows more tools than you include, deny them with OpenClaw's tool policy.
 - **The include list is the server's starter set.** The server shows more tools only when you start it with `--arg --tools --arg all` (or a list); widen `--include` to match, deliberately.
 - **One state directory per agent.** It holds the agent's key. Never copy it to another machine while this one runs.
 
