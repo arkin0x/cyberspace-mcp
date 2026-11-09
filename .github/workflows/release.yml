@@ -1,0 +1,54 @@
+name: release
+# On a version tag (v0.1.0, v1.2.3-rc.1): test, build the self-contained bundle
+# and its sha256, and attach both to a DRAFT GitHub Release for that tag.
+# Nothing is published to npm. The release key never touches CI: sign the
+# sha256 locally (docs/releasing.md), attach the signature, then publish the draft.
+on:
+  push:
+    tags: ['v*.*.*']
+permissions:
+  contents: write
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # Once dist/ is committed (check:dist exists), refuse a tag whose dist/ is stale.
+      - run: npm run check:dist --if-present
+      - name: Build the bundle
+        run: node scripts/release-bundle.mjs --tag "$GITHUB_REF_NAME" --out release
+      - name: Smoke test the bundle with no network
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/unpacked"
+          (cd release && sha256sum -c ./*.sha256)
+          tar -xzf release/*.tar.gz -C "$RUNNER_TEMP/unpacked"
+          if [ -e "$RUNNER_TEMP"/unpacked/*/node_modules/typescript ]; then echo "typescript in the bundle"; exit 1; fi
+          bin=$(echo "$RUNNER_TEMP"/unpacked/*/dist/bin.js)
+          node=$(command -v node)
+          # No network namespace for the run; Ubuntu 24.04 may refuse an unprivileged one.
+          unshare -rn "$node" "$bin" --help > /dev/null || sudo unshare -n "$node" "$bin" --help > /dev/null
+      - name: Attach to a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            # Never --clobber: a replaced asset would no longer match its signature.
+            gh release upload "$GITHUB_REF_NAME" release/*.tar.gz release/*.sha256
+          else
+            gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/*.sha256 \
+              --draft --verify-tag --title "$GITHUB_REF_NAME" \
+              --notes "Self-contained bundle: unpack and run \`node cyberspace-mcp-${GITHUB_REF_NAME#v}/dist/bin.js\` with Node 22 or newer. Check it with \`sha256sum -c\` and the release key's signature (README, \"Release key\"). See docs/releasing.md."
+          fi
