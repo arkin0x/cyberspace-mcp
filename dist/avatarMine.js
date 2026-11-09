@@ -10,6 +10,7 @@
 // hash, the main thread answers every other tool.
 import { createHash } from 'node:crypto';
 import { availableParallelism } from 'node:os';
+import { defaultThreads } from './budget.js';
 import { Worker, parentPort, workerData } from 'node:worker_threads';
 import { nonceTagged } from './avatar.js';
 const MARKER = 'CYBERSPACE-MCP-NONCE-MARKER-7f3a9c';
@@ -76,9 +77,9 @@ function threadMain(data, port) {
 if (parentPort && workerData?.avatarMine === true)
     threadMain(workerData, parentPort);
 // ---- the host --------------------------------------------------------------
-/** Threads per job: every core but one, at most four, so the server and a ride keep theirs. */
-export function avatarThreads() {
-    return Math.max(1, Math.min(4, availableParallelism() - 1));
+/** Threads per job: the human's --threads, else min(2, cores - 1) (D3, 2026-11-09), so the machine keeps its cores. */
+export function avatarThreads(threads) {
+    return threads ?? defaultThreads(availableParallelism());
 }
 function threadSpec() {
     const here = import.meta.url;
