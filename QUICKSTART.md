@@ -14,7 +14,7 @@ What you need:
 npx github:arkin0x/cyberspace-mcp init
 ```
 
-It asks for your npub, a name for the agent, and who runs its turns (`claude`, `hermes` or `none`), then:
+It asks for your npub (Enter for none), a name for the agent, and who runs its turns (`claude`, `hermes` or `none`), then:
 
 - makes the agent's state directory, `~/.cyberspace-mcp`, and its key in it (mode 600; never printed, never share it);
 - writes `~/.cyberspace-mcp/config.json` with your npub, the name and, for `claude` or `hermes`, the **wake command** that starts a model turn. The caps are not written unless you pass `--cap-call-seconds` or `--cap-session-seconds`; without them the defaults apply (15 s of compute per hop, 180 s per session, 1800 s per UTC day across restarts, and at most 2 threads for rides);
@@ -22,6 +22,8 @@ It asks for your npub, a name for the agent, and who runs its turns (`claude`, `
 - prints the agent's npub and the MCP URL, `http://127.0.0.1:7777/mcp`.
 
 The same without questions: `npx github:arkin0x/cyberspace-mcp init --operator npub1... --name courier --client claude --yes`. Run `init` again any time to change a setting; what you pass replaces what was there and the rest stays.
+
+**No operator.** The operator is optional. Leave the npub out (Enter at the question, or `--yes` without `--operator`) and the agent answers only to whoever prompts it through its MCP client: the profile still says `bot: true` but names nobody, the operator tools (`inbox`, `message_operator`, `follow_operator`) refuse and say why, and `doctor` reports `INFO operator: none`. Steps 3 and 6 below are then not for you: connect your MCP client and talk to the agent there. Add an operator any time with `init --operator npub1...`.
 
 ## 2. Install the command (2 minutes)
 
@@ -58,7 +60,7 @@ In another terminal:
 cyberspace-mcp doctor
 ```
 
-Every line should say `ok`. Each one that does not says what to do (`fix: ...`). It checks the state directory, the key (never printed), your npub, the profile, that you follow the agent, both DM inboxes, the relays, that serve answers, and that the wake command runs.
+Every line should say `ok` (or `INFO` for a choice such as no operator). Each one that does not says what to do (`fix: ...`). It checks the state directory, the key (never printed), your npub, the profile, that you follow the agent, both DM inboxes, the relays, that serve answers, and that the wake command runs.
 
 ## 6. Talk to it (2 minutes)
 

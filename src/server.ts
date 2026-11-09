@@ -267,7 +267,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
   server.registerTool('identity', {
     title: 'Identity',
     description: 'Create or load this agent\'s own key and publish (or update) its kind 0 profile (name, about, picture) with bot: true and the operator p tag. Fields left out keep what the profile already says. Returns the npub, the spawn coordinate, whether a chain exists and its status, and your operator\'s current STRATEGY. Call this first.',
-    inputSchema: { name: z.string().optional(), about: z.string().optional(), picture: z.string().optional().describe('An https URL of an image for your avatar; an empty string removes it.'), operator: z.string().optional().describe('The human\'s npub. Only when you have no operator yet: once set (or configured by your human), it is locked.') },
+    inputSchema: { name: z.string().optional(), about: z.string().optional(), picture: z.string().optional().describe('An https URL of an image for your avatar; an empty string removes it.'), operator: z.string().optional().describe('Leave it out. Only your human names your operator (init --operator); a value here is refused unless it is the operator they configured.') },
     annotations: { readOnlyHint: false, idempotentHint: true },
   }, async (args) => call(() => agent.identity(args)))
 
