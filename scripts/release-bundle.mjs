@@ -22,11 +22,12 @@
 
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const root = resolve(new URL('..', import.meta.url).pathname)
+const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 
 function arg(name) {
   const i = process.argv.indexOf(name)
@@ -96,7 +97,21 @@ chmodSync(join(stage, 'dist', 'bin.js'), 0o755)
 const lock = JSON.parse(readFileSync(join(root, 'package-lock.json'), 'utf8'))
 const prodOptional = Object.entries(lock.packages ?? {}).filter(([k, v]) => k && v.optional && !v.dev).map(([k]) => k)
 if (prodOptional.length) fail(`optional production dependencies would be left out: ${prodOptional.join(', ')}; revisit --omit=optional`)
-run('npm', ['ci', '--omit=dev', '--omit=optional', '--ignore-scripts', '--no-audit', '--no-fund', '--loglevel=error'], { cwd: stage })
+// `--no-bin-links`: no node_modules/.bin symlinks, which Windows tar cannot unpack.
+run('npm', ['ci', '--omit=dev', '--omit=optional', '--ignore-scripts', '--no-bin-links', '--no-audit', '--no-fund', '--loglevel=error'], { cwd: stage })
+
+// Nothing in the bundle may be a symlink.
+const links = []
+const walk = (d) => {
+  for (const name of readdirSync(d)) {
+    const p = join(d, name)
+    const st = lstatSync(p)
+    if (st.isSymbolicLink()) links.push(p.slice(stage.length + 1))
+    else if (st.isDirectory()) walk(p)
+  }
+}
+walk(stage)
+if (links.length) fail(`symlinks in the staged bundle: ${links.slice(0, 5).join(', ')}`)
 
 // 4. A reproducible tarball.
 run('tar', [
