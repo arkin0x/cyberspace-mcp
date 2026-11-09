@@ -14,6 +14,7 @@ import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS } from './wallet.js'
 import { DEFAULT_TRAVEL_PER_DAY, type TravelLogSettings } from './travel.js'
 import { DEFAULT_PUBLISH_PER_DAY } from './publicObject.js'
 import { expandHome } from './serveConfig.js'
+import { DEFAULT_CAP_CALL_SECONDS, DEFAULT_CAP_DAILY_SECONDS, DEFAULT_CAP_SESSION_SECONDS, defaultThreads } from './budget.js'
 
 export interface Settings {
   stateDir: string
@@ -23,6 +24,10 @@ export interface Settings {
   about?: string
   capCallSeconds: number
   capSessionSeconds: number
+  /** The most work of one UTC day, across restarts (D3, 2026-11-09). */
+  capDailySeconds: number
+  /** Worker threads for rides and avatars (D3, 2026-11-09). */
+  threads: number
   maxSidestepHeight: number
   allowRespawn: boolean
   /** The HOSAKA API a ride with prover "hosaka" is bought from. */
@@ -49,8 +54,9 @@ export interface Settings {
 
 const DEFAULTS = {
   relays: DEFAULT_RELAYS,
-  capCallSeconds: 60,
-  capSessionSeconds: 600,
+  capCallSeconds: DEFAULT_CAP_CALL_SECONDS,
+  capSessionSeconds: DEFAULT_CAP_SESSION_SECONDS,
+  capDailySeconds: DEFAULT_CAP_DAILY_SECONDS,
   maxSidestepHeight: 24,
   allowRespawn: false,
   hosakaUrl: HOSAKA_DEFAULT_URL,
@@ -68,6 +74,8 @@ export interface ParsedArgs {
   about?: string
   capCallSeconds?: number
   capSessionSeconds?: number
+  capDailySeconds?: number
+  threads?: number
   maxSidestepHeight?: number
   allowRespawn?: boolean
   hosakaUrl?: string
@@ -102,6 +110,9 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
   --about <text>                The profile text.
   --cap-call-seconds <n>        The most compute one hop may spend. Default ${DEFAULTS.capCallSeconds}
   --cap-session-seconds <n>     The most compute the session may spend. Default ${DEFAULTS.capSessionSeconds}
+  --cap-daily-seconds <n>       The most compute one UTC day may spend, counted across restarts in
+                                <state>/budget-daily.json. Default ${DEFAULTS.capDailySeconds}
+  --threads <n>                 Worker threads for rides and avatars. Default min(2, cores - 1): ${defaultThreads()} here
   --max-sidestep-height <h>     Sidesteps above this height are refused. Default ${DEFAULTS.maxSidestepHeight}
   --allow-respawn               Let hop sign a new spawn on a dead or frozen chain.
   --hosaka-url <url>            The HOSAKA API rides are bought from (ride with prover "hosaka";
@@ -132,7 +143,7 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
   --help                        This text.
 
 The same keys may live in <state>/config.json: relays, operator, name, about,
-capCallSeconds, capSessionSeconds, maxSidestepHeight, allowRespawn, hosakaUrl,
+capCallSeconds, capSessionSeconds, capDailySeconds, threads, maxSidestepHeight, allowRespawn, hosakaUrl,
 nwc, maxPaymentSats, maxDailySats, chatWakeMinutes, publishMaxPerDay, and travelLog: { "enabled": true,
 "maxPerDay": 6, "tagOperator": false }. The wallet string may also be the "nwc" key
 of <state>/wallet.json, which the server only reads.`
@@ -186,6 +197,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case '--about': out.about = next(); if (out.about === undefined) throw new Error('--about needs a value'); break
       case '--cap-call-seconds': out.capCallSeconds = num(a, next()); break
       case '--cap-session-seconds': out.capSessionSeconds = num(a, next()); break
+      case '--cap-daily-seconds': out.capDailySeconds = num(a, next()); break
+      case '--threads': out.threads = Math.max(1, Math.floor(num(a, next()))); break
       case '--max-sidestep-height': out.maxSidestepHeight = Math.floor(num(a, next())); break
       case '--allow-respawn': out.allowRespawn = true; break
       case '--hosaka-url': out.hosakaUrl = apiUrl(a, next()); break
@@ -213,6 +226,8 @@ interface FileConfig {
   about?: unknown
   capCallSeconds?: unknown
   capSessionSeconds?: unknown
+  capDailySeconds?: unknown
+  threads?: unknown
   maxSidestepHeight?: unknown
   allowRespawn?: unknown
   hosakaUrl?: unknown
@@ -287,6 +302,8 @@ export function settingsFrom(args: ParsedArgs, file: FileConfig, walletFile: Wal
     about: args.about ?? str(file.about),
     capCallSeconds: args.capCallSeconds ?? posNum(file.capCallSeconds) ?? DEFAULTS.capCallSeconds,
     capSessionSeconds: args.capSessionSeconds ?? posNum(file.capSessionSeconds) ?? DEFAULTS.capSessionSeconds,
+    capDailySeconds: args.capDailySeconds ?? posNum(file.capDailySeconds) ?? DEFAULTS.capDailySeconds,
+    threads: args.threads ?? (posNum(file.threads) !== undefined ? Math.max(1, Math.floor(posNum(file.threads)!)) : defaultThreads()),
     maxSidestepHeight: args.maxSidestepHeight ?? (posNum(file.maxSidestepHeight) !== undefined ? Math.floor(posNum(file.maxSidestepHeight)!) : DEFAULTS.maxSidestepHeight),
     allowRespawn: args.allowRespawn ?? (typeof file.allowRespawn === 'boolean' ? file.allowRespawn : DEFAULTS.allowRespawn),
     hosakaUrl: args.hosakaUrl ?? (str(file.hosakaUrl) !== undefined ? apiUrl('config.json hosakaUrl', str(file.hosakaUrl)) : DEFAULTS.hosakaUrl),

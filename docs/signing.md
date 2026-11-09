@@ -53,13 +53,13 @@ It prints `OK ... signed by npub1...` and exits 0, or prints one `FAIL` line per
 
 ## Signing (the release key's holder only)
 
-In a clone, after `npm ci` (the signer uses @noble/curves), on the machine that holds the key.
+In a clone, after `npm ci --ignore-scripts` (the signer uses @noble/curves; the machine that holds the key never runs dependency install scripts, and the rebuild needs none), on the machine that holds the key.
 
 **A release is never signed on CI's word.** The signer rebuilds the bundle itself and signs only when its own build hashes the same as CI's. The bundle is reproducible (docs/releasing.md), so a mismatch means CI built something other than the tag, and nothing is signed. For the rebuild the clone must be exactly at the tag, with no changes and no untracked files (an untracked file under a shipped folder would end up in the bundle), and it needs Linux with GNU tar and Node 22 with its bundled npm, as the workflow uses.
 
 ```sh
 # A release: the workflow put the tarball and its .sha256 on a draft release (docs/releasing.md).
-git fetch --tags && git checkout v0.1.0 && npm ci
+git fetch --tags && git checkout v0.1.0 && npm ci --ignore-scripts
 mkdir -p ~/release-v0.1.0 && cd ~/release-v0.1.0          # outside the clone, which must stay clean
 gh release download v0.1.0 -R arkin0x/cyberspace-mcp --pattern 'cyberspace-mcp-*'
 node <clone>/scripts/sign-manifest.mjs release cyberspace-mcp-0.1.0.tar.gz.sha256 --key <keyfile>
@@ -75,7 +75,7 @@ git add skills/cyberspace/SIGNATURE.json
 
 - The key file holds the secret as 64 hex characters and must be mode 600 (the signer refuses otherwise). The signer never prints it.
 - A release signature is never overwritten. A skill's `SIGNATURE.json` is replaced on each signing; git keeps the history.
-- For a release, the signer refuses unless: the clone (the one the script is in, or `--repo <clone>`) has the tag `v<version>` and stands exactly at it; `git status` shows nothing; `package.json` says that version; and its own run of `scripts/release-bundle.mjs --tag v<version>` hashes to the `.sha256`. It also checks the tarball against the `.sha256` when the tarball is beside it, and verifies its own output before it reports success.
+- For a release, the signer refuses unless: the clone (the one the script is in, or `--repo <clone>`) has the tag `v<version>` and stands exactly at it; `git status --untracked-files=all` shows nothing; `package.json` says that version; and its own run of `scripts/release-bundle.mjs --tag v<version>` hashes to the `.sha256`. It reads the key file only after that rebuild matched. It also checks the tarball against the `.sha256` when the tarball is beside it, and verifies its own output before it reports success.
 - `node scripts/sign-manifest.mjs keygen <keyfile>` makes a new key (mode 600, never overwriting a file) and prints its npub. Rotating the key means a new npub in the README and in `RELEASE_NPUB`, announced from the old key's holder.
 
 ## What a signature proves, and what it does not

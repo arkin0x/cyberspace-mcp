@@ -348,7 +348,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
   server.registerTool('identity', {
     title: 'Identity',
     description: 'Create or load this agent\'s own key and publish (or update) its kind 0 profile (name, about, picture) with bot: true and the operator p tag. Fields left out keep what the profile already says. Returns the npub, the spawn coordinate, whether a chain exists and its status, and your operator\'s current STRATEGY. Call this first.',
-    inputSchema: { name: z.string().optional(), about: z.string().optional(), picture: z.string().optional().describe('An https URL of an image for your avatar; an empty string removes it.'), operator: z.string().optional().describe('The human\'s npub. Only when you have no operator yet: once set (or configured by your human), it is locked.') },
+    inputSchema: { name: z.string().optional(), about: z.string().optional(), picture: z.string().optional().describe('An https URL of an image for your avatar; an empty string removes it.'), operator: z.string().optional().describe('Leave it out. Only your human names your operator (init --operator); a value here is refused unless it is the operator they configured.') },
     annotations: { readOnlyHint: false, idempotentHint: true },
   }, async (args) => call(() => agent.identity(args)))
 
@@ -376,7 +376,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     description: 'Move one step toward a target: confirms the live head, reserves it, computes the proof, confirms again, signs, publishes to the canonical relay and your relays, and records the result. On a fresh key with no chain it signs your spawn first. Refuses if the step exceeds the cap or the head moved, and never lands where your avatar would overlap a person\'s (the refusal names the clear coordinate just outside). A target beyond a wall is reached one step per call; the result says how far remains.',
     inputSchema: { target: coordinate, cap_seconds: z.number().positive().optional().describe('Your own cap on compute for this call, in seconds; the server\'s cap applies too.') },
     annotations: { readOnlyHint: false, destructiveHint: false },
-  }, async (args, extra) => call(() => agent.hop(args, progress(extra))))
+  }, async (args, extra) => call(() => agent.hop(args, progress(extra), extra.signal)))
 
   server.registerTool('station', {
     title: 'Station',
@@ -394,7 +394,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     description: 'Enter hyperspace where you stand (DECK-0001 3): confirms the live head, reserves it, computes the entry proof, confirms again, signs the enter-hyperspace, publishes and records it. You do not move. Refuses until the line is verified far enough to name your station (call station with sync: true), when you have no chain or an invalid one, when you are already on the line, and above the per-call cap. Returns the boarding\'s id and your station.',
     inputSchema: { as_of: z.number().int().min(0).optional().describe('Name the station under this block height instead of the newest verified block. Reporting only; the first ride declares its own as_of.') },
     annotations: { readOnlyHint: false, destructiveHint: false },
-  }, async (args) => call(() => agent.board(args)))
+  }, async (args, extra) => call(() => agent.board(args, extra.signal)))
 
   server.registerTool('ride', {
     title: 'Ride the line',

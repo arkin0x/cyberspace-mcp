@@ -1,9 +1,9 @@
 // init.ts: `cyberspace-mcp init`, the first run (arkinox, 2026-10-13). It
 // makes the state directory and the agent's key, writes config.json with the
-// operator, the name, the caps and the wake command, publishes the agent's
-// profile (bot: true, the operator named) so the operator's ONOSENDAI can
-// see it, and prints the MCP URL and the client configuration. Flags answer
-// every question; on a terminal it asks for what the flags left out. The
+// operator (optional, D2 2026-11-09), the name, the caps and the wake
+// command, publishes the agent's profile (bot: true, the operator named when
+// there is one) so the operator's ONOSENDAI can see it, and prints the MCP
+// URL and the client configuration. Flags answer every question; on a terminal it asks for what the flags left out. The
 // key is never printed: only the npub.
 
 import { accessSync, constants, existsSync, readFileSync, writeFileSync } from 'node:fs'
@@ -12,6 +12,7 @@ import { nip19 } from 'nostr-tools'
 import { Agent, type AgentConfig } from './agent.js'
 import { parsePubkey } from './chain/resolve.js'
 import { readFileConfig, readWalletFile, settingsFrom } from './config.js'
+import { DEFAULT_CAP_CALL_SECONDS, DEFAULT_CAP_DAILY_SECONDS, DEFAULT_CAP_SESSION_SECONDS } from './budget.js'
 import { ensureToken, TOKEN_FILE } from './http.js'
 import { DEFAULT_RELAY, SECOND_RELAY, isRetiredRelay } from './nostr/relays.js'
 import { DEFAULT_PORT, PROMPT_PLACEHOLDER, defaultStateDir, expandHome, mcpUrl } from './serveConfig.js'
@@ -23,11 +24,14 @@ export const INIT_USAGE = `cyberspace-mcp init: set up an agent, once.
 Usage: cyberspace-mcp init [options]
 
   --state <dir>              The state directory. Default $CYBERSPACE_MCP_STATE, else ~/.cyberspace-mcp
-  --operator <npub>          Your npub: the human this agent answers to (required).
+  --operator <npub>          Your npub: the human this agent answers to by nostr DM. Optional:
+                             without one the agent answers only to its MCP client.
   --name <name>              The agent's name in its profile.
   --about <text>             The agent's profile text.
-  --cap-call-seconds <n>     The most compute one hop may spend. Default 60
-  --cap-session-seconds <n>  The most compute a session may spend. Default 600
+  --cap-call-seconds <n>     The most compute one hop may spend. Default ${DEFAULT_CAP_CALL_SECONDS}
+  --cap-session-seconds <n>  The most compute a session may spend. Default ${DEFAULT_CAP_SESSION_SECONDS}
+  --cap-daily-seconds <n>    The most compute one UTC day may spend, across restarts. Default ${DEFAULT_CAP_DAILY_SECONDS}
+  --threads <n>              Worker threads for rides and avatars. Default min(2, cores - 1)
   --relay <url>              A relay; repeatable; the first is canonical. Default ${DEFAULT_RELAY}, ONOSENDAI's relay, then ${SECOND_RELAY}.
   --client <name>            Who runs the agent's turns: claude (Claude Code), hermes, or none. Default: claude
                              when it is installed, else hermes when it is, else none.
@@ -38,7 +42,7 @@ Usage: cyberspace-mcp init [options]
   --port <n>                 The port serve will listen on. Default ${DEFAULT_PORT}
   --token                    Require a bearer token on the MCP URL (made now, kept in <state>/${TOKEN_FILE}).
   --no-publish               Do not publish the profile now (identity publishes it later).
-  --yes                      Ask nothing; fail when --operator is missing.
+  --yes                      Ask nothing; no --operator means no operator.
   --help                     This text.
 
 Run it again to change a setting: what you pass replaces what config.json says, and the rest stays.`
@@ -50,6 +54,8 @@ interface InitArgs {
   about?: string
   capCallSeconds?: number
   capSessionSeconds?: number
+  capDailySeconds?: number
+  threads?: number
   relays: string[]
   client?: 'claude' | 'hermes' | 'none'
   hermesProfile?: string
@@ -85,6 +91,8 @@ function parseInitArgs(argv: string[]): InitArgs {
       case '--about': out.about = value(); break
       case '--cap-call-seconds': out.capCallSeconds = positive(); break
       case '--cap-session-seconds': out.capSessionSeconds = positive(); break
+      case '--cap-daily-seconds': out.capDailySeconds = positive(); break
+      case '--threads': out.threads = Math.max(1, Math.floor(positive())); break
       case '--relay': out.relays.push(value()); break
       case '--client': {
         const c = value()
@@ -182,19 +190,19 @@ export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
   const configPath = join(stateDir, 'config.json')
   const existing: Record<string, unknown> = existsSync(configPath) ? safeJson(readFileSync(configPath, 'utf8')) : {}
 
-  // The operator: the flag, else what config.json says, else the question.
+  // The operator, optional (D2, 2026-11-09): the flag, else what config.json
+  // says, else the question, which Enter skips. With none the agent answers
+  // only to its MCP client, and the operator tools say so.
   let operator = args.operator ?? (typeof existing.operator === 'string' ? existing.operator : undefined)
-  if (!operator && ask) operator = (await ask('Your npub (the operator this agent answers to): ')).trim()
-  if (!operator) {
-    print('init needs your npub: cyberspace-mcp init --operator npub1...')
-    return 2
+  if (!operator && ask) operator = (await ask('Your npub, if this agent should take orders from you by nostr DM (Enter for none): ')).trim() || undefined
+  if (operator) {
+    const opHex = parsePubkey(operator)
+    if (!opHex) {
+      print(`That is not an npub: ${JSON.stringify(operator)}. Pass your npub1... (your public key; never your nsec).`)
+      return 2
+    }
+    operator = nip19.npubEncode(opHex)
   }
-  const opHex = parsePubkey(operator)
-  if (!opHex) {
-    print(`That is not an npub: ${JSON.stringify(operator)}. Pass your npub1... (your public key; never your nsec).`)
-    return 2
-  }
-  operator = nip19.npubEncode(opHex)
   let name = args.name ?? (typeof existing.name === 'string' ? existing.name : undefined)
   if (!name && ask) name = (await ask('A name for your agent: ', 'agent')).trim() || 'agent'
 
@@ -220,11 +228,14 @@ export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
   const token = tokenOn ? ensureToken(stateDir).token : null
 
   // config.json: what was given replaces what was there; everything else stays.
-  const config: Record<string, unknown> = { ...existing, operator }
+  const config: Record<string, unknown> = { ...existing }
+  if (operator) config.operator = operator
   if (name) config.name = name
   if (args.about !== undefined) config.about = args.about
   if (args.capCallSeconds !== undefined) config.capCallSeconds = args.capCallSeconds
   if (args.capSessionSeconds !== undefined) config.capSessionSeconds = args.capSessionSeconds
+  if (args.capDailySeconds !== undefined) config.capDailySeconds = args.capDailySeconds
+  if (args.threads !== undefined) config.threads = args.threads
   const relays = args.relays.filter((r) => !isRetiredRelay(r))
   if (relays.length) config.relays = relays
   const serve: Record<string, unknown> = { ...(existing.serve && typeof existing.serve === 'object' ? existing.serve as Record<string, unknown> : {}) }
@@ -255,7 +266,7 @@ export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
   const npub = nip19.npubEncode(getPublicKey(sk))
   print(`Agent: ${npub}`)
   print(`State: ${stateDir} (the key is in ${join(stateDir, 'key')}; never share it, never copy it to another agent)`)
-  print(`Operator: ${operator}`)
+  print(operator ? `Operator: ${operator}` : 'Operator: none. The agent answers only to its MCP client; operator DMs are off (add one later with init --operator <npub>).')
 
   if (args.publish) await publishProfile(stateDir, deps, print)
 
@@ -283,11 +294,17 @@ export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
     print('')
   }
   print('Next:')
-  print(`  1. In ONOSENDAI, signed in as ${operator}, follow ${npub}. Orders count only from an operator who follows the agent.`)
-  print('  2. Your account needs a DM inbox (a kind 10050 relay list); doctor checks it.')
-  print('  3. cyberspace-mcp serve        (keep it running; see QUICKSTART.md for systemd and launchd)')
-  print('  4. cyberspace-mcp doctor       (says what is missing and how to fix it)')
-  print('  5. Send your agent a DM in ONOSENDAI. It reacts 👀 within 15 s and answers when its turn ends.')
+  if (operator) {
+    print(`  1. In ONOSENDAI, signed in as ${operator}, follow ${npub}. Orders count only from an operator who follows the agent.`)
+    print('  2. Your account needs a DM inbox (a kind 10050 relay list); doctor checks it.')
+    print('  3. cyberspace-mcp serve        (keep it running; see QUICKSTART.md for systemd and launchd)')
+    print('  4. cyberspace-mcp doctor       (says what is missing and how to fix it)')
+    print('  5. Send your agent a DM in ONOSENDAI. It reacts 👀 within 15 s and answers when its turn ends.')
+  } else {
+    print('  1. cyberspace-mcp doctor       (says what is missing and how to fix it)')
+    print('  2. Connect your MCP client (above), then ask the agent to call identity, look, plan_hop and hop.')
+    print('  3. Want to give it orders by nostr DM later? cyberspace-mcp init --operator <your npub>')
+  }
   return 0
 }
 

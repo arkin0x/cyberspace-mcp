@@ -70,7 +70,11 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -eu
-          (cd release && sha256sum -c ./*.sha256)
+          # Exactly the two files this tag's bundle is named, nothing a glob might also catch.
+          name="cyberspace-mcp-${GITHUB_REF_NAME#v}.tar.gz"
+          extra=$(find release -type f ! -name "$name" ! -name "$name.sha256")
+          if [ -n "$extra" ]; then echo "unexpected files in the artifact: $extra"; exit 1; fi
+          (cd release && sha256sum -c "$name.sha256")
           if draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2> /dev/null); then
             # Only ever add to a draft: a published release may already have been downloaded.
             if [ "$draft" != "true" ]; then
@@ -78,9 +82,9 @@ jobs:
               exit 1
             fi
             # Never --clobber: a replaced asset would no longer match its signature.
-            gh release upload "$GITHUB_REF_NAME" release/*.tar.gz release/*.sha256
+            gh release upload "$GITHUB_REF_NAME" "release/$name" "release/$name.sha256"
           else
-            gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/*.sha256 \
+            gh release create "$GITHUB_REF_NAME" "release/$name" "release/$name.sha256" \
               --draft --verify-tag --title "$GITHUB_REF_NAME" \
               --notes "Self-contained bundle: unpack and run \`node cyberspace-mcp-${GITHUB_REF_NAME#v}/dist/bin.js\` with Node 22 or newer. Check it with \`sha256sum -c\` and the release key's signature (README, \"Release key\"). See docs/releasing.md."
           fi

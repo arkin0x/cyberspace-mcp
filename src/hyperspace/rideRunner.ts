@@ -28,6 +28,7 @@
 
 import { availableParallelism } from 'node:os'
 import { Worker } from 'node:worker_threads'
+import { defaultThreads } from '../budget.js'
 import { bytesToHex, hexToBytes } from 'cyberspace-core'
 import { HEX_64 } from '../nostr/event.js'
 import type { Calibration } from '../space/calibration.js'
@@ -101,7 +102,7 @@ export interface RideRunOptions {
 }
 
 export interface RideRunnerOptions {
-  /** Worker threads for leaves and attempts; 0 runs everything on the calling thread. Default: the cores available less one, at least one. */
+  /** Worker threads for leaves and attempts; 0 runs everything on the calling thread. Default: min(2, cores - 1), at least one. */
   threads?: number
   chunkSize?: number
   grindChunk?: number
@@ -363,7 +364,7 @@ export class RideRunner {
   private readonly now: () => number
 
   private constructor(readonly cache: RideCache, options: RideRunnerOptions) {
-    this.threads = options.threads ?? Math.max(1, availableParallelism() - 1)
+    this.threads = options.threads ?? defaultThreads(availableParallelism())
     this.chunkSize = options.chunkSize ?? RIDE_CHUNK_SIZE
     this.grindChunk = options.grindChunk ?? GRIND_CHUNK
     this.now = options.now ?? (() => performance.now())
