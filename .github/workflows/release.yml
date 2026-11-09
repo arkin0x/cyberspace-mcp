@@ -1,0 +1,86 @@
+name: release
+# On a version tag (v0.1.0, v1.2.3-rc.1): test, build the self-contained bundle
+# and its sha256, and attach both to a DRAFT GitHub Release for that tag.
+# Nothing is published to npm. The release key never touches CI: the key's
+# holder rebuilds the bundle locally, signs it, attaches the signature and
+# publishes the draft (docs/releasing.md, docs/signing.md).
+#
+# Two jobs, so no token that can write is ever present while dependency code
+# runs: `build` (read-only token, not persisted in .git) installs, tests and
+# builds, and uploads the bundle as a workflow artifact; `attach` (contents:
+# write) runs no repository code at all, only downloads that artifact and
+# calls gh.
+on:
+  push:
+    tags: ['v*.*.*']
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # The committed dist/ must be what src/ builds to.
+      - run: npm run check:dist
+      # The bundle script refuses a tag that is not v<package.json version>.
+      - name: Build the bundle
+        run: node scripts/release-bundle.mjs --tag "$GITHUB_REF_NAME" --out release
+      - name: Smoke test the bundle with no network
+        run: |
+          set -eu
+          # Ubuntu 24.04 may refuse an unprivileged network namespace; fall back to sudo.
+          if unshare -rn true 2> /dev/null; then ns="unshare -rn"; else ns="sudo unshare -n"; fi
+          $ns "$(command -v node)" scripts/smoke-bundle.mjs release/cyberspace-mcp-*.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bundle
+          path: |
+            release/*.tar.gz
+            release/*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  attach:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: bundle
+          path: release
+      - name: Attach to a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          (cd release && sha256sum -c ./*.sha256)
+          if draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2> /dev/null); then
+            # Only ever add to a draft: a published release may already have been downloaded.
+            if [ "$draft" != "true" ]; then
+              echo "release $GITHUB_REF_NAME exists and is published; refusing to attach to it"
+              exit 1
+            fi
+            # Never --clobber: a replaced asset would no longer match its signature.
+            gh release upload "$GITHUB_REF_NAME" release/*.tar.gz release/*.sha256
+          else
+            gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/*.sha256 \
+              --draft --verify-tag --title "$GITHUB_REF_NAME" \
+              --notes "Self-contained bundle: unpack and run \`node cyberspace-mcp-${GITHUB_REF_NAME#v}/dist/bin.js\` with Node 22 or newer. Check it with \`sha256sum -c\` and the release key's signature (README, \"Release key\"). See docs/releasing.md."
+          fi
