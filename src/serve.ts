@@ -10,7 +10,7 @@ import { Agent, type AgentConfig } from './agent.js'
 import type { ChatLine } from './chat.js'
 import { parseArgs, readFileConfig, readWalletFile, retiredCanonicalWarning, settingsFrom } from './config.js'
 import { ensureToken, readToken, startHttp, type HttpHandle } from './http.js'
-import { createServer } from './server.js'
+import { createServer, selectTools } from './server.js'
 import { defaultStateDir, serveSettingsFrom, splitServeArgs, type ServeFileConfig, type ServeSettings } from './serveConfig.js'
 import { Waker, type WakeData, type WakerDeps } from './waker.js'
 
@@ -47,6 +47,7 @@ export async function startServe(argv: string[], deps: ServeDeps): Promise<Servi
   const retired = retiredCanonicalWarning(args, file, settings)
   if (retired) log(retired)
 
+  const tools = selectTools(settings.tools, !!settings.operator)
   const agent = await Agent.start({ ...settings, log, ...deps.agent })
   let token: string | null = null
   if (serveSettings.token) {
@@ -72,7 +73,7 @@ export async function startServe(argv: string[], deps: ServeDeps): Promise<Servi
           onTool: (name, ok, args, data) => waker!.noteTool(name, ok, args, data),
           gate: (name, readOnly) => waker!.gate(name, readOnly),
         } : {}),
-      }),
+      }, { tools }),
     })
   } catch (err) {
     await agent.stop()

@@ -14,18 +14,19 @@
 // an outbox event no relay has taken is sent only when the relays show the
 // chain is clear of it, and dropped when they show a fork.
 import { randomBytes } from 'node:crypto';
-import { computeHopProofV2, computeSidestepProof, encodeNonce, encodeOpenings } from 'cyberspace-core';
+import {} from 'cyberspace-core';
 import { nip19 } from 'nostr-tools';
 import { v2 as nip44 } from 'nostr-tools/nip44';
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import { normalizeURL } from 'nostr-tools/utils';
 import { toPayload } from 'sno-core/shards';
-import { Budget } from './budget.js';
+import { Budget, DAILY_BUDGET_FILE, DEFAULT_CAP_DAILY_SECONDS } from './budget.js';
 import { ACTION_KIND, chainTemplateProblem, hopTemplate, sidestepTemplate, spawnTemplate } from './chain/builder.js';
 import { findDivergence } from './chain/divergence.js';
 import { CHAIN_RULES_REVISION, buildChain, chainStatus, newestSpawn } from './chain/events.js';
 import { Holders } from './chain/holders.js';
 import { hopEventProblems, isVersion1Hop } from './chain/hopProofs.js';
+import { ProofAborted, proveInThread } from './chain/proofWorker.js';
 import { ChainKeeper } from './chain/keeper.js';
 import { askChainEvents, parsePubkey } from './chain/resolve.js';
 import { causeWords, decideSelfCheck } from './chain/selfCheck.js';
@@ -45,7 +46,7 @@ import { unwrapMessage, wrapMessage, wrapReaction } from './nostr/dm.js';
 import { mergeAnswers } from './nostr/relayOutcome.js';
 import { DEFAULT_RELAY, GENERAL_RELAYS, Relays, isDefaultRelay, normalizeRelay } from './nostr/relays.js';
 import { OperatorWatch } from './follow.js';
-import { ORDERS_POLL_MS, OperatorChannel } from './operator.js';
+import { ORDERS_POLL_MS, OperatorChannel, noOperatorWords } from './operator.js';
 import { Presence, neighborhoodFilter, sectorsApart } from './presence.js';
 import { ROAM_MAX_MINUTES, ROAM_MIN_MINUTES, Roam, roamCandidates, searchRoam } from './roam.js';
 import { profileTemplate, MAX_PICTURE_URL, pictureUrl, publishedFields } from './profile.js';
@@ -142,6 +143,8 @@ export class Agent {
     log;
     name;
     stopped = false;
+    /** Proofs computing on their threads (chain/proofWorker.ts), each stopped by stop(). */
+    proofs = new Set();
     /**
      * The objects opened this session (found, placed, or inside an opened
      * chest), the newest 64, by the handle find lists (render.ts objectHandle),
@@ -192,7 +195,11 @@ export class Agent {
             guard: (event) => this.guardChainEvent(event),
         });
         this.keys = new KeyStore(dir);
-        this.budget = new Budget(config.capCallSeconds, config.capSessionSeconds);
+        this.budget = new Budget(config.capCallSeconds, config.capSessionSeconds, {
+            capDailySeconds: config.capDailySeconds ?? DEFAULT_CAP_DAILY_SECONDS,
+            store: { read: () => dir.readJson(DAILY_BUDGET_FILE, null), write: (r) => dir.writeJson(DAILY_BUDGET_FILE, r) },
+            now: config.budgetClock,
+        });
         // The wallet talks to its own relays with the connection's own key; nothing of it reaches the agent's relays (wallet.ts, nwc.ts).
         this.wallet = new Wallet(dir, {
             nwc: config.nwc ?? null, source: config.nwcSource ?? 'the configuration', maxPaymentSats: config.maxPaymentSats ?? DEFAULT_MAX_PAYMENT_SATS, maxDailySats: config.maxDailySats ?? DEFAULT_MAX_DAILY_SATS,
@@ -200,11 +207,12 @@ export class Agent {
             beforePublish: () => held.assert('send a request to the wallet'),
         });
         this.transit = new Transit(dir, {
+            proofInThread: (job, signal) => this.proofInThread(job, signal),
             pubkey: this.pubkey, keeper: this.keeper, budget: this.budget, outbox: this.outbox, canonical: this.relays.canonical,
             calibration: () => this.calibration, sign: (t) => this.sign(t), settle: () => this.settle(), refreshChain: () => this.refreshChain(), log: this.log,
             // The operator channel is built below; these are called only from tool calls and the background, long after.
             undeliverable: () => this.operatorChannel.undeliverable(), messageOperator: (text) => this.operatorChannel.message(text), wallet: this.wallet,
-        }, { manifestUrl: config.manifestUrl, fetch: config.lineFetch, threads: config.rideThreads, now: config.rideClock, hosakaUrl: config.hosakaUrl, hosakaFetch: config.hosakaFetch, hosakaPollMs: config.hosakaPollMs, hosakaQuoteWaitMs: config.hosakaQuoteWaitMs });
+        }, { manifestUrl: config.manifestUrl, fetch: config.lineFetch, threads: config.rideThreads ?? config.threads, now: config.rideClock, hosakaUrl: config.hosakaUrl, hosakaFetch: config.hosakaFetch, hosakaPollMs: config.hosakaPollMs, hosakaQuoteWaitMs: config.hosakaQuoteWaitMs });
         this.chat = new Chat(dir, this.relays, this.keys, {
             pubkey: this.pubkey, name: () => this.name, sign: (t) => this.sign(t), log: this.log,
             // The same operator DMs answer to: the one the profile names, unless the human configured another.
@@ -237,7 +245,14 @@ export class Agent {
                 this.budget.renew();
                 this.log(`session budget renewed by the operator's CONTINUE (renewal ${this.budget.renewals})`);
                 const ride = this.transit.rideState();
-                return `Your operator's CONTINUE (KEEP GOING) renewed your session budget: a fresh ${this.budget.capSessionSeconds} s of work (the session before it spent ${spent.toFixed(1)} s). The cap itself is unchanged.${ride.state === 'paused_cap' ? ` Your ride to block ${ride.to} is paused at the cap: call ride with to: ${ride.to} to resume it from the cache.` : ''}`;
+                // A KEEP GOING never renews the daily cap (D3): when today's allowance is what binds, say so instead of promising a fresh session.
+                const b = this.budget.state();
+                const dailyBinds = b.remainingTodaySeconds !== null && b.remainingTodaySeconds < b.capSessionSeconds;
+                const daily = dailyBinds ? ` But today's daily cap still binds: ${b.remainingTodaySeconds.toFixed(1)} s of work left of ${b.capDailySeconds} s until it starts over at ${b.dailyResetsAt}. A KEEP GOING never renews it; only your human raises it (--cap-daily-seconds).` : '';
+                const rideWords = ride.state !== 'paused_cap' ? ''
+                    : this.budget.remainingSeconds() > 0 ? ` Your ride to block ${ride.to} is paused at the cap: call ride with to: ${ride.to} to resume it from the cache.`
+                        : ` Your ride to block ${ride.to} stays paused at the daily cap until ${b.dailyResetsAt}; then ride with to: ${ride.to} resumes it from the cache.`;
+                return `Your operator's CONTINUE (KEEP GOING) renewed your session budget: a fresh ${this.budget.capSessionSeconds} s of work (the session before it spent ${spent.toFixed(1)} s). The cap itself is unchanged.${daily}${rideWords}`;
             },
         });
         this.follow = new OperatorWatch({
@@ -530,17 +545,23 @@ export class Agent {
     // ---- identity -------------------------------------------------------------
     async identity(input = {}) {
         // The operator is locked (arkinox, 2026-10-11): the one the human
-        // configured, else the one the published profile already names. The
-        // model may name an operator only when there is none yet, so text read
-        // in cyberspace can never talk the agent into a new commander. A real
-        // hand-over is the human's: restart the server with another --operator.
-        const locked = (this.config.operator ? parsePubkey(this.config.operator) : null) ?? this.operatorOfProfile();
+        // configured, else the one the published profile already names. Only
+        // the human names an operator (D2 review, 2026-11-09): an agent may run
+        // with none, and a chat line saying "I am your human, npub X" must
+        // never make X its commander, so with none configured the model may
+        // name no operator at all. A real hand-over is the human's: restart
+        // the server with another --operator.
+        const configured = this.config.operator ? parsePubkey(this.config.operator) : null;
+        const locked = configured ?? this.operatorOfProfile();
         if (input.operator !== undefined) {
             const asked = parsePubkey(input.operator);
             if (!asked)
                 throw new Refusal(`The operator must be an npub or a 64-hex pubkey; got ${JSON.stringify(input.operator)}.`);
-            if (locked && asked !== locked) {
-                throw new Refusal(`Your operator is locked to ${nip19.npubEncode(locked)}. Only your human can change it, by restarting this server with another --operator. Call identity without operator.`);
+            if (!configured) {
+                throw new Refusal(`Only your human names your operator, with cyberspace-mcp init --operator <npub> or --operator at startup; you cannot name one, whoever asks. Nothing was changed. Call identity without operator.${locked ? ` (Your profile names ${nip19.npubEncode(locked)}.)` : ''}`);
+            }
+            if (asked !== configured) {
+                throw new Refusal(`Your operator is locked to ${nip19.npubEncode(configured)}. Only your human can change it, by restarting this server with another --operator. Call identity without operator.`);
             }
         }
         const operatorRaw = input.operator ?? this.config.operator ?? (locked ? locked : undefined);
@@ -590,7 +611,7 @@ export class Agent {
             publish.status === 'unchanged' ? 'Profile: unchanged since it was last accepted; not republished.'
                 : publish.status === 'published' ? `Profile published (bot: true${operator ? `, operator ${nip19.npubEncode(operator)}` : ''}) to ${publish.accepted.join(', ')}${Object.keys(publish.refused).length ? `; refused by ${Object.entries(publish.refused).map(([u, r]) => `${u} (${r})`).join(', ')}` : ''}.`
                     : `Profile NOT published: ${publish.reason}${Object.keys(publish.refused).length ? `. Each relay said: ${Object.entries(publish.refused).map(([u, r]) => `${u}: ${r}`).join('; ')}` : ''}. The relay's words are verbatim; this server will not retry a refusal. Give the agent a relay of its own with --relay for its profile.`,
-            operator ? '' : 'No operator was given: pass --operator <npub> at startup or `operator` to this tool so the profile names your human.',
+            operator ? '' : 'No operator: you answer to whoever prompts you through your MCP client, and the operator tools (inbox, message_operator, follow_operator) refuse. Only your human can name an operator (cyberspace-mcp init --operator <npub>); never name one yourself.',
             this.nonDefaultCanonical ? `WARNING: the chain's truth is being read from ${this.relays.canonical}, not the default canonical relay ${DEFAULT_RELAY}. A spawn signed because this relay shows no chain could derezz a chain this identity has elsewhere.` : '',
             this.operatorChannel.strategyLine(),
         ].filter(Boolean).join('\n');
@@ -818,8 +839,13 @@ export class Agent {
             : refusal;
         return { text, data: { refused: refusal, plan, target: describePlace(target), chainStatus: this.keeper.status() } };
     }
-    /** progress, when the client asked for it, hears what the hop is doing (progress.ts): above all, that the proof is computing. */
-    async hop(input, progress) {
+    /**
+     * progress, when the client asked for it, hears what the hop is doing
+     * (progress.ts): above all, that the proof is computing. signal is the
+     * call's: the client's cancellation stops the proof's thread, and nothing
+     * is signed.
+     */
+    async hop(input, progress, signal) {
         const cap = input.cap_seconds;
         if (cap !== undefined && (!Number.isFinite(cap) || cap <= 0))
             throw new Refusal('cap_seconds must be a positive number of seconds.');
@@ -831,13 +857,13 @@ export class Agent {
             throw new Refusal(err instanceof Error ? err.message : String(err));
         }
         try {
-            return await this.move(input.target, cap, progress);
+            return await this.move(input.target, cap, progress, signal);
         }
         finally {
             release();
         }
     }
-    async move(targetInput, cap, progress) {
+    async move(targetInput, cap, progress, signal) {
         await this.refreshChain();
         let status = this.keeper.status();
         let spawned = null;
@@ -887,12 +913,25 @@ export class Agent {
             throw new Refusal(this.keeper.breakWords() ?? 'The chain is not valid.');
         const chain = this.keeper.chain();
         const head = chain[chain.length - 1];
-        // The proof holds this thread: nothing can be sent until it is done, so say so first.
-        await progress?.(`computing the proof (a ${step.kind} of h${step.maxHeight}, about ${Math.max(1, Math.round(step.seconds))} s here); the server answers nothing else until it is done`);
+        // The proof runs on a thread of its own (chain/proofWorker.ts): this one keeps answering other tools and sending progress.
+        await progress?.(`computing the proof (a ${step.kind} of h${step.maxHeight}, about ${Math.max(1, Math.round(step.seconds))} s here); other tools keep answering meanwhile`);
         const t0 = performance.now();
-        const template = this.prove(step, head, chain[0].id);
+        let template;
+        try {
+            template = await this.prove(step, head, chain[0].id, signal);
+        }
+        catch (err) {
+            if (!(err instanceof ProofAborted))
+                throw err;
+            // The work done is spent all the same; nothing was signed.
+            const spent = (performance.now() - t0) / 1000;
+            this.budget.spendWork(spent);
+            throw new Refusal(`The hop was stopped while its proof computed (${spent.toFixed(1)} s of work, charged to the budget). Nothing was signed and you stand where you stood.${spawned ? ' Your spawn was signed and stands.' : ''}`);
+        }
         const seconds = (performance.now() - t0) / 1000;
         this.budget.spendMove(seconds);
+        if (signal?.aborted)
+            throw new Refusal(`The hop was canceled as its proof finished (${seconds.toFixed(1)} s of work); the proof was discarded unsigned.${spawned ? ' Your spawn was signed and stands.' : ''}`);
         await progress?.(`proof done in ${seconds.toFixed(1)} s; confirming the head, then signing and publishing`);
         // Confirm again, immediately before the signature: the machine was busy, and another device may have moved.
         const again = await this.keeper.confirmHead();
@@ -907,6 +946,9 @@ export class Agent {
         const problem = chainTemplateProblem(template, this.pubkey);
         if (problem)
             throw new Error(`refusing to sign a malformed chain event: ${problem}`);
+        // A cancel that came while the head was confirmed is honored here, the last moment before the signature (review of #72).
+        if (signal?.aborted)
+            throw new Refusal(`The hop was canceled before it was signed (${seconds.toFixed(1)} s of work); the proof was discarded unsigned and you stand where you stood.${spawned ? ' Your spawn was signed and stands.' : ''}`);
         const event = this.sign(template);
         // Level 1 of the hop as signed, with its own id (spec 5.11): milliseconds, and a hop that fails it is never recorded or sent.
         if (step.kind === 'hop') {
@@ -922,8 +964,11 @@ export class Agent {
     }
     /**
      * The proof of one step, as the template it goes out as: the hop proof or
-     * the sidestep proof from cyberspace-core, bound to the head's id. The
-     * caller confirms the head before and after, because this is the work.
+     * the sidestep proof from cyberspace-core, bound to the head's id,
+     * computed on a worker thread (chain/proofWorker.ts) that the signal, or
+     * the server stopping, terminates. The caller confirms the head before and
+     * after, because this is the work; the template is built here, on this
+     * thread, once the values are back.
      *
      * A hop is version 2 (spec 5.9, 5.10, 5.13): computeHopProofV2 builds the
      * trees as version 1 did and seals the residues of hop_n without building
@@ -932,22 +977,42 @@ export class Agent {
      * Only the three tags it returns go into the hop; no version 1 proof_hash
      * is computed or signed.
      */
-    prove(step, head, genesisId) {
+    async prove(step, head, genesisId, signal) {
         const to = step.to;
-        if (step.kind === 'hop') {
-            const proof = computeHopProofV2(head.position.x, head.position.y, head.position.z, to.position.x, to.position.y, to.position.z, to.plane, head.id, { maxComputeHeight: this.ceilings().hop });
+        const from = [head.position.x, head.position.y, head.position.z].map(String);
+        const target = [to.position.x, to.position.y, to.position.z].map(String);
+        const proof = await this.proofInThread(step.kind === 'hop'
+            ? { kind: 'hop', from, to: target, plane: to.plane, previousId: head.id, maxComputeHeight: this.ceilings().hop }
+            : { kind: 'sidestep', from, to: target, plane: to.plane, previousId: head.id }, signal);
+        if (proof.kind === 'hop') {
             return hopTemplate({
                 createdAt: nowSeconds(), genesisId, previousId: head.id, prevCoordHex: head.coordHex, to: to.position, plane: to.plane,
-                seal: proof.tags.proof, mnHex: proof.tags.mn, mpHex: proof.tags.mp,
+                seal: proof.seal, mnHex: proof.mnHex, mpHex: proof.mpHex,
             });
         }
-        const proof = computeSidestepProof(head.position.x, head.position.y, head.position.z, to.position.x, to.position.y, to.position.z, to.plane, head.id);
+        if (proof.kind !== 'sidestep')
+            throw new Error(`the proof thread answered a ${proof.kind} proof for a ${step.kind}`);
         return sidestepTemplate({
             createdAt: nowSeconds(), genesisId, previousId: head.id, prevCoordHex: head.coordHex, to: to.position, plane: to.plane, proofHash: proof.proofHash,
-            merkleRoots: [bytesToHex(proof.merkleX), bytesToHex(proof.merkleY), bytesToHex(proof.merkleZ)],
-            openings: [encodeOpenings(proof.openings.x), encodeOpenings(proof.openings.y), encodeOpenings(proof.openings.z)],
-            mnHex: encodeNonce(proof.nonce), lcaHeights: proof.lcaHeights,
+            merkleRoots: proof.merkleRoots, openings: proof.openings, mnHex: proof.mnHex, lcaHeights: proof.lcaHeights,
         });
+    }
+    /** A proof on its own thread, stopped by the call's signal or by the server stopping (stop() aborts every one in flight). */
+    async proofInThread(job, signal) {
+        const controller = new AbortController();
+        const forward = () => controller.abort();
+        // A server stopping between the price and the proof starts no thread.
+        if (signal?.aborted || this.stopped)
+            controller.abort();
+        signal?.addEventListener('abort', forward, { once: true });
+        this.proofs.add(controller);
+        try {
+            return await proveInThread(job, controller.signal);
+        }
+        finally {
+            this.proofs.delete(controller);
+            signal?.removeEventListener('abort', forward);
+        }
     }
     /** Sign and publish a spawn (spec 8.3). Exempt from head confirmation: a spawn is never a link. */
     async spawn() {
@@ -993,8 +1058,8 @@ export class Agent {
         return this.transit.station(input);
     }
     /** Board the line where the agent stands: the entry proof, signed and published as an enter-hyperspace (DECK-0001 3). */
-    board(input = {}) {
-        return this.transit.board(input);
+    board(input = {}, signal) {
+        return this.transit.board(input, signal);
     }
     /** Ride the line to a block: the work runs in the background, and the ride call after the proof is ready signs the hyperjump (DECK-0001 5). */
     async ride(input = {}, signal) {
@@ -1118,7 +1183,7 @@ export class Agent {
             throw new Refusal(problem);
         const op = this.operatorOfProfile();
         if (!op)
-            throw new Refusal('Your profile names no operator, so there is nobody to follow. Call identity with operator (your human\'s npub), or have the server started with --operator.');
+            throw new Refusal(noOperatorWords('follow'));
         // Any answer says why the server switched the watch off, so it is told once.
         this.follow.refresh();
         const off = this.follow.pendingOff();
@@ -2368,12 +2433,12 @@ export class Agent {
         if (shard) {
             const payload = JSON.parse(template.content);
             const { bits, eventBytes } = avatarPrice(payload, template, this.pubkey);
-            const threads = this.config.avatarThreads ?? avatarThreads();
+            const threads = this.config.avatarThreads ?? avatarThreads(this.config.threads);
             const estimate = avatarSeconds(bits, eventBytes, this.calibration.sha256PerSec, threads);
             const over = this.budget.refusal(estimate);
             if (over)
                 throw new Refusal(`This avatar owes ${bits} bits of work (spec 8.10: reach and detail), about ${estimate.toFixed(1)} s expected on ${threads} thread(s). ${over} A smaller shape (nearer the build origin, fewer vertices and faces) costs less.`);
-            const limit = Math.min(this.budget.capCallSeconds, this.budget.capSessionSeconds - this.budget.spentSeconds);
+            const limit = Math.min(this.budget.capCallSeconds, this.budget.remainingSeconds());
             this.avatarBusy = true;
             let outcome;
             try {
@@ -2519,7 +2584,7 @@ export class Agent {
     budgetState() {
         const b = this.budget.state();
         return {
-            text: `Work: ${b.remainingSessionSeconds.toFixed(1)} s left of ${b.capSessionSeconds} s this session, at most ${b.capCallSeconds} s per call; ${b.spentSeconds.toFixed(1)} s spent over ${b.moves} move(s) and the keys derived above h${SCAN_MAX_HEIGHT}. Chat: ${b.chatLinesSaid} line(s) said, ${this.chat.unpromptedAllowance} unprompted line(s) allowed before the next arrival, one line per 5 s, 500 characters. Sidestep cap h${this.config.maxSidestepHeight}; hop ceiling h${this.ceilings().hop} on this machine.`,
+            text: `Work: ${b.remainingSessionSeconds.toFixed(1)} s left of ${b.capSessionSeconds} s this session, at most ${b.capCallSeconds} s per call; ${b.spentSeconds.toFixed(1)} s spent over ${b.moves} move(s) and the keys derived above h${SCAN_MAX_HEIGHT}.${b.capDailySeconds !== null ? ` Today (UTC, across restarts): ${b.spentTodaySeconds.toFixed(1)} s spent, ${b.remainingTodaySeconds.toFixed(1)} s left of the ${b.capDailySeconds} s daily cap, which starts over at ${b.dailyResetsAt}.` : ''} Chat: ${b.chatLinesSaid} line(s) said, ${this.chat.unpromptedAllowance} unprompted line(s) allowed before the next arrival, one line per 5 s, 500 characters. Sidestep cap h${this.config.maxSidestepHeight}; hop ceiling h${this.ceilings().hop} on this machine.`,
             data: { ...b, unpromptedAllowance: this.chat.unpromptedAllowance, ceilings: this.ceilings(), maxSidestepHeight: this.config.maxSidestepHeight },
         };
     }
@@ -2629,6 +2694,9 @@ export class Agent {
         if (this.stopped)
             return;
         this.stopped = true;
+        // A proof computing on its thread is stopped; the move it was for is refused, nothing signed.
+        for (const p of this.proofs)
+            p.abort();
         // A ride computing in the background ends first, its finished leaves flushed to disk (arkinox, 2026-10-11).
         await this.transit.stop();
         // A 👀 already on its way gets a moment to land (arkinox, 2026-10-12). Only when one is: from here to the close nothing yields, so no subscription opens on a closing socket.

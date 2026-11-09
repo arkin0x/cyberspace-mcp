@@ -66,6 +66,8 @@ function fakeClock(): { now: () => number; stepPerRead: number } {
   return clock
 }
 const clock = fakeClock()
+/** The daily cap's clock: a test moves it past UTC midnight. */
+let budgetNow = Date.parse('2026-11-09T12:00:00Z')
 
 /** A state directory whose key the test generated, written the way the server writes its own. */
 function dirWithKey(sk: Uint8Array): string {
@@ -83,6 +85,7 @@ async function startAgent(stateDir: string): Promise<Agent> {
     stateDir, relays: [CANONICAL, MINE], capCallSeconds: 30, capSessionSeconds: 120, maxSidestepHeight: 24, allowRespawn: false,
     websocketImplementation: network.WebSocket, calibration: cal, relayMaxWaitMs: 1500,
     manifestUrl: MANIFEST_URL, lineFetch: fakeFetch(served), rideThreads: 0, rideClock: clock.now,
+    capDailySeconds: 1800, budgetClock: () => budgetNow,
   })
   agents.push(agent)
   return agent
@@ -343,6 +346,44 @@ describe('the hyperspace tools, on a fresh key over the fixture line', () => {
     expect(parseAction(published(done.data.eventId))?.previousId).toBe(prev.id)
   }, 120_000)
 
+  it('at the daily cap (D3) the ride pauses and says so; a KEEP GOING does not lift it; the next UTC day the ride call resumes it from the cache', async () => {
+    const prev = a.keeper.head()!
+    const from = prev.toHeight!
+    const dest = from === S ? S + RIDE_LENGTH : S
+    // Back down the cheap stretch from where the session-cap ride left the agent.
+    // Eight seconds left today, a fresh session: the day binds, not the session.
+    a.budget.spendWork(a.budget.capDailySeconds! - a.budget.state().spentTodaySeconds - 8)
+    a.budget.renew()
+    expect(a.budget.remainingSeconds()).toBeCloseTo(8)
+    clock.stepPerRead = 1000
+    const first = await a.ride({ to: dest })
+    expect(first.data.state).toBe('computing')
+    await until(() => a.transit.rideState().state === 'paused_cap')
+    clock.stepPerRead = 0
+    const paused = a.transit.rideState()
+    expect(a.budget.state().remainingTodaySeconds).toBe(0)
+    expect(a.rideStatus().text).toMatch(/paused at the daily cap: today's work .* has reached its 1800 s/)
+    expect(a.rideStatus().text).toContain('--cap-daily-seconds')
+    // A quote now names the daily cap that binds, not the session's.
+    const quote = await a.station({ destination: dest })
+    expect((quote.data.quote as { fitsSession: boolean }).fitsSession).toBe(false)
+    expect(quote.text).toMatch(/ABOVE today's daily cap \(0\.0 s left of 1800 s/)
+    // The operator's KEEP GOING renews the session and says plainly that the day still binds.
+    const renewed = (a.operatorChannel as unknown as { deps: { renew: () => string } }).deps.renew()
+    expect(renewed).toMatch(/today's daily cap still binds: 0\.0 s of work left of 1800 s/)
+    expect(renewed).toMatch(/stays paused at the daily cap until 2026-11-10T00:00:00\.000Z/)
+    await expect(a.ride({ to: dest })).rejects.toThrow(/paused at the daily cap/)
+    expect(a.transit.rideState()).toMatchObject({ state: 'paused_cap', done: paused.done })
+    // A new UTC day: the allowance starts over and the ride resumes where it stopped.
+    budgetNow = Date.parse('2026-11-10T00:00:05Z')
+    const resumed = await a.ride({ to: dest })
+    expect(resumed.text).toContain('Resumed from the session-cap pause')
+    await until(() => a.transit.rideState().state === 'ready')
+    const done = await a.ride({ to: dest })
+    expect(done.data.action).toBe('hyperjump')
+    expect(parseAction(published(done.data.eventId))?.previousId).toBe(prev.id)
+  }, 120_000)
+
   it('pause stops the work and keeps the head and every leaf; cancel releases the head and keeps the cache; forget drops the cache too; nothing is signed', async () => {
     const to = S + 2
     const prev = a.keeper.head()!
@@ -402,6 +443,29 @@ describe('the hyperspace tools, on a fresh key over the fixture line', () => {
       expect(canonical.all().some((e) => e.pubkey === a.pubkey && tagValue(e, 'A') === 'enter-hyperspace' && e.tags.some((t) => t[0] === 'e' && t[3] === 'previous' && t[1] === left.id))).toBe(false)
     } finally {
       spy.mockRestore()
+    }
+    // A cancel that arrives while the head is confirmed again, after the entry proof, is honored before signing (review of #72).
+    const controller = new AbortController()
+    const confirm = a.keeper.confirmHead.bind(a.keeper)
+    const prove = a.proofInThread.bind(a)
+    let proved = false
+    const proofs = vi.spyOn(a, 'proofInThread').mockImplementation(async (job, signal) => {
+      const r = await prove(job, signal)
+      proved = true
+      return r
+    })
+    const held = vi.spyOn(a.keeper, 'confirmHead').mockImplementation(async () => {
+      if (proved) controller.abort()
+      return confirm()
+    })
+    try {
+      await expect(a.board({}, controller.signal)).rejects.toThrow(/canceled before it was signed.*not on the line/)
+      expect(proved).toBe(true)
+      expect(a.keeper.head()!.id).toBe(other!.id)
+      expect(a.keeper.moving).toBe(false)
+    } finally {
+      held.mockRestore()
+      proofs.mockRestore()
     }
     // From the adopted head, boarding goes through, bound to that head.
     const r = await a.board()

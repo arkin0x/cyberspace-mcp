@@ -55,13 +55,13 @@ import { readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { availableParallelism } from 'node:os'
 import { join } from 'node:path'
 import { bytesToHex, hexToCoord, terrainK } from 'cyberspace-core'
-import type { Budget } from './budget.js'
+import { defaultThreads, type Budget } from './budget.js'
 import { chainTemplateProblem, enterHyperspaceTemplate, hyperjumpTemplate } from './chain/builder.js'
 import { buildChain, chainStatus, firstBreak, lookBack, openBracket, type ActionEvent } from './chain/events.js'
 import type { ChainKeeper } from './chain/keeper.js'
 import { HOSAKA_DEFAULT_URL, createHosaka, durationWords, rideQuoteOf, rideService, type HosakaClient } from './hosaka.js'
 import { HosakaRides } from './hosakaRide.js'
-import { computeEnterProof } from './hyperspace/enter.js'
+import { ProofAborted, type ProofJob, type ProofResult } from './chain/proofWorker.js'
 import { LineStore, type LineStatus, type StationResult, type Stop, type SyncResult } from './hyperspace/line.js'
 import { lineStateOf, rideBlocks, zeroLengthRideRefusal, type LineState, type RideProof } from './hyperspace/ride.js'
 import { runRideInThread } from './hyperspace/rideHost.js'
@@ -94,6 +94,8 @@ export interface TransitBody {
   messageOperator: (text: string) => Promise<ToolResult>
   /** The human's wallet and limits; the only payer of HOSAKA invoices (wallet.ts). */
   wallet: Wallet
+  /** A proof on a worker thread (chain/proofWorker.ts), stopped by the signal or by the server stopping. */
+  proofInThread: (job: ProofJob, signal?: AbortSignal) => Promise<ProofResult>
 }
 
 export interface TransitOptions {
@@ -101,7 +103,7 @@ export interface TransitOptions {
   manifestUrl?: string
   /** Tests: a fetch that serves fixture blobs. */
   fetch?: typeof globalThis.fetch
-  /** Worker threads for a ride; 0 computes on the calling thread. Default: the cores available less one. */
+  /** Worker threads for a ride; 0 computes on the calling thread. Default: min(2, cores - 1). */
   threads?: number
   /** Tests: the ride runner's clock. */
   now?: () => number
@@ -331,7 +333,7 @@ export class Transit {
     // Every write under line/ and rides/, on this thread or a ride's, first checks the state directory's lock (lock.ts).
     this.dir = dir
     this.store = LineStore.open(join(dir.path, 'line'), { manifestUrl: options.manifestUrl, fetch: options.fetch, guard: (w) => dir.guard(w) })
-    this.threads = options.threads ?? Math.max(1, availableParallelism() - 1)
+    this.threads = options.threads ?? defaultThreads(availableParallelism())
     this.runner = RideRunner.open(join(dir.path, 'rides'), { threads: this.threads, now: options.now, guard: (w) => dir.guard(w) })
     this.interrupted = this.readRecord()
     this.hosaka = createHosaka({ apiUrl: options.hosakaUrl ?? HOSAKA_DEFAULT_URL, sign: body.sign, fetch: options.hosakaFetch })
@@ -481,16 +483,27 @@ export class Transit {
       blocks,
       expectedSeconds: Number(seconds.toFixed(2)),
       fitsCall: seconds <= budget.capCallSeconds,
-      fitsSession: seconds <= budget.remainingSessionSeconds,
+      // The session's seconds and, under the daily cap, today's: whichever is less (D3).
+      fitsSession: seconds <= budget.remainingSessionSeconds && (budget.remainingTodaySeconds === null || seconds <= budget.remainingTodaySeconds),
       calls: Math.max(1, Math.ceil(seconds / budget.capCallSeconds)),
     }
+  }
+
+  /** How a quote stands against the session cap and today's daily cap, naming whichever binds. */
+  private capWordsFor(q: RideQuote): string {
+    const b = this.body.budget.state()
+    const daily = b.remainingTodaySeconds
+    const dailyBinds = daily !== null && daily < b.remainingSessionSeconds
+    if (q.fitsSession) return `within the session cap (${b.remainingSessionSeconds.toFixed(1)} s left)${dailyBinds ? ` and today's daily cap (${daily.toFixed(1)} s left)` : ''}`
+    if ((q.expectedSeconds ?? 0) > b.remainingSessionSeconds) return `ABOVE the session cap (${b.remainingSessionSeconds.toFixed(1)} s left of ${b.capSessionSeconds} s)`
+    return `ABOVE today's daily cap (${(daily ?? 0).toFixed(1)} s left of ${b.capDailySeconds} s, counted across restarts; it starts over at ${b.dailyResetsAt}, and only your human raises it)`
   }
 
   private quoteWords(q: RideQuote): string {
     const b = this.body.budget.state()
     if (q.refused) return `Quote to block ${q.destination}: REFUSED. ${q.refused}`
     const exit = q.exitDistance === 0 ? 'you stand on that stop now' : `that stop is h${q.exitDistance} from where you stand now`
-    return `Quote to block ${q.destination}: from ${q.chained ? 'the stop you stand at' : 'your station'}, block ${q.fromHeight}${q.asOf !== undefined ? ` (as_of ${q.asOf})` : ''}, ${q.blocks} block(s), expected to take about ${q.expectedSeconds} s on this machine with ${threadWords(q.threads)}: ${q.fitsSession ? `within the session cap (${b.remainingSessionSeconds.toFixed(1)} s left)` : `ABOVE the session cap (${b.remainingSessionSeconds.toFixed(1)} s left of ${b.capSessionSeconds} s)`}, ${q.fitsCall ? 'within one call' : `about ${q.calls} calls at ${b.capCallSeconds} s each`}. After it you stand at ${stopWords(this.store.line.stopAt(q.destination)!, this.store.line.stopCoordHex(q.destination)!)}; ${exit}. Leaving the stop for another coordinate is a hop or a sidestep, priced by plan_hop.`
+    return `Quote to block ${q.destination}: from ${q.chained ? 'the stop you stand at' : 'your station'}, block ${q.fromHeight}${q.asOf !== undefined ? ` (as_of ${q.asOf})` : ''}, ${q.blocks} block(s), expected to take about ${q.expectedSeconds} s on this machine with ${threadWords(q.threads)}: ${this.capWordsFor(q)}, ${q.fitsCall ? 'within one call' : `about ${q.calls} calls at ${b.capCallSeconds} s each`}. After it you stand at ${stopWords(this.store.line.stopAt(q.destination)!, this.store.line.stopCoordHex(q.destination)!)}; ${exit}. Leaving the stop for another coordinate is a hop or a sidestep, priced by plan_hop.`
   }
 
   /**
@@ -563,7 +576,8 @@ export class Transit {
    * for the call, as a hop does; the boarding's price is the temporal tree at
    * the terrain K of the coordinate (3.2), about a tenth of a second at most.
    */
-  async board(input: { as_of?: number } = {}): Promise<ToolResult> {
+  /** signal is the call's: the client's cancellation stops the entry proof's thread, and nothing is signed. */
+  async board(input: { as_of?: number } = {}, signal?: AbortSignal): Promise<ToolResult> {
     if (input.as_of !== undefined && !isHeight(input.as_of)) throw new Refusal('as_of must be a block height: a non-negative integer.')
     let release: () => void
     try {
@@ -572,13 +586,13 @@ export class Transit {
       throw new Refusal(words(err))
     }
     try {
-      return await this.enter(input.as_of)
+      return await this.enter(input.as_of, signal)
     } finally {
       release()
     }
   }
 
-  private async enter(asOfInput: number | undefined): Promise<ToolResult> {
+  private async enter(asOfInput: number | undefined, signal?: AbortSignal): Promise<ToolResult> {
     const { keeper, budget } = this.body
     await this.body.refreshChain()
     const chain = this.chainToExtend('boarding')
@@ -610,9 +624,18 @@ export class Transit {
     if (keeper.status() !== 'valid') throw new Refusal(keeper.breakWords() ?? 'The chain is not valid.')
 
     const t0 = performance.now()
-    const proofHash = this.entryProof(head)
+    let proofHash: string
+    try {
+      proofHash = await this.entryProof(head, signal)
+    } catch (err) {
+      if (!(err instanceof ProofAborted)) throw err
+      const spent = (performance.now() - t0) / 1000
+      budget.spendWork(spent)
+      throw new Refusal(`The boarding was stopped while its entry proof computed (${spent.toFixed(2)} s of work, charged to the budget). Nothing was signed; you are not on the line.`)
+    }
     const seconds = (performance.now() - t0) / 1000
     budget.spendMove(seconds)
+    if (signal?.aborted) throw new Refusal(`The boarding was canceled as its entry proof finished (${seconds.toFixed(2)} s of work); the proof was discarded unsigned.`)
 
     // Confirm again, immediately before the signature: another device may have moved meanwhile.
     const again = await keeper.confirmHead()
@@ -620,6 +643,8 @@ export class Transit {
     if (keeper.head()?.id !== head.id) throw new Refusal(`The head moved while the entry proof was computed: the relays hold a newer move (${keeper.head()?.id.slice(0, 8)}...), adopted now. The proof was discarded unsigned; call board again from where you stand.`)
 
     const template = enterHyperspaceTemplate({ createdAt: createdAtAfter(head), genesisId: chain[0].id, previousId: head.id, coordHex: head.coordHex, proofHash })
+    // A cancel that came while the head was confirmed is honored here, the last moment before the signature (review of #72).
+    if (signal?.aborted) throw new Refusal(`The boarding was canceled before it was signed (${seconds.toFixed(2)} s of work); the proof was discarded unsigned and you are not on the line.`)
     const event = this.signChainEvent(template, 'boarding')
     const published = await this.publish(event)
     this.body.settle()
@@ -643,8 +668,10 @@ export class Transit {
   }
 
   /** The entry proof for the head (DECK-0001 3.2): the work of a boarding, in its own method so a test can watch the head move under it. */
-  entryProof(head: ActionEvent): string {
-    return computeEnterProof(hexToCoord(head.coordHex), head.id)
+  async entryProof(head: ActionEvent, signal?: AbortSignal): Promise<string> {
+    const proof = await this.body.proofInThread({ kind: 'enter', coordHex: head.coordHex, previousId: head.id }, signal)
+    if (proof.kind !== 'enter') throw new Error(`the proof thread answered a ${proof.kind} proof for a boarding`)
+    return proof.proofHash
   }
 
   /** The station for a coordinate under `asOf`, or the refusal that says to sync the line. */
@@ -793,6 +820,8 @@ export class Transit {
     const { blocks, fromHeight, notes } = plan
     const seconds = estimateRideSeconds(this.body.calibration(), blocks, this.threads)
     const b = budget.state()
+    const daily = budget.dailyRefusal(seconds)
+    if (daily && seconds <= b.remainingSessionSeconds) throw new Refusal(`A ride of ${blocks} block(s) from block ${fromHeight} to block ${to} (${threadWords(this.threads)}): ${daily} Or buy the ride from HOSAKA with prover: "hosaka".`)
     if (!(seconds <= b.remainingSessionSeconds)) {
       throw new Refusal(`A ride of ${blocks} block(s) from block ${fromHeight} to block ${to} is expected to take about ${seconds.toFixed(1)} s on this machine (${threadWords(this.threads)}), and the session has ${b.remainingSessionSeconds.toFixed(1)} s of its ${b.capSessionSeconds} s left. The ride computes in the background and is charged to the session cap as it goes. Pick a nearer block, tell your operator by DM how many seconds it needs (a KEEP GOING from them renews the session budget), or buy the ride from HOSAKA with prover: "hosaka" (paid from your operator's wallet within their limits, or by your operator).`)
     }
@@ -894,7 +923,7 @@ export class Transit {
     // The store starts its walk over when the manifest changed under a held blob (line.ts reconcile), so a block verified when the ride started may not be held now.
     const hashes = line.rideHashes(flight.fromHeight, flight.toHeight)
     if (hashes === null) throw new Refusal(`The line no longer holds blocks ${Math.min(flight.fromHeight, flight.toHeight)} to ${Math.max(flight.fromHeight, flight.toHeight)} (verified to block ${line.asOf()} now). Call station with sync: true to verify it again; the ride stays in flight, paused, and resumes from its cache.`)
-    const remaining = budget.state().remainingSessionSeconds
+    const remaining = budget.remainingSeconds()
     if (remaining <= 0) {
       flight.state = 'paused_cap'
       return
@@ -941,7 +970,7 @@ export class Transit {
           // A run's deadline is fixed when it starts; a renewal that came
           // while it ran leaves budget it could not see. With seconds left
           // and work done (no spin), it carries on by itself.
-          if (this.flight === flight && result.workSeconds > 0 && this.body.budget.state().remainingSessionSeconds > 0) {
+          if (this.flight === flight && result.workSeconds > 0 && this.body.budget.remainingSeconds() > 0) {
             try {
               this.launch(flight)
             } catch (err) {
@@ -986,7 +1015,7 @@ export class Transit {
   private overCap(flight: Flight): boolean {
     const { budget } = this.body
     const pending = this.threads === 0 ? 0 : (performance.now() - flight.chargedAt) / 1000
-    return budget.spentSeconds + pending >= budget.capSessionSeconds
+    return pending >= budget.remainingSeconds()
   }
 
   /**
@@ -1137,6 +1166,9 @@ export class Transit {
 
   private capWords(flight: Flight): string {
     const b = this.body.budget.state()
+    if (b.remainingTodaySeconds !== null && b.remainingTodaySeconds <= 0) {
+      return `The ride to block ${flight.toHeight} is paused at the daily cap: today's work (UTC, counted across restarts) has reached its ${b.capDailySeconds} s (${this.flightWords(flight)}). It needs about ${Math.ceil(this.needSeconds(flight))} s more. Everything computed is on disk and the head stays reserved. The allowance starts over at ${b.dailyResetsAt}; only your human can raise the cap (--cap-daily-seconds, or capDailySeconds in config.json). The next ride call with to: ${flight.toHeight} after that resumes it from the cache. cancel: true releases the head.`
+    }
     return `The ride to block ${flight.toHeight} is paused at the session cap: the session has spent its ${b.capSessionSeconds} s of work (${this.flightWords(flight)}). It needs about ${Math.ceil(this.needSeconds(flight))} s more. Everything computed is on disk and the head stays reserved. Tell your operator by DM how many more seconds the ride needs: a KEEP GOING from them renews the session budget, and the next ride call with to: ${flight.toHeight} resumes it from the cache. cancel: true releases the head.`
   }
 
