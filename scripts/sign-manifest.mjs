@@ -101,7 +101,7 @@ if (cmd === 'keygen') {
   const obj = sign(manifest, readKey(opt('--key')))
   writeFileSync(join(dir, SKILL_SIGNATURE_FILE), `${JSON.stringify(obj, null, 2)}\n`)
   const files = manifest.trimEnd().split('\n').length - 2
-  console.log(`wrote ${join(target, SKILL_SIGNATURE_FILE)}: ${files} files signed by ${obj.npub}`)
+  console.log(`wrote ${join(target, SKILL_SIGNATURE_FILE)}: ${files} file${files === 1 ? '' : 's'} signed by ${obj.npub}`)
 } else {
   fail('usage: sign-manifest.mjs release <tarball>.sha256 --key <keyfile> | skill <dir> --key <keyfile> | keygen <keyfile>')
 }
