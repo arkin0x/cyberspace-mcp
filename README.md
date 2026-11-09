@@ -111,7 +111,7 @@ In `claude_desktop_config.json`:
 A hop computes for up to the per-call cap (60 s by default); a ride's `wait_seconds` and `wait_for` can wait longer. Many clients give up on a silent call sooner (the MCP TypeScript SDK after 60 s, OpenClaw's example after 20 s), and the server goes on and signs anyway.
 
 - **Progress.** When a call carries a `progressToken` (MCP progress), the server sends a progress notification every 5 s while it runs, and `hop` says when its proof starts (with the expected seconds) and when it is done. Over `serve`, such a call is answered as a short event stream; every other call stays plain JSON. A client that resets its timeout on progress (the SDK's `resetTimeoutOnProgress`) then waits as long as the work goes on.
-- **The proof itself is silent.** It holds the server's thread (Known limitations), so nothing is sent between "computing the proof" and "proof done".
+- **The proof runs on its own thread.** A hop's, a sidestep's and a boarding's proof compute on a `worker_threads` thread (`src/chain/proofWorker.ts`), so the heartbeat goes on while it runs and every other tool keeps answering. A client that cancels the call (`notifications/cancelled`) stops the thread at once: nothing is signed, and the seconds spent are charged to the budget.
 - **Set a timeout anyway.** Set the client's tool timeout above the per-call cap: for example `MCP_TOOL_TIMEOUT=120000` for Claude Code, or `requestTimeoutMs: 120000` for OpenClaw.
 
 ## Serve and the waker
@@ -405,7 +405,7 @@ These are pure functions copied from ONOSENDAI (`arkin0x/onosendai-v2`, branch `
 
 ## Known limitations of v0
 
-- A proof is computed on the server's thread, so the server is busy for the seconds a hop takes and answers no other call meanwhile, and sends no progress notification until the proof is done (it says just before that it is starting, and how long it expects). The caps bound this. Moving the proof to a worker thread is a follow-up (M5 in the review of v0).
+- Region keys above h12 (`find`, `look`, `hide` up to h16), a hinted sweep, and the line sync still compute on the server's thread; the caps bound them. The movement proofs (hop, sidestep, boarding), a ride and an avatar each run on threads of their own.
 - `look` sees exactly the 27 sectors around the agent, and `wait_for` an arrival within them.
 - Chat said before the server started listening is gone: the relay keeps none of it.
 - Keys are derived on request up to h16 (`hide`, `find`, `look`); the passive scan reaches h12, as ONOSENDAI's does. Every key above h12 is priced against the caps before it is derived and its time is spent from the session budget.

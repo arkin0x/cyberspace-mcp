@@ -295,7 +295,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     description: 'Move one step toward a target: confirms the live head, reserves it, computes the proof, confirms again, signs, publishes to the canonical relay and your relays, and records the result. On a fresh key with no chain it signs your spawn first. Refuses if the step exceeds the cap or the head moved, and never lands where your avatar would overlap a person\'s (the refusal names the clear coordinate just outside). A target beyond a wall is reached one step per call; the result says how far remains.',
     inputSchema: { target: coordinate, cap_seconds: z.number().positive().optional().describe('Your own cap on compute for this call, in seconds; the server\'s cap applies too.') },
     annotations: { readOnlyHint: false, destructiveHint: false },
-  }, async (args, extra) => call(() => agent.hop(args, progress(extra))))
+  }, async (args, extra) => call(() => agent.hop(args, progress(extra), extra.signal)))
 
   server.registerTool('station', {
     title: 'Station',
@@ -313,7 +313,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     description: 'Enter hyperspace where you stand (DECK-0001 3): confirms the live head, reserves it, computes the entry proof, confirms again, signs the enter-hyperspace, publishes and records it. You do not move. Refuses until the line is verified far enough to name your station (call station with sync: true), when you have no chain or an invalid one, when you are already on the line, and above the per-call cap. Returns the boarding\'s id and your station.',
     inputSchema: { as_of: z.number().int().min(0).optional().describe('Name the station under this block height instead of the newest verified block. Reporting only; the first ride declares its own as_of.') },
     annotations: { readOnlyHint: false, destructiveHint: false },
-  }, async (args) => call(() => agent.board(args)))
+  }, async (args, extra) => call(() => agent.board(args, extra.signal)))
 
   server.registerTool('ride', {
     title: 'Ride the line',
