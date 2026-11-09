@@ -109,14 +109,51 @@ describe('init', () => {
     expect(again.out).not.toContain(key.secret)
   })
 
-  it('refuses without an operator when it may not ask, and refuses an nsec', async () => {
+  it('refuses an nsec as the operator, and makes nothing', async () => {
     const w = world()
     const state = tmp()
-    expect((await init(w, ['--state', state, '--yes'])).code).toBe(2)
     const nsec = nip19.nsecEncode(generateSecretKey())
     const r = await init(w, ['--state', state, '--operator', nsec, '--yes'])
     expect(r.code).toBe(2)
     expect(existsSync(join(state, 'key'))).toBe(false)
+  })
+
+  it('works without an operator (D2): no operator in config.json, a profile with none, and next steps without ONOSENDAI', async () => {
+    const w = world()
+    const state = tmp()
+    const r = await init(w, ['--state', state, '--name', 'stranger', '--client', 'none', '--relay', CANONICAL, '--yes'])
+    expect(r.code).toBe(0)
+    expect(r.out).toContain('Operator: none')
+    expect(r.out).toContain('Profile published')
+    expect(r.out).not.toContain('In ONOSENDAI')
+    expect(r.out).toContain('init --operator')
+    const config = JSON.parse(readFileSync(join(state, 'config.json'), 'utf8')) as Record<string, unknown>
+    expect('operator' in config).toBe(false)
+    expect(config.name).toBe('stranger')
+    const key = JSON.parse(readFileSync(join(state, 'key'), 'utf8')) as { secret: string }
+    const me = getPublicKey(Uint8Array.from(Buffer.from(key.secret, 'hex')))
+    const profile = w.canonical.published.find((e) => e.kind === 0 && e.pubkey === me)
+    expect(JSON.parse(profile!.content).bot).toBe(true)
+    expect(profile!.tags.some((t) => t[0] === 'p')).toBe(false)
+
+    // On a terminal, Enter skips the question.
+    const asked: string[] = []
+    const out: string[] = []
+    const code = await runInit(['--state', tmp(), '--client', 'none', '--no-publish'], {
+      print: (l) => out.push(l),
+      ask: async (q, fallback) => { asked.push(q); return q.startsWith('A name') ? 'x' : fallback ?? '' },
+      env: { PATH: '' },
+    })
+    expect(code).toBe(0)
+    expect(asked[0]).toContain('Enter for none')
+    expect(out.join('\n')).toContain('Operator: none')
+
+    // Adding an operator later keeps the rest.
+    const op = nip19.npubEncode(getPublicKey(generateSecretKey()))
+    expect((await init(w, ['--state', state, '--operator', op, '--yes', '--no-publish'])).code).toBe(0)
+    const config2 = JSON.parse(readFileSync(join(state, 'config.json'), 'utf8')) as Record<string, unknown>
+    expect(config2.operator).toBe(op)
+    expect(config2.name).toBe('stranger')
   })
 
   it('makes a token with --token and puts it in the Claude Code file, without printing it', async () => {
@@ -180,6 +217,39 @@ describe('doctor', () => {
     expect(check(r.checks, 'serve')?.verdict).toBe('warn')
     expect(r.code).toBe(0)
     expect(r.out).not.toContain(key.secret)
+  })
+
+  it('without an operator (D2): the operator is INFO, not FAIL, the operator checks are skipped, and nothing fails', async () => {
+    const w = world()
+    const state = tmp()
+    expect((await init(w, ['--state', state, '--name', 'stranger', '--client', 'none', '--relay', CANONICAL, '--yes'])).code).toBe(0)
+    const r = await doctor(w, state)
+    expect(check(r.checks, 'operator')?.verdict).toBe('info')
+    expect(r.out).toMatch(/INFO  operator: none/)
+    expect(r.out).toContain('to change: to take orders from a human by nostr DM: cyberspace-mcp init --operator')
+    expect(check(r.checks, 'profile')?.verdict).toBe('ok')
+    expect(check(r.checks, 'profile')?.detail).toContain('no operator')
+    expect(check(r.checks, 'operator follows the agent')).toBeUndefined()
+    expect(check(r.checks, 'operator DM inbox (10050)')).toBeUndefined()
+    expect(r.checks.filter((c) => c.verdict === 'fail')).toEqual([])
+    expect(r.code).toBe(0)
+  })
+
+  it('fails an operator that is not an npub, and warns when the profile names an operator config.json no longer does', async () => {
+    const w = world()
+    const state = tmp()
+    const op = nip19.npubEncode(getPublicKey(generateSecretKey()))
+    expect((await init(w, ['--state', state, '--operator', op, '--client', 'none', '--relay', CANONICAL, '--yes'])).code).toBe(0)
+    const path = join(state, 'config.json')
+    const config = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
+    writeFileSync(path, JSON.stringify({ ...config, operator: 'nobody' }))
+    expect(check((await doctor(w, state)).checks, 'operator')?.verdict).toBe('fail')
+    delete config.operator
+    writeFileSync(path, JSON.stringify(config))
+    const r = await doctor(w, state)
+    expect(check(r.checks, 'operator')?.verdict).toBe('info')
+    expect(check(r.checks, 'profile')?.verdict).toBe('warn')
+    expect(check(r.checks, 'profile')?.detail).toContain(op)
   })
 
   it('warns, and does not fail or dial, when config.json still lists a retired relay; init never writes one', async () => {
