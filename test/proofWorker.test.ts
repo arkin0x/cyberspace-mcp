@@ -39,7 +39,7 @@ function far(a: Agent): { x: string; y: string; z: string; plane: 0 | 1 } {
 const running: Agent[] = []
 afterAll(async () => { for (const a of running) await a.stop() })
 
-async function start(): Promise<{ a: Agent; sk: Uint8Array; canonical: FakeRelay }> {
+async function start(fresh = false): Promise<{ a: Agent; sk: Uint8Array; canonical: FakeRelay }> {
   const network = new FakeNetwork()
   const canonical = network.add(CANONICAL)
   const sk = generateSecretKey()
@@ -51,8 +51,8 @@ async function start(): Promise<{ a: Agent; sk: Uint8Array; canonical: FakeRelay
     websocketImplementation: network.WebSocket, calibration: cal, relayMaxWaitMs: 1000,
   })
   running.push(a)
-  // The spawn and one short hop, so the next hop is a plain hop.
-  await a.hop({ target: { dx: 1 } })
+  // The spawn and one short hop, so the next hop is a plain hop; a fresh agent has no chain yet.
+  if (!fresh) await a.hop({ target: { dx: 1 } })
   return { a, sk, canonical }
 }
 
@@ -180,6 +180,32 @@ describe('a hop whose proof runs on its thread', () => {
     expect(moves(canonical, a.pubkey).length).toBe(before)
     await a.hop({ target: { dx: 3 } })
     expect(moves(canonical, a.pubkey).length).toBe(before + 1)
+  }, 60_000)
+
+  it('a first hop canceled after its proof says its spawn was signed and stands', async () => {
+    const { a, canonical } = await start(true)
+    const controller = new AbortController()
+    const confirm = a.keeper.confirmHead.bind(a.keeper)
+    const prove = a.proofInThread.bind(a)
+    let proved = false
+    const proofs = vi.spyOn(a, 'proofInThread').mockImplementation(async (job, signal) => {
+      const r = await prove(job, signal)
+      proved = true
+      return r
+    })
+    const held = vi.spyOn(a.keeper, 'confirmHead').mockImplementation(async () => {
+      if (proved) controller.abort()
+      return confirm()
+    })
+    try {
+      await expect(a.hop({ target: { dx: 3 } }, undefined, controller.signal)).rejects.toThrow(/canceled before it was signed.*Your spawn was signed and stands\./)
+    } finally {
+      held.mockRestore()
+      proofs.mockRestore()
+    }
+    // The spawn is on the relay and the head; the hop is not.
+    expect(moves(canonical, a.pubkey).map((e) => e.tags.find((t) => t[0] === 'A')?.[1])).toEqual(['spawn'])
+    expect(a.keeper.status()).toBe('valid')
   }, 60_000)
 
   it('canceled by the MCP client: notifications/cancelled reaches the hop, which signs nothing', async () => {

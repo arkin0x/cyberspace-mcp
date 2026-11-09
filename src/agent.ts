@@ -1043,7 +1043,7 @@ export class Agent {
     }
     const seconds = (performance.now() - t0) / 1000
     this.budget.spendMove(seconds)
-    if (signal?.aborted) throw new Refusal(`The hop was canceled as its proof finished (${seconds.toFixed(1)} s of work); the proof was discarded unsigned.`)
+    if (signal?.aborted) throw new Refusal(`The hop was canceled as its proof finished (${seconds.toFixed(1)} s of work); the proof was discarded unsigned.${spawned ? ' Your spawn was signed and stands.' : ''}`)
     await progress?.(`proof done in ${seconds.toFixed(1)} s; confirming the head, then signing and publishing`)
 
     // Confirm again, immediately before the signature: the machine was busy, and another device may have moved.
@@ -1057,7 +1057,7 @@ export class Agent {
     const problem = chainTemplateProblem(template, this.pubkey)
     if (problem) throw new Error(`refusing to sign a malformed chain event: ${problem}`)
     // A cancel that came while the head was confirmed is honored here, the last moment before the signature (review of #72).
-    if (signal?.aborted) throw new Refusal(`The hop was canceled before it was signed (${seconds.toFixed(1)} s of work); the proof was discarded unsigned and you stand where you stood.`)
+    if (signal?.aborted) throw new Refusal(`The hop was canceled before it was signed (${seconds.toFixed(1)} s of work); the proof was discarded unsigned and you stand where you stood.${spawned ? ' Your spawn was signed and stands.' : ''}`)
     const event = this.sign(template)
     // Level 1 of the hop as signed, with its own id (spec 5.11): milliseconds, and a hop that fails it is never recorded or sent.
     if (step.kind === 'hop') {
