@@ -12,7 +12,7 @@ import { join } from 'node:path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { AXIS_CENTER } from 'cyberspace-core'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 import { generateSecretKey } from 'nostr-tools/pure'
 import { Agent, Refusal } from '../src/agent.js'
 import { hopTemplate } from '../src/chain/builder.js'
@@ -148,6 +148,37 @@ describe('a hop whose proof runs on its thread', () => {
     expect(a.budget.state().spentSeconds).toBeGreaterThan(spentBefore)
     // The head was released: the next hop goes.
     await a.hop({ target: { dx: 2 } })
+    expect(moves(canonical, a.pubkey).length).toBe(before + 1)
+  }, 60_000)
+
+  it('a cancel that arrives after the proof, while the head is confirmed again, still signs nothing (review of #72)', async () => {
+    const { a, canonical } = await start()
+    const head = a.keeper.head()!.id
+    const before = moves(canonical, a.pubkey).length
+    const controller = new AbortController()
+    const confirm = a.keeper.confirmHead.bind(a.keeper)
+    const prove = a.proofInThread.bind(a)
+    let proved = false
+    const proofs = vi.spyOn(a, 'proofInThread').mockImplementation(async (job, signal) => {
+      const r = await prove(job, signal)
+      proved = true
+      return r
+    })
+    // The confirmation after the proof: the client cancels while it is asked.
+    const held = vi.spyOn(a.keeper, 'confirmHead').mockImplementation(async () => {
+      if (proved) controller.abort()
+      return confirm()
+    })
+    try {
+      await expect(a.hop({ target: { dx: 3 } }, undefined, controller.signal)).rejects.toThrow(/canceled before it was signed.*discarded unsigned/)
+      expect(proved).toBe(true)
+    } finally {
+      held.mockRestore()
+      proofs.mockRestore()
+    }
+    expect(a.keeper.head()!.id).toBe(head)
+    expect(moves(canonical, a.pubkey).length).toBe(before)
+    await a.hop({ target: { dx: 3 } })
     expect(moves(canonical, a.pubkey).length).toBe(before + 1)
   }, 60_000)
 

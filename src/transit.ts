@@ -632,6 +632,8 @@ export class Transit {
     if (keeper.head()?.id !== head.id) throw new Refusal(`The head moved while the entry proof was computed: the relays hold a newer move (${keeper.head()?.id.slice(0, 8)}...), adopted now. The proof was discarded unsigned; call board again from where you stand.`)
 
     const template = enterHyperspaceTemplate({ createdAt: createdAtAfter(head), genesisId: chain[0].id, previousId: head.id, coordHex: head.coordHex, proofHash })
+    // A cancel that came while the head was confirmed is honored here, the last moment before the signature (review of #72).
+    if (signal?.aborted) throw new Refusal(`The boarding was canceled before it was signed (${seconds.toFixed(2)} s of work); the proof was discarded unsigned and you are not on the line.`)
     const event = this.signChainEvent(template, 'boarding')
     const published = await this.publish(event)
     this.body.settle()

@@ -403,6 +403,29 @@ describe('the hyperspace tools, on a fresh key over the fixture line', () => {
     } finally {
       spy.mockRestore()
     }
+    // A cancel that arrives while the head is confirmed again, after the entry proof, is honored before signing (review of #72).
+    const controller = new AbortController()
+    const confirm = a.keeper.confirmHead.bind(a.keeper)
+    const prove = a.proofInThread.bind(a)
+    let proved = false
+    const proofs = vi.spyOn(a, 'proofInThread').mockImplementation(async (job, signal) => {
+      const r = await prove(job, signal)
+      proved = true
+      return r
+    })
+    const held = vi.spyOn(a.keeper, 'confirmHead').mockImplementation(async () => {
+      if (proved) controller.abort()
+      return confirm()
+    })
+    try {
+      await expect(a.board({}, controller.signal)).rejects.toThrow(/canceled before it was signed.*not on the line/)
+      expect(proved).toBe(true)
+      expect(a.keeper.head()!.id).toBe(other!.id)
+      expect(a.keeper.moving).toBe(false)
+    } finally {
+      held.mockRestore()
+      proofs.mockRestore()
+    }
     // From the adopted head, boarding goes through, bound to that head.
     const r = await a.board()
     expect(parseAction(published(r.data.eventId))?.previousId).toBe(other!.id)

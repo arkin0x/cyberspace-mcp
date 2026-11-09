@@ -1033,6 +1033,8 @@ export class Agent {
 
     const problem = chainTemplateProblem(template, this.pubkey)
     if (problem) throw new Error(`refusing to sign a malformed chain event: ${problem}`)
+    // A cancel that came while the head was confirmed is honored here, the last moment before the signature (review of #72).
+    if (signal?.aborted) throw new Refusal(`The hop was canceled before it was signed (${seconds.toFixed(1)} s of work); the proof was discarded unsigned and you stand where you stood.`)
     const event = this.sign(template)
     // Level 1 of the hop as signed, with its own id (spec 5.11): milliseconds, and a hop that fails it is never recorded or sent.
     if (step.kind === 'hop') {
