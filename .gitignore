@@ -15,3 +15,6 @@ key
 # Editors and OS files
 .DS_Store
 *.swp
+
+# Release bundles built by scripts/release-bundle.mjs
+release/
