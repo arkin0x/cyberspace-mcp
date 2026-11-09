@@ -34,7 +34,7 @@ npm i -g github:arkin0x/cyberspace-mcp
 
 Without installing anything, `npx -y github:arkin0x/cyberspace-mcp <command>` runs any command (`init`, `serve`, `doctor`) from npm's cache.
 
-Neither builds anything: `dist/` is committed, the package has no `build` or `prepare` script, and its two git dependencies ship their own `dist/` the same way, so no TypeScript compiler and no devDependencies are installed. Both still need a `git` binary, because npm resolves `github:` dependencies with it. Add `#<commit>` (or a tag, once there is one) to pin a version: without it, `npx github:` follows master and asks GitHub on every launch.
+Neither builds anything: `dist/` is committed, the package has no `build` or `prepare` script, and its two git dependencies ship their own `dist/` the same way, so no TypeScript compiler and no devDependencies are installed. Both still need a `git` binary, because npm resolves `github:` dependencies with it. Add `#<short commit>` (or a tag, once there is one) to pin a version: without it, `npx github:` follows master and asks GitHub on every launch. Use a short commit (7 to 12 characters), not the full 40: npm 10's `npx` fails on a full commit hash with `GitFetcher requires an Arborist constructor` (checked 2026-11-09 with npm 10.9.8, on master as well; `npm i -g` takes either).
 
 If `npm i -g` asks for root, set a prefix of your own first: `npm config set prefix ~/.npm-global` and add `~/.npm-global/bin` to your PATH.
 
