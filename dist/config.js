@@ -1,0 +1,295 @@
+// config.ts: the server's settings, from the command line and from
+// config.json in the state directory. Arguments win over the file, and the
+// file over the defaults. Every setting has a default: the state directory is
+// $CYBERSPACE_MCP_STATE or ~/.cyberspace-mcp (the same one init and serve
+// use), and the rest puts a fresh agent on the canonical relay with modest caps.
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { HOSAKA_DEFAULT_URL } from './hosaka.js';
+import { DEFAULT_CHAT_WAKE_MINUTES } from './chat.js';
+import { DEFAULT_RELAY, DEFAULT_RELAYS, SECOND_RELAY, isRetiredRelay } from './nostr/relays.js';
+import { parseNwc, Secret } from './nwc.js';
+import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS } from './wallet.js';
+import { DEFAULT_TRAVEL_PER_DAY } from './travel.js';
+import { DEFAULT_PUBLISH_PER_DAY } from './publicObject.js';
+import { expandHome } from './serveConfig.js';
+const DEFAULTS = {
+    relays: DEFAULT_RELAYS,
+    capCallSeconds: 60,
+    capSessionSeconds: 600,
+    maxSidestepHeight: 24,
+    allowRespawn: false,
+    hosakaUrl: HOSAKA_DEFAULT_URL,
+    maxPaymentSats: DEFAULT_MAX_PAYMENT_SATS,
+    maxDailySats: DEFAULT_MAX_DAILY_SATS,
+    chatWakeMinutes: DEFAULT_CHAT_WAKE_MINUTES,
+    publishMaxPerDay: DEFAULT_PUBLISH_PER_DAY,
+};
+export const USAGE = `cyberspace-mcp: a local MCP server that gives an AI agent a body in cyberspace.
+
+Usage: cyberspace-mcp init                     Set up an agent once: key, operator, waker (init --help).
+       cyberspace-mcp serve [options]           One long-lived agent over HTTP at http://127.0.0.1:7777/mcp,
+                                                with its waker (serve --help).
+       cyberspace-mcp doctor                    Check what is missing, and how to fix it.
+       cyberspace-mcp wake pause|resume|status  Pause or resume the waker.
+       cyberspace-mcp [stdio] [--state <dir>] [options]
+                                                The stdio MCP server, for a client that starts it itself.
+
+  --state <dir>                 The state directory: the key, the chain, the outbox. Default
+                                $CYBERSPACE_MCP_STATE, else ~/.cyberspace-mcp (where init puts it).
+                                A leading ~/ is your home directory, with or without a shell.
+  --relay <url>                 A relay; repeatable. The first is the canonical relay. Default ${DEFAULT_RELAY}, then ${SECOND_RELAY}
+  --operator <npub>             The human responsible for this agent, named in its profile.
+  --name <name>                 The profile name.
+  --about <text>                The profile text.
+  --cap-call-seconds <n>        The most compute one hop may spend. Default ${DEFAULTS.capCallSeconds}
+  --cap-session-seconds <n>     The most compute the session may spend. Default ${DEFAULTS.capSessionSeconds}
+  --max-sidestep-height <h>     Sidesteps above this height are refused. Default ${DEFAULTS.maxSidestepHeight}
+  --allow-respawn               Let hop sign a new spawn on a dead or frozen chain.
+  --hosaka-url <url>            The HOSAKA API rides are bought from (ride with prover "hosaka";
+                                your operator pays the invoice). Default ${DEFAULTS.hosakaUrl}
+  --nwc <uri>                   A Nostr Wallet Connect string (nostr+walletconnect://...) the
+                                server pays its own HOSAKA rides from, within the limits below.
+                                A spending key: prefer <state>/wallet.json, since a command line
+                                can be read by other users of this machine.
+  --max-payment-sats <n>        The most one payment may be. Default ${DEFAULTS.maxPaymentSats}; 0 turns paying off.
+  --max-daily-sats <n>          The most the payments of the last 24 hours may add up to.
+                                Default ${DEFAULTS.maxDailySats}; 0 turns paying off.
+  --travel-log                  Let log_travel post public kind 1 notes about the agent's travels. Off by default.
+  --travel-log-max-per-day <n>  The most travel log notes in any 24 hours. Default ${DEFAULT_TRAVEL_PER_DAY}
+  --chat-wake-minutes <n>       A stranger's chat line that addresses the agent is reported for
+                                waking at most once per this many minutes, in total and per
+                                speaker; the operator's always. Default ${DEFAULTS.chatWakeMinutes}
+  --publish-max-per-day <n>     The most public objects publish_object may publish in any 24 hours.
+                                Default ${DEFAULTS.publishMaxPerDay}
+  --machine-id <id>             This machine's id, which the state directory's lock records so a
+                                restart of the same machine takes back its own lock. Default
+                                $CYBERSPACE_MCP_MACHINE_ID, else <state>.machine-id (made once,
+                                beside the state directory; never sync or copy it). An id given here
+                                or in the environment must be unique to this machine.
+  --help                        This text.
+
+The same keys may live in <state>/config.json: relays, operator, name, about,
+capCallSeconds, capSessionSeconds, maxSidestepHeight, allowRespawn, hosakaUrl,
+nwc, maxPaymentSats, maxDailySats, chatWakeMinutes, publishMaxPerDay, and travelLog: { "enabled": true,
+"maxPerDay": 6, "tagOperator": false }. The wallet string may also be the "nwc" key
+of <state>/wallet.json, which the server only reads.`;
+/** An http(s) URL without a trailing slash, or a thrown sentence. */
+export function apiUrl(flag, value) {
+    if (!value)
+        throw new Error(`${flag} needs a URL`);
+    let u;
+    try {
+        u = new URL(value);
+    }
+    catch {
+        throw new Error(`${flag} must be an http(s) URL; got ${JSON.stringify(value)}`);
+    }
+    if (u.protocol !== 'https:' && u.protocol !== 'http:')
+        throw new Error(`${flag} must be an http(s) URL; got ${JSON.stringify(value)}`);
+    return value.replace(/\/+$/, '');
+}
+/** A whole number of sats, zero or more, or a thrown sentence. */
+function sats(flag, value) {
+    const n = typeof value === 'string' ? Number(value) : value;
+    if (typeof n !== 'number' || !Number.isSafeInteger(n) || n < 0)
+        throw new Error(`${flag} must be a whole number of sats, 0 or more`);
+    return n;
+}
+/** A connection string, checked now so a bad one stops the server at start, in words that never quote it. */
+function nwcSecret(where, value) {
+    if (typeof value !== 'string' || !value.trim())
+        throw new Error(`${where} needs a nostr+walletconnect:// string`);
+    const secret = new Secret(value.trim());
+    parseNwc(secret, where);
+    return secret;
+}
+function num(flag, value) {
+    if (value === undefined)
+        throw new Error(`${flag} needs a value`);
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0)
+        throw new Error(`${flag} must be a positive number; got ${JSON.stringify(value)}`);
+    return n;
+}
+/** Parse argv (without node and the script). Throws with a sentence on a bad flag. */
+export function parseArgs(argv) {
+    const out = { relays: [] };
+    for (let i = 0; i < argv.length; i++) {
+        const a = argv[i];
+        const next = () => argv[++i];
+        switch (a) {
+            case '--state':
+                out.state = next();
+                if (!out.state)
+                    throw new Error('--state needs a directory');
+                out.state = expandHome(out.state);
+                break;
+            case '--relay': {
+                const r = next();
+                if (!r)
+                    throw new Error('--relay needs a URL');
+                out.relays.push(r);
+                break;
+            }
+            case '--operator':
+                out.operator = next();
+                if (!out.operator)
+                    throw new Error('--operator needs an npub');
+                break;
+            case '--name':
+                out.name = next();
+                if (out.name === undefined)
+                    throw new Error('--name needs a value');
+                break;
+            case '--about':
+                out.about = next();
+                if (out.about === undefined)
+                    throw new Error('--about needs a value');
+                break;
+            case '--cap-call-seconds':
+                out.capCallSeconds = num(a, next());
+                break;
+            case '--cap-session-seconds':
+                out.capSessionSeconds = num(a, next());
+                break;
+            case '--max-sidestep-height':
+                out.maxSidestepHeight = Math.floor(num(a, next()));
+                break;
+            case '--allow-respawn':
+                out.allowRespawn = true;
+                break;
+            case '--hosaka-url':
+                out.hosakaUrl = apiUrl(a, next());
+                break;
+            case '--nwc':
+                out.nwc = nwcSecret(a, next());
+                break;
+            case '--max-payment-sats':
+                out.maxPaymentSats = sats(a, next());
+                break;
+            case '--max-daily-sats':
+                out.maxDailySats = sats(a, next());
+                break;
+            case '--travel-log':
+                out.travelLog = true;
+                break;
+            case '--travel-log-max-per-day':
+                out.travelLogMaxPerDay = Math.max(1, Math.floor(num(a, next())));
+                break;
+            case '--chat-wake-minutes':
+                out.chatWakeMinutes = num(a, next());
+                break;
+            case '--publish-max-per-day':
+                out.publishMaxPerDay = Math.max(1, Math.floor(num(a, next())));
+                break;
+            case '--machine-id':
+                out.machineId = next();
+                if (!out.machineId)
+                    throw new Error('--machine-id needs a value');
+                break;
+            case '--help':
+            case '-h':
+                out.help = true;
+                break;
+            // An argument that looks like a wallet string is never echoed, even into an error (arkinox, 2026-10-11).
+            default: throw new Error(`unknown argument ${/walletconnect|secret=/i.test(a) ? '(it looks like a wallet connection string, so it is not repeated here; use --nwc <uri>)' : JSON.stringify(a)}; try --help`);
+        }
+    }
+    return out;
+}
+/** config.json in the state directory, or an empty object when there is none or it is not JSON. */
+export function readFileConfig(stateDir) {
+    try {
+        const raw = readFileSync(join(stateDir, 'config.json'), 'utf8');
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    }
+    catch {
+        return {};
+    }
+}
+/** <state>/wallet.json, or an empty object when there is none. A file that is there and unreadable stops the server, without its contents. */
+export function readWalletFile(stateDir) {
+    let raw;
+    try {
+        raw = readFileSync(join(stateDir, 'wallet.json'), 'utf8');
+    }
+    catch {
+        return {};
+    }
+    let parsed;
+    try {
+        parsed = JSON.parse(raw);
+    }
+    catch {
+        throw new Error('wallet.json in the state directory is not JSON; it should be {"nwc": "nostr+walletconnect://..."}');
+    }
+    return parsed && typeof parsed === 'object' ? parsed : {};
+}
+/**
+ * The words to log when the first relay listed, the canonical one, is retired and
+ * was dropped: another relay is canonical now, and a chain only on the retired
+ * one is out of reach. Null when that did not happen.
+ */
+export function retiredCanonicalWarning(args, file, settings) {
+    const listed = args.relays.length ? args.relays : Array.isArray(file.relays) ? file.relays : [];
+    const first = listed[0];
+    if (typeof first !== 'string' || !isRetiredRelay(first))
+        return null;
+    return `WARNING: the first relay listed, ${first}, is retired and is not dialed, so the canonical relay is now ${settings.relays[0]}. A chain that lives only on the retired relay is out of reach: do not lose chain.json, and do not spawn over it. Remove it from --relay or config.json.`;
+}
+/** The settings: defaults, then the file, then the arguments. The wallet string: --nwc, then wallet.json, then config.json. */
+export function settingsFrom(args, file, walletFile = {}) {
+    if (!args.state)
+        throw new Error('--state <dir> is required');
+    // A retired relay in either list is dropped here, so a saved config stops dialing it with no edit.
+    const fileRelays = Array.isArray(file.relays) ? file.relays.filter((r) => typeof r === 'string' && !isRetiredRelay(r)) : [];
+    const argRelays = args.relays.filter((r) => !isRetiredRelay(r));
+    const str = (v) => (typeof v === 'string' && v.trim() ? v : undefined);
+    const posNum = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined);
+    return {
+        stateDir: args.state,
+        relays: argRelays.length ? argRelays : fileRelays.length ? fileRelays : [...DEFAULTS.relays],
+        operator: args.operator ?? str(file.operator),
+        name: args.name ?? str(file.name),
+        about: args.about ?? str(file.about),
+        capCallSeconds: args.capCallSeconds ?? posNum(file.capCallSeconds) ?? DEFAULTS.capCallSeconds,
+        capSessionSeconds: args.capSessionSeconds ?? posNum(file.capSessionSeconds) ?? DEFAULTS.capSessionSeconds,
+        maxSidestepHeight: args.maxSidestepHeight ?? (posNum(file.maxSidestepHeight) !== undefined ? Math.floor(posNum(file.maxSidestepHeight)) : DEFAULTS.maxSidestepHeight),
+        allowRespawn: args.allowRespawn ?? (typeof file.allowRespawn === 'boolean' ? file.allowRespawn : DEFAULTS.allowRespawn),
+        hosakaUrl: args.hosakaUrl ?? (str(file.hosakaUrl) !== undefined ? apiUrl('config.json hosakaUrl', str(file.hosakaUrl)) : DEFAULTS.hosakaUrl),
+        ...nwcSetting(args, file, walletFile),
+        maxPaymentSats: args.maxPaymentSats ?? (file.maxPaymentSats !== undefined ? sats('config.json maxPaymentSats', file.maxPaymentSats) : DEFAULTS.maxPaymentSats),
+        maxDailySats: args.maxDailySats ?? (file.maxDailySats !== undefined ? sats('config.json maxDailySats', file.maxDailySats) : DEFAULTS.maxDailySats),
+        travelLog: travelLogSettings(args, file.travelLog),
+        chatWakeMinutes: args.chatWakeMinutes ?? posNum(file.chatWakeMinutes) ?? DEFAULTS.chatWakeMinutes,
+        publishMaxPerDay: args.publishMaxPerDay ?? (posNum(file.publishMaxPerDay) !== undefined ? Math.max(1, Math.floor(posNum(file.publishMaxPerDay))) : DEFAULTS.publishMaxPerDay),
+        ...(args.machineId ? { machineId: args.machineId } : {}),
+    };
+}
+function nwcSetting(args, file, walletFile) {
+    if (args.nwc)
+        return { nwc: args.nwc, nwcSource: '--nwc' };
+    if (walletFile.nwc !== undefined)
+        return { nwc: nwcSecret('wallet.json nwc', walletFile.nwc), nwcSource: 'wallet.json nwc' };
+    if (file.nwc !== undefined)
+        return { nwc: nwcSecret('config.json nwc', file.nwc), nwcSource: 'config.json nwc' };
+    return { nwc: null, nwcSource: null };
+}
+/**
+ * The travel log's settings: off unless --travel-log or travelLog.enabled
+ * true; the daily limit from the flag, the file, or the default; tagOperator
+ * only from the file, and only when it is exactly true. Anything malformed
+ * reads as off (arkinox, 2026-10-11).
+ */
+function travelLogSettings(args, raw) {
+    const file = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    const perDay = typeof file.maxPerDay === 'number' && Number.isFinite(file.maxPerDay) && file.maxPerDay >= 1 ? Math.floor(file.maxPerDay) : undefined;
+    return {
+        enabled: args.travelLog === true || file.enabled === true,
+        maxPerDay: args.travelLogMaxPerDay ?? perDay ?? DEFAULT_TRAVEL_PER_DAY,
+        tagOperator: file.tagOperator === true,
+    };
+}
+//# sourceMappingURL=config.js.map

@@ -1,12 +1,13 @@
-# Build output and dependencies
+# Dependencies (dist/ is committed: a git install uses it as it is; check:dist keeps it honest)
 node_modules/
-dist/
 
 # Any state directory: it holds the agent's secret key, its chain and its outbox.
 state*/
 **/state*/
 # The source directory of that name is not a state directory.
 !src/state/
+# Nor is its build output.
+!dist/state/
 
 # A key is never committed, wherever it is.
 *.key

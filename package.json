@@ -20,11 +20,12 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build:dist": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "check:dist": "npm run build:dist && git status --porcelain --untracked-files=all --ignored=matching -- dist && test -z \"$(git status --porcelain --untracked-files=all --ignored=matching -- dist)\"",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepare": "npm run build"
+    "prepublishOnly": "npm run build:dist"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",
