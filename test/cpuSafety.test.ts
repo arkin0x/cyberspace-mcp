@@ -109,6 +109,17 @@ describe('the daily cap', () => {
     expect(b.state().spentTodaySeconds).toBe(0)
   })
 
+  it('a record more than a day ahead is a clock mistake: dropped, so it cannot block until that date', () => {
+    const now = Date.parse('2026-11-09T10:00:00Z')
+    const store = memoryStore({ day: '2027-03-01', spentSeconds: 1800 })
+    const b = new Budget(15, 180, { capDailySeconds: 1800, store, now: () => now })
+    expect(b.state().spentTodaySeconds).toBe(0)
+    expect(b.refusal(5)).toBeNull()
+    expect(b.state().dailyResetsAt).toBe('2026-11-10T00:00:00.000Z')
+    b.spendWork(1)
+    expect(store.record).toEqual({ day: '2026-11-09', spentSeconds: 1 })
+  })
+
   it('is none without a cap (a library caller that sets none), and a malformed record reads as zero', () => {
     expect(new Budget(15, 180).state().capDailySeconds).toBeNull()
     expect(new Budget(15, 180).remainingSeconds()).toBe(180)

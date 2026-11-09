@@ -20,6 +20,7 @@ export function defaultThreads(cores = availableParallelism()) {
     return Math.max(1, Math.min(2, cores - 1));
 }
 const utcDay = (ms) => new Date(ms).toISOString().slice(0, 10);
+const DAY_MS = 86_400_000;
 export class Budget {
     capCallSeconds;
     capSessionSeconds;
@@ -44,13 +45,15 @@ export class Budget {
             : { day: utcDay(this.now()), spentSeconds: 0 };
     }
     /**
-     * Today's record, started over when a later UTC day begins. A record of a
-     * day after today (the clock went back) is kept as it is: setting the
-     * clock back must never hand out a fresh allowance.
+     * Today's record, started over when a later UTC day begins. A record of
+     * tomorrow (the clock went back a little) is kept as it is: setting the
+     * clock back must never hand out a fresh allowance. A record further
+     * ahead than that is a clock mistake, not a day of work, and is dropped,
+     * so it cannot block every move until that date.
      */
     day() {
         const d = utcDay(this.now());
-        if (d > this.today.day)
+        if (d > this.today.day || this.today.day > utcDay(this.now() + DAY_MS))
             this.today = { day: d, spentSeconds: 0 };
         return this.today;
     }
