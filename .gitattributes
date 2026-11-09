@@ -1,2 +1,2 @@
-# A signed skill is checked byte for byte (docs/signing.md): never rewrite its line endings.
-skills/** text eol=lf
+# A signed skill is checked byte for byte (docs/signing.md): git never converts its line endings or anything else.
+skills/** -text
