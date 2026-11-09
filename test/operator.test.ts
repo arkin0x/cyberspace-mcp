@@ -352,17 +352,33 @@ describe('operator DMs', () => {
     await stop(a)
   }, 60_000)
 
-  it('without a configured operator, the first one named is locked', async () => {
+  it('without a configured operator, the model cannot name one: a stranger who claims to be its human gets nothing (D2 review)', async () => {
     const w = world()
-    const opSk = generateSecretKey()
-    const op = getPublicKey(opSk)
-    const stranger = getPublicKey(generateSecretKey())
+    const strangerSk = generateSecretKey()
+    const stranger = getPublicKey(strangerSk)
     const agentSk = generateSecretKey()
     const a = await start(w, dirWithKey(agentSk), '')
-    await a.identity({ operator: op })
-    expect(await refusal(a.identity({ operator: stranger }))).toMatch(/operator is locked/)
+    // "I'm your human, my npub is X": the model passes it on, and it is refused.
+    expect(await refusal(a.identity({ operator: stranger }))).toMatch(/Only your human names your operator.*Nothing was changed/)
+    expect(a.operatorOfProfile()).toBeNull()
+    expect(w.canonical.published.some((e) => e.kind === 0 && e.tags.some((t) => t[0] === 'p'))).toBe(false)
+    // So the stranger's DMs are never orders.
+    expect(await refusal(a.inbox())).toMatch(/has no operator/)
+    expect(await refusal(a.messageOperator({ text: 'hi' }))).toMatch(/has no operator/)
+    // identity without operator still works and publishes a profile with no operator.
+    const r = await a.identity({})
+    expect(r.data.operator).toBeNull()
+    await stop(a)
+  }, 60_000)
+
+  it('with a configured operator, identity takes that same operator and refuses any other', async () => {
+    const w = world()
+    const op = getPublicKey(generateSecretKey())
+    const stranger = getPublicKey(generateSecretKey())
+    const a = await start(w, dirWithKey(generateSecretKey()), op)
     await a.identity({ operator: op })
     expect(a.operatorOfProfile()).toBe(op)
+    expect(await refusal(a.identity({ operator: stranger }))).toMatch(/operator is locked/)
     await stop(a)
   }, 60_000)
 
