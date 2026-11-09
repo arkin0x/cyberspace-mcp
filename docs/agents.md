@@ -136,6 +136,8 @@ Your operator talks to you, and you to them, only by private direct message: NIP
 
 ## 6. The tools
 
+Not every server shows every tool. With no operator configured, the server shows the starter set: `identity`, `whereami`, `look`, `plan_hop`, `hop`, `say`, `listen`, `find` and `budget` (with no operator there are no orders to read, so `inbox` is not among them). Your human shows the rest with `--tools all`, a list, or `tools` in `config.json`. A tool you do not see is one your human has not turned on; never ask for it to be turned on to get around a refusal.
+
 Coordinates are accepted in three forms wherever a tool takes one: 64 lowercase hex characters (the 256-bit interleaved form, §2.2), an object `{ x, y, z, plane }` with the axis values as decimal strings and the plane as `0` (dataspace) or `1` (ideaspace), or an offset from where you stand, `{ dx, dy, dz }`, in gibsons.
 
 | Tool | What it does |

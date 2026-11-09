@@ -67,6 +67,10 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
                                 speaker; the operator's always. Default ${DEFAULTS.chatWakeMinutes}
   --publish-max-per-day <n>     The most public objects publish_object may publish in any 24 hours.
                                 Default ${DEFAULTS.publishMaxPerDay}
+  --tools <which>               The tools the server shows: starter (identity, whereami, look,
+                                plan_hop, hop, say, listen, find, budget), all, or a
+                                comma-separated list (config.json "tools": "all", "starter" or a list).
+                                Default: starter, or all when an operator is configured.
   --machine-id <id>             This machine's id, which the state directory's lock records so a
                                 restart of the same machine takes back its own lock. Default
                                 $CYBERSPACE_MCP_MACHINE_ID, else <state>.machine-id (made once,
@@ -199,6 +203,9 @@ export function parseArgs(argv) {
                 if (!out.machineId)
                     throw new Error('--machine-id needs a value');
                 break;
+            case '--tools':
+                out.tools = toolsSetting('--tools', next());
+                break;
             case '--help':
             case '-h':
                 out.help = true;
@@ -259,6 +266,7 @@ export function settingsFrom(args, file, walletFile = {}) {
     const argRelays = args.relays.filter((r) => !isRetiredRelay(r));
     const str = (v) => (typeof v === 'string' && v.trim() ? v : undefined);
     const posNum = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined);
+    const tools = args.tools ?? (file.tools !== undefined ? toolsSetting('config.json tools', file.tools) : undefined);
     return {
         stateDir: args.state,
         relays: argRelays.length ? argRelays : fileRelays.length ? fileRelays : [...DEFAULTS.relays],
@@ -279,7 +287,20 @@ export function settingsFrom(args, file, walletFile = {}) {
         chatWakeMinutes: args.chatWakeMinutes ?? posNum(file.chatWakeMinutes) ?? DEFAULTS.chatWakeMinutes,
         publishMaxPerDay: args.publishMaxPerDay ?? (posNum(file.publishMaxPerDay) !== undefined ? Math.max(1, Math.floor(posNum(file.publishMaxPerDay))) : DEFAULTS.publishMaxPerDay),
         ...(args.machineId ? { machineId: args.machineId } : {}),
+        ...(tools !== undefined ? { tools } : {}),
     };
+}
+/** "all", "starter", or tool names (a comma-separated string or, in config.json, a list); the names are checked against the tools when the server starts. */
+function toolsSetting(where, raw) {
+    const words = (Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(',') : null);
+    if (!words || words.some((w) => typeof w !== 'string'))
+        throw new Error(`${where} must be all, starter, or tool names (comma-separated, or a list in config.json)`);
+    const names = words.map((w) => w.trim()).filter(Boolean);
+    if (names.length === 0)
+        throw new Error(`${where} needs all, starter, or at least one tool name`);
+    if (names.length === 1 && (names[0] === 'all' || names[0] === 'starter'))
+        return names[0];
+    return names;
 }
 function nwcSetting(args, file, walletFile) {
     if (args.nwc)

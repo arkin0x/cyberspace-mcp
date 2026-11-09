@@ -46,6 +46,8 @@ export interface Settings {
   chatWakeMinutes: number
   /** The most public objects publish_object may publish in any 24 hours (arkinox, 2026-10-13). */
   publishMaxPerDay: number
+  /** Which tools the MCP server shows (D7, 2026-11-09): all, the starter set, a list, or undefined for the default (server.ts selectTools). */
+  tools?: 'all' | 'starter' | string[]
   /** --machine-id: this machine's id for the lock, in place of $CYBERSPACE_MCP_MACHINE_ID and <state>.machine-id (lock.ts). Never from config.json, which travels with the state directory. */
   machineId?: string
 }
@@ -85,6 +87,7 @@ export interface ParsedArgs {
   chatWakeMinutes?: number
   publishMaxPerDay?: number
   machineId?: string
+  tools?: 'all' | 'starter' | string[]
   help?: boolean
 }
 
@@ -128,6 +131,10 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
                                 speaker; the operator's always. Default ${DEFAULTS.chatWakeMinutes}
   --publish-max-per-day <n>     The most public objects publish_object may publish in any 24 hours.
                                 Default ${DEFAULTS.publishMaxPerDay}
+  --tools <which>               The tools the server shows: starter (identity, whereami, look,
+                                plan_hop, hop, say, listen, find, budget), all, or a
+                                comma-separated list (config.json "tools": "all", "starter" or a list).
+                                Default: starter, or all when an operator is configured.
   --machine-id <id>             This machine's id, which the state directory's lock records so a
                                 restart of the same machine takes back its own lock. Default
                                 $CYBERSPACE_MCP_MACHINE_ID, else <state>.machine-id (made once,
@@ -203,6 +210,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case '--chat-wake-minutes': out.chatWakeMinutes = num(a, next()); break
       case '--publish-max-per-day': out.publishMaxPerDay = Math.max(1, Math.floor(num(a, next()))); break
       case '--machine-id': out.machineId = next(); if (!out.machineId) throw new Error('--machine-id needs a value'); break
+      case '--tools': out.tools = toolsSetting('--tools', next()); break
       case '--help': case '-h': out.help = true; break
       // An argument that looks like a wallet string is never echoed, even into an error (arkinox, 2026-10-11).
       default: throw new Error(`unknown argument ${/walletconnect|secret=/i.test(a) ? '(it looks like a wallet connection string, so it is not repeated here; use --nwc <uri>)' : JSON.stringify(a)}; try --help`)
@@ -229,6 +237,7 @@ interface FileConfig {
   travelLog?: unknown
   chatWakeMinutes?: unknown
   publishMaxPerDay?: unknown
+  tools?: unknown
 }
 
 /** <state>/wallet.json, which the human writes and the server only reads: {"nwc": "nostr+walletconnect://..."}. */
@@ -284,6 +293,7 @@ export function settingsFrom(args: ParsedArgs, file: FileConfig, walletFile: Wal
   const argRelays = args.relays.filter((r) => !isRetiredRelay(r))
   const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v : undefined)
   const posNum = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined)
+  const tools = args.tools ?? (file.tools !== undefined ? toolsSetting('config.json tools', file.tools) : undefined)
   return {
     stateDir: args.state,
     relays: argRelays.length ? argRelays : fileRelays.length ? fileRelays : [...DEFAULTS.relays],
@@ -304,7 +314,18 @@ export function settingsFrom(args: ParsedArgs, file: FileConfig, walletFile: Wal
     chatWakeMinutes: args.chatWakeMinutes ?? posNum(file.chatWakeMinutes) ?? DEFAULTS.chatWakeMinutes,
     publishMaxPerDay: args.publishMaxPerDay ?? (posNum(file.publishMaxPerDay) !== undefined ? Math.max(1, Math.floor(posNum(file.publishMaxPerDay)!)) : DEFAULTS.publishMaxPerDay),
     ...(args.machineId ? { machineId: args.machineId } : {}),
+    ...(tools !== undefined ? { tools } : {}),
   }
+}
+
+/** "all", "starter", or tool names (a comma-separated string or, in config.json, a list); the names are checked against the tools when the server starts. */
+function toolsSetting(where: string, raw: unknown): 'all' | 'starter' | string[] {
+  const words = (Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(',') : null)
+  if (!words || words.some((w) => typeof w !== 'string')) throw new Error(`${where} must be all, starter, or tool names (comma-separated, or a list in config.json)`)
+  const names = (words as string[]).map((w) => w.trim()).filter(Boolean)
+  if (names.length === 0) throw new Error(`${where} needs all, starter, or at least one tool name`)
+  if (names.length === 1 && (names[0] === 'all' || names[0] === 'starter')) return names[0]
+  return names
 }
 
 function nwcSetting(args: ParsedArgs, file: FileConfig, walletFile: WalletFile): { nwc: Secret | null; nwcSource: string | null } {
