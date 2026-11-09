@@ -6,8 +6,8 @@
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createHash, randomBytes } from 'node:crypto'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -177,30 +177,92 @@ describe('sign-manifest and verify-manifest end to end', () => {
     expect(node(verifyScript, 'skill', skill, '--npub', npub).out).toMatch(/does not verify/)
   })
 
-  it('signs a release from its .sha256, checks the tarball beside it, and never overwrites the signature', () => {
+  // A clone at a tag, with a stand-in for scripts/release-bundle.mjs that takes
+  // the same arguments and builds a tarball from a file in the clone, so the
+  // signer's own rebuild runs for real without npm or tar.
+  const FAKE_BUILDER = [
+    "import { createHash } from 'node:crypto'",
+    "import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'",
+    "const a = process.argv, tag = a[a.indexOf('--tag') + 1], out = a[a.indexOf('--out') + 1]",
+    "const name = `cyberspace-mcp-${tag.slice(1)}.tar.gz`",
+    "const bytes = Buffer.from(`bundle of ${readFileSync('payload.txt', 'utf8')}`)",
+    "mkdirSync(out, { recursive: true })",
+    "writeFileSync(`${out}/${name}`, bytes)",
+    "writeFileSync(`${out}/${name}.sha256`, `${createHash('sha256').update(bytes).digest('hex')}  ${name}\\n`)",
+  ].join('\n')
+
+  function cloneAtTag(version: string, payload: string): string {
+    const repo = tmp()
+    const git = (...args: string[]) => execFileSync('git', ['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false', ...args], { stdio: 'ignore' })
+    mkdirSync(join(repo, 'scripts'))
+    writeFileSync(join(repo, 'scripts', 'release-bundle.mjs'), FAKE_BUILDER)
+    writeFileSync(join(repo, 'package.json'), JSON.stringify({ name: 'cyberspace-mcp', version }))
+    writeFileSync(join(repo, 'payload.txt'), payload)
+    git('init', '-q')
+    git('add', '-A')
+    git('commit', '-q', '-m', 'release')
+    git('tag', `v${version}`)
+    return repo
+  }
+
+  function ciFiles(dir: string, version: string, bytes: Buffer): string {
+    const name = `cyberspace-mcp-${version}.tar.gz`
+    writeFileSync(join(dir, name), bytes)
+    writeFileSync(join(dir, `${name}.sha256`), `${createHash('sha256').update(bytes).digest('hex')}  ${name}\n`)
+    return join(dir, name)
+  }
+
+  it('signs a release only when a clean local rebuild of the tag matches CI, and never overwrites the signature', () => {
     const d = tmp()
     const { keyfile, npub } = newKey(d)
-    const tarball = join(d, 'cyberspace-mcp-9.9.9.tar.gz')
-    writeFileSync(tarball, randomBytes(4096))
-    const hash = execFileSync('sha256sum', [tarball], { encoding: 'utf8' }).split(' ')[0]!
-    writeFileSync(`${tarball}.sha256`, `${hash}  cyberspace-mcp-9.9.9.tar.gz\n`)
+    const repo = cloneAtTag('9.9.9', 'v9.9.9 sources')
+    const ci = tmp()
+    const tarball = ciFiles(ci, '9.9.9', Buffer.from('bundle of v9.9.9 sources'))
 
-    const signed = node(signScript, 'release', `${tarball}.sha256`, '--key', keyfile)
+    const signed = node(signScript, 'release', `${tarball}.sha256`, '--key', keyfile, '--repo', repo)
     expect(signed.code, signed.out).toBe(0)
+    expect(signed.out).toMatch(/local rebuild from v9\.9\.9 matched, and so did the tarball beside it/)
     expect(node(verifyScript, 'release', tarball, '--npub', npub).code).toBe(0)
-    expect(node(signScript, 'release', `${tarball}.sha256`, '--key', keyfile).out).toMatch(/never overwritten/)
+    expect(node(signScript, 'release', `${tarball}.sha256`, '--key', keyfile, '--repo', repo).out).toMatch(/never overwritten/)
 
     appendFileSync(tarball, 'x')
     const tampered = node(verifyScript, 'release', tarball, '--npub', npub)
     expect(tampered.code).toBe(1)
     expect(tampered.out).toMatch(/signed, not on disk: .*cyberspace-mcp-9\.9\.9\.tar\.gz/)
+  })
 
-    // A .sha256 that disagrees with the tarball beside it is never signed.
-    const d2 = tmp()
-    const t2 = join(d2, 'cyberspace-mcp-1.0.0.tar.gz')
-    writeFileSync(t2, 'bundle')
+  it('refuses when CI built something else, or the clone is not exactly the tag', () => {
+    const d = tmp()
+    const { keyfile } = newKey(d)
+    const repo = cloneAtTag('1.0.0', 'v1.0.0 sources')
+    const sign = (sha: string) => node(signScript, 'release', sha, '--key', keyfile, '--repo', repo)
+
+    // CI's bundle differs from the local rebuild (only its .sha256 is here).
+    const ci = tmp()
+    const t = ciFiles(ci, '1.0.0', Buffer.from('bundle of something else'))
+    unlinkSync(t)
+    const differs = sign(`${t}.sha256`)
+    expect(differs.code).toBe(1)
+    expect(differs.out).toMatch(/the local rebuild hashes to [0-9a-f]{64}, CI's \.sha256 says [0-9a-f]{64}; not signing/)
+    expect(existsSync(`${t}.sig.json`)).toBe(false)
+
+    // A .sha256 that disagrees with the tarball beside it.
+    const ci2 = tmp()
+    const t2 = ciFiles(ci2, '1.0.0', Buffer.from('bundle of v1.0.0 sources'))
     writeFileSync(`${t2}.sha256`, `${'0'.repeat(64)}  cyberspace-mcp-1.0.0.tar.gz\n`)
-    expect(node(signScript, 'release', `${t2}.sha256`, '--key', keyfile).out).toMatch(/does not hash to/)
+    expect(sign(`${t2}.sha256`).out).toMatch(/does not hash to/)
+
+    // The matching CI files, but the clone is dirty, then past the tag, then has no such tag.
+    const ci3 = tmp()
+    const t3 = ciFiles(ci3, '1.0.0', Buffer.from('bundle of v1.0.0 sources'))
+    writeFileSync(join(repo, 'payload.txt'), 'v1.0.0 sources, edited')
+    expect(sign(`${t3}.sha256`).out).toMatch(/has changes or untracked files/)
+    execFileSync('git', ['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qam', 'later'])
+    expect(sign(`${t3}.sha256`).out).toMatch(/is not at v1\.0\.0/)
+    const ci4 = tmp()
+    const t4 = ciFiles(ci4, '2.0.0', Buffer.from('x'))
+    expect(sign(`${t4}.sha256`).out).toMatch(/has no tag v2\.0\.0/)
+    for (const f of [t3, t4]) expect(existsSync(`${f}.sig.json`)).toBe(false)
   })
 
   it('refuses a key file others can read', () => {
