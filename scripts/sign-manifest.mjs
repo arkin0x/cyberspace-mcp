@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // sign-manifest.mjs: signs a release bundle or a skill directory with the
-// release key (D6). Run it in a clone after `npm ci`, on the machine that
-// holds the key. Never in CI.
+// release key (D6). Run it on the machine that holds the key, never in CI, in
+// a clone after `npm ci --ignore-scripts`: that machine never runs dependency
+// install scripts.
 //
 //   node scripts/sign-manifest.mjs release <cyberspace-mcp-X.Y.Z.tar.gz.sha256> --key <keyfile> [--repo <clone>]
 //   node scripts/sign-manifest.mjs skill <skill directory> --key <keyfile>
@@ -100,7 +101,7 @@ if (cmd === 'keygen') {
   if (existsSync(tarball) && sha256FileHex(tarball) !== hash) fail(`${tarball} does not hash to ${hash}`)
   const out = `${tarball}.sig.json`
   if (existsSync(out)) fail(`${out} exists; a release signature is never overwritten`)
-  const sk = readKey(opt('--key'))
+  if (!opt('--key')) fail('--key <keyfile> is required')
 
   // The local rebuild: a clean checkout of exactly the tag, then the same script CI ran.
   const repo = resolve(opt('--repo') ?? fileURLToPath(new URL('..', import.meta.url)))
@@ -113,7 +114,7 @@ if (cmd === 'keygen') {
     fail(`${repo} has no tag ${tag}; fetch the tags (git fetch --tags) and check it out`)
   }
   if (git('rev-parse', 'HEAD') !== tagCommit) fail(`${repo} is not at ${tag}; run git checkout ${tag} there first`)
-  const dirty = git('status', '--porcelain')
+  const dirty = git('status', '--porcelain', '--untracked-files=all')
   if (dirty) fail(`${repo} has changes or untracked files, which the rebuild would pick up:\n${dirty}`)
   const pkgVersion = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8')).version
   if (pkgVersion !== version) fail(`${repo}'s package.json says ${pkgVersion}, not ${version}`)
@@ -124,14 +125,15 @@ if (cmd === 'keygen') {
   try {
     execFileSync(process.execPath, [builder, '--tag', tag, '--out', rebuilt], { cwd: repo, stdio: ['ignore', 'inherit', 'inherit'] })
   } catch {
-    fail('the local rebuild failed (run npm ci in the clone first); not signing')
+    fail('the local rebuild failed (run npm ci --ignore-scripts in the clone first); not signing')
   }
   const localPath = join(rebuilt, name)
   if (!existsSync(localPath)) fail(`the local rebuild wrote no ${name}; not signing`)
   const local = sha256FileHex(localPath)
   if (local !== hash) fail(`the local rebuild hashes to ${local}, CI's .sha256 says ${hash}; not signing. Find out why before anything is published.`)
 
-  const obj = sign(buildManifest('release', [{ path: name, sha256: hash }]), sk)
+  // The key is read only now, after the rebuild matched: no build step runs while it is in memory.
+  const obj = sign(buildManifest('release', [{ path: name, sha256: hash }]), readKey(opt('--key')))
   writeFileSync(out, `${JSON.stringify(obj, null, 2)}\n`, { flag: 'wx' })
   console.log(`wrote ${out}: ${name} ${hash} signed by ${obj.npub}; the local rebuild from ${tag} matched${existsSync(tarball) ? ', and so did the tarball beside it' : ''}`)
 } else if (cmd === 'skill') {

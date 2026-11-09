@@ -1,0 +1,5 @@
+# Release and CI code: changes to what builds, signs or attaches a release
+# need the owner's review.
+/scripts/ @arkin0x
+/.github/workflows/ @arkin0x
+/.github/CODEOWNERS @arkin0x

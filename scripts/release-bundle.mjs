@@ -4,8 +4,8 @@
 //   node scripts/release-bundle.mjs [--tag vX.Y.Z] [--out release]
 //
 // Writes <out>/cyberspace-mcp-<version>.tar.gz and <out>/cyberspace-mcp-<version>.tar.gz.sha256.
-// The tarball holds one folder, cyberspace-mcp-<version>/, with dist/ built
-// fresh from src/, the files package.json ships (`files`), package.json, the
+// The tarball holds one folder, cyberspace-mcp-<version>/, with the committed
+// dist/ (checked against a fresh compile of src/), the files package.json ships (`files`), package.json, the
 // lockfile, and the production node_modules installed from that lockfile with
 // no lifecycle scripts. Every production dependency is plain JavaScript (the
 // native modules in the lockfile are devDependencies), so one bundle serves
@@ -76,8 +76,27 @@ mkdirSync(stage)
 
 console.error(`release-bundle: building ${name} in ${stage}`)
 
-// 1. dist/, fresh from src/ (never the working tree's dist/, whatever state it is in).
-run(tsc, ['-p', join(root, 'tsconfig.build.json'), '--outDir', join(stage, 'dist')], { cwd: root })
+// 1. dist/. The committed one is shipped, because its source maps name their
+// sources relative to the repository (`../src/bin.ts`); a compile into any other
+// folder writes that folder's path into every map, and the bundle would then
+// differ between CI and the key holder's clone. So src/ is compiled into a
+// scratch folder only to check the committed dist/: the same files, and every
+// .js byte for byte (the .js files hold no paths).
+const fresh = join(stageRoot, 'fresh-dist')
+run(tsc, ['-p', join(root, 'tsconfig.build.json'), '--outDir', fresh], { cwd: root })
+const listFiles = (d, rel = '') => readdirSync(join(d, rel)).sort().flatMap((n) => {
+  const r = rel ? `${rel}/${n}` : n
+  return lstatSync(join(d, r)).isDirectory() ? listFiles(d, r) : [r]
+})
+const committedDist = join(root, 'dist')
+if (!existsSync(committedDist)) fail('dist/ is missing: run npm run build:dist and commit it')
+const want = listFiles(fresh)
+const have = listFiles(committedDist)
+if (want.join('\n') !== have.join('\n')) fail('dist/ does not hold the files src/ compiles to: run npm run build:dist and commit it')
+for (const f of want.filter((f) => f.endsWith('.js'))) {
+  if (!readFileSync(join(fresh, f)).equals(readFileSync(join(committedDist, f)))) fail(`dist/${f} is not what src/ compiles to: run npm run build:dist and commit it`)
+}
+cpSync(committedDist, join(stage, 'dist'), { recursive: true })
 
 // 2. What the package ships, plus the manifest and the lockfile npm ci installs from.
 const shipped = new Set(['package.json', 'package-lock.json', ...(pkg.files ?? []).filter((f) => f !== 'dist')])
