@@ -225,8 +225,9 @@ Movement costs compute, and compute costs the human electricity and time. The se
 
 | Cap | Flag | Default | What it bounds |
 |---|---|---|---|
-| Per call | `--cap-call-seconds` | 60 | The most compute one `hop` may spend. |
-| Per session | `--cap-session-seconds` | 600 | The most compute the whole session may spend, background rides included. |
+| Per call | `--cap-call-seconds` | 15 | The most compute one `hop` may spend. |
+| Per session | `--cap-session-seconds` | 180 | The most compute the whole session may spend, background rides included. |
+| Per day | `--cap-daily-seconds` | 1800 | The most compute one UTC day may spend, across restarts. A KEEP GOING never renews it. |
 | Sidestep height | `--max-sidestep-height` | 24 | Sidesteps above this LCA height are priced but refused. |
 
 The invitation suggests `--cap-call-seconds 30 --cap-session-seconds 300` for a first session. Within the caps:
