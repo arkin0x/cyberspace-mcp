@@ -3,13 +3,17 @@
 // release key (D6). Run it in a clone after `npm ci`, on the machine that
 // holds the key. Never in CI.
 //
-//   node scripts/sign-manifest.mjs release <cyberspace-mcp-X.Y.Z.tar.gz.sha256> --key <keyfile>
+//   node scripts/sign-manifest.mjs release <cyberspace-mcp-X.Y.Z.tar.gz.sha256> --key <keyfile> [--repo <clone>]
 //   node scripts/sign-manifest.mjs skill <skill directory> --key <keyfile>
 //   node scripts/sign-manifest.mjs keygen <keyfile>
 //
-// release: reads the .sha256 the release workflow wrote, checks the tarball
-//   beside it when it is there (it must hash the same), and writes
-//   <tarball>.sig.json beside it. Never overwrites a release signature.
+// release: reads the .sha256 the release workflow wrote and does not trust it:
+//   it rebuilds the bundle locally with scripts/release-bundle.mjs, in a clean
+//   checkout of the tag v<version> (this clone, or --repo), and refuses to sign
+//   unless the local sha256 equals CI's (the bundle is reproducible, so a
+//   mismatch means CI built something else). It also checks the tarball beside
+//   the .sha256 when it is there, and writes <tarball>.sig.json beside it.
+//   Never overwrites a release signature.
 // skill:   writes <dir>/SIGNATURE.json over every other file in the directory
 //   (replacing the previous one: re-signing a changed skill is routine, and git
 //   keeps the old one).
@@ -23,9 +27,12 @@
 
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools'
+import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   SIGNATURE_FORMAT,
   SKILL_SIGNATURE_FILE,
@@ -81,19 +88,52 @@ if (cmd === 'keygen') {
   writeFileSync(target, `${Buffer.from(sk).toString('hex')}\n`, { flag: 'wx', mode: 0o600 })
   console.log(`wrote ${target} (mode 600). npub: ${nip19.npubEncode(getPublicKey(sk))}`)
 } else if (cmd === 'release') {
-  if (!target || !target.endsWith('.sha256')) fail('usage: sign-manifest.mjs release <tarball>.sha256 --key <keyfile>')
+  if (!target || !target.endsWith('.sha256')) fail('usage: sign-manifest.mjs release <tarball>.sha256 --key <keyfile> [--repo <clone>]')
   const shaPath = resolve(target)
   const m = /^([0-9a-f]{64}) [ *]?(\S+)\n?$/.exec(readFileSync(shaPath, 'utf8'))
   if (!m) fail(`${target} is not a one-line sha256sum file`)
   const [, hash, name] = m
   if (name !== basename(shaPath).slice(0, -'.sha256'.length)) fail(`${target} names ${name}, not the file it is named after`)
+  const version = /^cyberspace-mcp-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\.tar\.gz$/.exec(name)?.[1]
+  if (!version) fail(`${name} is not a cyberspace-mcp-<version>.tar.gz`)
   const tarball = join(dirname(shaPath), name)
   if (existsSync(tarball) && sha256FileHex(tarball) !== hash) fail(`${tarball} does not hash to ${hash}`)
   const out = `${tarball}.sig.json`
   if (existsSync(out)) fail(`${out} exists; a release signature is never overwritten`)
-  const obj = sign(buildManifest('release', [{ path: name, sha256: hash }]), readKey(opt('--key')))
+  const sk = readKey(opt('--key'))
+
+  // The local rebuild: a clean checkout of exactly the tag, then the same script CI ran.
+  const repo = resolve(opt('--repo') ?? fileURLToPath(new URL('..', import.meta.url)))
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim()
+  const tag = `v${version}`
+  let tagCommit
+  try {
+    tagCommit = git('rev-parse', '--verify', '--quiet', `refs/tags/${tag}^{commit}`)
+  } catch {
+    fail(`${repo} has no tag ${tag}; fetch the tags (git fetch --tags) and check it out`)
+  }
+  if (git('rev-parse', 'HEAD') !== tagCommit) fail(`${repo} is not at ${tag}; run git checkout ${tag} there first`)
+  const dirty = git('status', '--porcelain')
+  if (dirty) fail(`${repo} has changes or untracked files, which the rebuild would pick up:\n${dirty}`)
+  const pkgVersion = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8')).version
+  if (pkgVersion !== version) fail(`${repo}'s package.json says ${pkgVersion}, not ${version}`)
+  const builder = join(repo, 'scripts', 'release-bundle.mjs')
+  if (!existsSync(builder)) fail(`${builder} is missing; a release cannot be signed without rebuilding it`)
+  const rebuilt = mkdtempSync(join(tmpdir(), 'cyberspace-mcp-rebuild-'))
+  console.error(`sign-manifest: rebuilding ${name} from ${tag} in ${rebuilt}`)
+  try {
+    execFileSync(process.execPath, [builder, '--tag', tag, '--out', rebuilt], { cwd: repo, stdio: ['ignore', 'inherit', 'inherit'] })
+  } catch {
+    fail('the local rebuild failed (run npm ci in the clone first); not signing')
+  }
+  const localPath = join(rebuilt, name)
+  if (!existsSync(localPath)) fail(`the local rebuild wrote no ${name}; not signing`)
+  const local = sha256FileHex(localPath)
+  if (local !== hash) fail(`the local rebuild hashes to ${local}, CI's .sha256 says ${hash}; not signing. Find out why before anything is published.`)
+
+  const obj = sign(buildManifest('release', [{ path: name, sha256: hash }]), sk)
   writeFileSync(out, `${JSON.stringify(obj, null, 2)}\n`, { flag: 'wx' })
-  console.log(`wrote ${out}: ${name} ${hash} signed by ${obj.npub}${existsSync(tarball) ? '' : ' (tarball not present; hash taken from the .sha256)'}`)
+  console.log(`wrote ${out}: ${name} ${hash} signed by ${obj.npub}; the local rebuild from ${tag} matched${existsSync(tarball) ? ', and so did the tarball beside it' : ''}`)
 } else if (cmd === 'skill') {
   if (!target) fail('usage: sign-manifest.mjs skill <dir> --key <keyfile>')
   const dir = resolve(target)
