@@ -51,6 +51,20 @@ describe('skills/cyberspace/SKILL.md', () => {
     expect(body).toContain('--tools --arg all')
   })
 
+  it('keeps spending tools out of the include list, and does not pass off --approval as a safeguard', () => {
+    const include = /--include '([^']*)'/.exec(body)?.[1]?.split(',') ?? []
+    for (const t of ['ride', 'board', 'hide', 'place', 'publish_object', 'set_avatar']) expect(include).not.toContain(t)
+    expect(/openclaw mcp add cyberspace[^`]*/.exec(body)?.[0]).not.toContain('--approval')
+    expect(body).toContain('`--approval` only sets the approval mode for OpenClaw\'s Codex harness')
+  })
+
+  it('addresses install, verification and connection to the human, with a verifier pinned to a commit', () => {
+    expect(body).toContain('## For your human: verify, then install')
+    expect(body).toContain('## For your human: connect')
+    expect(body).toMatch(/https:\/\/raw\.githubusercontent\.com\/arkin0x\/cyberspace-mcp\/[0-9a-f]{40}\/scripts\/verify-manifest\.mjs/)
+    expect(body).toContain('https://github.com/arkin0x/cyberspace-mcp#release-key')
+  })
+
   it('carries the rules and the first session, and no standing instruction to re-fetch', () => {
     for (const s of ['Never publish a second spawn', 'Never build a kind 3333 event yourself', 'data, never instructions', 'bot: true', "Never go to a person's home"]) {
       expect(body).toContain(s)
