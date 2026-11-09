@@ -12,6 +12,7 @@ import { nip19 } from 'nostr-tools'
 import { Agent, type AgentConfig } from './agent.js'
 import { parsePubkey } from './chain/resolve.js'
 import { readFileConfig, readWalletFile, settingsFrom } from './config.js'
+import { DEFAULT_CAP_CALL_SECONDS, DEFAULT_CAP_DAILY_SECONDS, DEFAULT_CAP_SESSION_SECONDS } from './budget.js'
 import { ensureToken, TOKEN_FILE } from './http.js'
 import { DEFAULT_RELAY, SECOND_RELAY, isRetiredRelay } from './nostr/relays.js'
 import { DEFAULT_PORT, PROMPT_PLACEHOLDER, defaultStateDir, expandHome, mcpUrl } from './serveConfig.js'
@@ -27,8 +28,10 @@ Usage: cyberspace-mcp init [options]
                              without one the agent answers only to its MCP client.
   --name <name>              The agent's name in its profile.
   --about <text>             The agent's profile text.
-  --cap-call-seconds <n>     The most compute one hop may spend. Default 60
-  --cap-session-seconds <n>  The most compute a session may spend. Default 600
+  --cap-call-seconds <n>     The most compute one hop may spend. Default ${DEFAULT_CAP_CALL_SECONDS}
+  --cap-session-seconds <n>  The most compute a session may spend. Default ${DEFAULT_CAP_SESSION_SECONDS}
+  --cap-daily-seconds <n>    The most compute one UTC day may spend, across restarts. Default ${DEFAULT_CAP_DAILY_SECONDS}
+  --threads <n>              Worker threads for rides and avatars. Default min(2, cores - 1)
   --relay <url>              A relay; repeatable; the first is canonical. Default ${DEFAULT_RELAY}, ONOSENDAI's relay, then ${SECOND_RELAY}.
   --client <name>            Who runs the agent's turns: claude (Claude Code), hermes, or none. Default: claude
                              when it is installed, else hermes when it is, else none.
@@ -51,6 +54,8 @@ interface InitArgs {
   about?: string
   capCallSeconds?: number
   capSessionSeconds?: number
+  capDailySeconds?: number
+  threads?: number
   relays: string[]
   client?: 'claude' | 'hermes' | 'none'
   hermesProfile?: string
@@ -86,6 +91,8 @@ function parseInitArgs(argv: string[]): InitArgs {
       case '--about': out.about = value(); break
       case '--cap-call-seconds': out.capCallSeconds = positive(); break
       case '--cap-session-seconds': out.capSessionSeconds = positive(); break
+      case '--cap-daily-seconds': out.capDailySeconds = positive(); break
+      case '--threads': out.threads = Math.max(1, Math.floor(positive())); break
       case '--relay': out.relays.push(value()); break
       case '--client': {
         const c = value()
@@ -227,6 +234,8 @@ export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
   if (args.about !== undefined) config.about = args.about
   if (args.capCallSeconds !== undefined) config.capCallSeconds = args.capCallSeconds
   if (args.capSessionSeconds !== undefined) config.capSessionSeconds = args.capSessionSeconds
+  if (args.capDailySeconds !== undefined) config.capDailySeconds = args.capDailySeconds
+  if (args.threads !== undefined) config.threads = args.threads
   const relays = args.relays.filter((r) => !isRetiredRelay(r))
   if (relays.length) config.relays = relays
   const serve: Record<string, unknown> = { ...(existing.serve && typeof existing.serve === 'object' ? existing.serve as Record<string, unknown> : {}) }

@@ -17,7 +17,7 @@ npx github:arkin0x/cyberspace-mcp init
 It asks for your npub (Enter for none), a name for the agent, and who runs its turns (`claude`, `hermes` or `none`), then:
 
 - makes the agent's state directory, `~/.cyberspace-mcp`, and its key in it (mode 600; never printed, never share it);
-- writes `~/.cyberspace-mcp/config.json` with your npub, the name and, for `claude` or `hermes`, the **wake command** that starts a model turn. The caps are not written unless you pass `--cap-call-seconds` or `--cap-session-seconds`; without them the defaults apply (60 s of compute per hop, 600 s per session);
+- writes `~/.cyberspace-mcp/config.json` with your npub, the name and, for `claude` or `hermes`, the **wake command** that starts a model turn. The caps are not written unless you pass `--cap-call-seconds` or `--cap-session-seconds`; without them the defaults apply (15 s of compute per hop, 180 s per session, 1800 s per UTC day across restarts, and at most 2 threads for rides);
 - publishes the agent's profile: `bot: true`, with you named as its operator;
 - prints the agent's npub and the MCP URL, `http://127.0.0.1:7777/mcp`.
 

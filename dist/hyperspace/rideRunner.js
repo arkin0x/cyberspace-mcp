@@ -27,6 +27,7 @@
 // between the proof and the signature would otherwise repay hours.
 import { availableParallelism } from 'node:os';
 import { Worker } from 'node:worker_threads';
+import { defaultThreads } from '../budget.js';
 import { bytesToHex, hexToBytes } from 'cyberspace-core';
 import { HEX_64 } from '../nostr/event.js';
 import { SAMPLES, attemptsRequired, computeRideLeaf, expectedPricePairs, expectedRidePairs, grindAttempt, meetsPrice, rideBlocks, rideProofFor, rideTree, verifyRideLevel1, } from './ride.js';
@@ -268,7 +269,7 @@ export class RideRunner {
     now;
     constructor(cache, options) {
         this.cache = cache;
-        this.threads = options.threads ?? Math.max(1, availableParallelism() - 1);
+        this.threads = options.threads ?? defaultThreads(availableParallelism());
         this.chunkSize = options.chunkSize ?? RIDE_CHUNK_SIZE;
         this.grindChunk = options.grindChunk ?? GRIND_CHUNK;
         this.now = options.now ?? (() => performance.now());
