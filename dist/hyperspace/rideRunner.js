@@ -1,0 +1,612 @@
+// rideRunner.ts: the ride computation layer over ride.ts for the server
+// (DECK-0001 v3 5.7): leaves across worker threads, the Merkle root, the
+// price search, the sample openings, and a Level 1 self-verification before
+// a proof is handed back, all resumable from <state>/rides/ and chunked by a
+// time budget per call so the server's per-call cap holds.
+//
+// Ported from ONOSENDAI src/lib/hyperspace/ridePool.ts at commit 8cf3354
+// (branch v2): the pull queue (RIDE_CHUNK_SIZE blocks per request, a worker
+// asks for the next chunk when it finishes one, because leaf cost spans 2^10
+// to 2^22 pairings and a pre-partitioned pool idles behind the heavy
+// stretch), planChunks, pendingBlocks, assembleLeaves, grindCheckpoint, the
+// GRIND_CHUNK nonce ranges with the first hit anywhere winning, the batched
+// leaf persister and the grind checkpoint written on the same cadence, the
+// progress reporter with its ETA from the mean wall-clock per fresh leaf,
+// the one-ride-at-a-time latch, and the pool's own semantics (a worker error
+// or crash rejects, the signal rejects with AbortError). Adapted: Web Workers
+// become worker_threads (rideWorker.ts) with a shared stop flag; IndexedDB
+// becomes rideCache.ts; and the pool is given a deadline, at which it stops
+// handing out work and returns what it has, where the original ran to the
+// end or to an abort. Added: `verifyRideLevel1` over the finished proof
+// before it is returned, with the ride's cache discarded and the ride
+// recomputed when it fails, so a proof that does not verify is never handed
+// to the builder; and `estimateRideSeconds`, the price a tool quotes before
+// starting, from this server's calibration. The browser's proven-ride
+// cleanup (deleteRideRows) is not automatic here: the tool calls `forget`
+// once the hyperjump is signed and recorded, because a server that crashed
+// between the proof and the signature would otherwise repay hours.
+import { availableParallelism } from 'node:os';
+import { Worker } from 'node:worker_threads';
+import { bytesToHex, hexToBytes } from 'cyberspace-core';
+import { HEX_64 } from '../nostr/event.js';
+import { SAMPLES, attemptsRequired, computeRideLeaf, expectedPricePairs, expectedRidePairs, grindAttempt, meetsPrice, rideBlocks, rideProofFor, rideTree, verifyRideLevel1, } from './ride.js';
+import { RideCache } from './rideCache.js';
+export { grindKey, leafKey } from './rideCache.js';
+/**
+ * Blocks per worker request. Small enough that a pulled chunk represents a
+ * few seconds of average work (so the pull queue can rebalance around a
+ * heavy block), large enough that message overhead is noise.
+ */
+export const RIDE_CHUNK_SIZE = 64;
+/** Nonces per worker request in the price search: an attempt costs about one
+ * average block, so this is a second or two of work per pull. */
+export const GRIND_CHUNK = 8;
+/** How long the pool waits, after the deadline, for threads to finish the leaf in hand before terminating them. */
+const GRACE_MS = 1500;
+const FLUSH_INTERVAL_MS = 250;
+/** How often the pool looks for a cut while no thread posts. */
+const CUT_POLL_MS = 250;
+const FLUSH_BATCH = 500;
+const PROGRESS_INTERVAL_MS = 100;
+/** Below this many fresh leaves (or attempts) the rate estimate is noise; report no ETA. */
+const ETA_MIN_FRESH = 20;
+/** Split pending blocks into chunks; workers pull them in index order. */
+export function planChunks(blocks, size = RIDE_CHUNK_SIZE) {
+    const chunks = [];
+    for (let i = 0; i < blocks.length; i += size)
+        chunks.push(blocks.slice(i, i + size));
+    return chunks;
+}
+/**
+ * Where a resumed price search starts: the lowest nonce not known to miss.
+ * Ranges finish out of order, so it is the start of the lowest range still
+ * in flight, or the next range to hand out when none is.
+ */
+export function grindCheckpoint(inFlightStarts, nextStart) {
+    let low = nextStart;
+    for (const start of inFlightStarts)
+        if (start < low)
+            low = start;
+    return low;
+}
+/**
+ * The seconds a ride of n blocks is expected to take on this machine with
+ * `threads` workers: the leaves and the price attempts (5.7 expected
+ * pairings) at the pairing rate of the tallest Cantor tree the calibration
+ * timed, spread over the threads, plus the self-verification's sampled
+ * leaves on one thread. NaN without a calibration.
+ */
+export function estimateRideSeconds(c, n, threads) {
+    const heights = Object.keys(c.cantorMsByHeight).map(Number).sort((a, b) => a - b);
+    if (heights.length === 0 || n <= 0)
+        return heights.length === 0 ? NaN : 0;
+    const top = heights[heights.length - 1];
+    const msPerPair = Math.max(c.cantorMsByHeight[top], 0.5) / 2 ** top;
+    const pooled = ((expectedRidePairs(n) + expectedPricePairs(n)) * msPerPair) / Math.max(1, threads);
+    const check = Math.min(n, SAMPLES) * expectedRidePairs(1) * msPerPair;
+    return (pooled + check) / 1000;
+}
+function abortError() {
+    const err = new Error('aborted');
+    err.name = 'AbortError';
+    return err;
+}
+/** One turn of the event loop: timers, I/O and other tool calls run before the next leaf. */
+function yieldToLoop() {
+    return new Promise((resolve) => setImmediate(resolve));
+}
+function throwIfAborted(signal) {
+    if (signal?.aborted)
+        throw abortError();
+}
+/** The worker file beside this one: compiled, or the TypeScript source through tsx when running from source (vitest). */
+function workerSpec() {
+    const here = import.meta.url;
+    if (here.endsWith('.ts'))
+        return { url: new URL('./rideWorker.ts', here), execArgv: ['--import', 'tsx'] };
+    return { url: new URL('./rideWorker.js', here) };
+}
+// ---------------------------------------------------------------------------
+// Progress
+// ---------------------------------------------------------------------------
+class ProgressReporter {
+    now;
+    onProgress;
+    started;
+    total;
+    resumed;
+    attemptsExpected;
+    notes;
+    phase = 'leaves';
+    done;
+    fresh = 0;
+    attempts = 0;
+    phaseStarted;
+    lastPost = -Infinity;
+    constructor(now, onProgress, started, total, resumed, attemptsExpected, notes) {
+        this.now = now;
+        this.onProgress = onProgress;
+        this.started = started;
+        this.total = total;
+        this.resumed = resumed;
+        this.attemptsExpected = attemptsExpected;
+        this.notes = notes;
+        this.done = resumed;
+        this.phaseStarted = started;
+    }
+    snapshot() {
+        const now = this.now();
+        // Mean wall-clock per fresh leaf (or attempt) since the phase started.
+        // Resumed work costs nothing and would fake a rate; parallelism is
+        // absorbed because the mean is over wall-clock, not thread time. An
+        // attempt costs about one average block (5.5), so the leaf phase's ETA
+        // counts the price as that many more blocks.
+        let etaMs = null;
+        if (this.fresh >= ETA_MIN_FRESH) {
+            const each = (now - this.phaseStarted) / this.fresh;
+            if (this.phase === 'leaves')
+                etaMs = (this.total - this.done + this.attemptsExpected) * each;
+            else if (this.phase === 'price' && this.attempts < this.attemptsExpected)
+                etaMs = (this.attemptsExpected - this.attempts) * each;
+        }
+        if (this.phase === 'done')
+            etaMs = 0;
+        return {
+            phase: this.phase,
+            leavesDone: this.done,
+            leavesTotal: this.total,
+            leavesResumed: this.resumed,
+            attempts: this.attempts,
+            attemptsExpected: this.attemptsExpected,
+            elapsedMs: now - this.started,
+            etaMs,
+            notes: this.notes.slice(),
+        };
+    }
+    post(force) {
+        if (!this.onProgress)
+            return;
+        const now = this.now();
+        if (!force && now - this.lastPost < PROGRESS_INTERVAL_MS)
+            return;
+        this.lastPost = now;
+        this.onProgress(this.snapshot());
+    }
+    start() {
+        this.post(true);
+    }
+    leafDone() {
+        this.done++;
+        this.fresh++;
+        this.post(false);
+    }
+    /** Every leaf is in; the price search begins, `attempts` of it already tried. */
+    priceStart(attempts) {
+        this.phase = 'price';
+        this.attempts = attempts;
+        this.phaseStarted = this.now();
+        this.fresh = 0;
+        this.post(true);
+    }
+    attemptDone() {
+        this.attempts++;
+        this.fresh++;
+        this.post(false);
+    }
+    verifyStart() {
+        this.phase = 'verify';
+        this.post(true);
+    }
+    finish() {
+        this.phase = 'done';
+        this.post(true);
+    }
+}
+// ---------------------------------------------------------------------------
+// Persisters: leaves in batches, the checkpoint on the same cadence
+// ---------------------------------------------------------------------------
+class LeafPersister {
+    cache;
+    prev;
+    now;
+    buffer = [];
+    lastFlush;
+    constructor(cache, prev, now) {
+        this.cache = cache;
+        this.prev = prev;
+        this.now = now;
+        this.lastFlush = now();
+    }
+    add(height, leafHex) {
+        this.buffer.push({ height, leafHex });
+        if (this.buffer.length >= FLUSH_BATCH || this.now() - this.lastFlush >= FLUSH_INTERVAL_MS)
+            this.flush();
+    }
+    /** Runs on every settle path, so a retry resumes from here instead of repaying the work. */
+    flush() {
+        if (this.buffer.length === 0)
+            return;
+        const rows = this.buffer;
+        this.buffer = [];
+        this.cache.appendLeaves(this.prev, rows);
+        this.lastFlush = this.now();
+    }
+}
+class GrindPersister {
+    cache;
+    prev;
+    rootHex;
+    now;
+    latest = null;
+    lastFlush;
+    constructor(cache, prev, rootHex, now) {
+        this.cache = cache;
+        this.prev = prev;
+        this.rootHex = rootHex;
+        this.now = now;
+        this.lastFlush = now();
+    }
+    set(next) {
+        this.latest = next;
+        if (this.now() - this.lastFlush >= FLUSH_INTERVAL_MS)
+            this.flush();
+    }
+    flush() {
+        if (this.latest === null)
+            return;
+        this.cache.writeGrind(this.prev, this.rootHex, this.latest);
+        this.latest = null;
+        this.lastFlush = this.now();
+    }
+}
+export class RideRunner {
+    cache;
+    running = false;
+    threads;
+    chunkSize;
+    grindChunk;
+    now;
+    constructor(cache, options) {
+        this.cache = cache;
+        this.threads = options.threads ?? Math.max(1, availableParallelism() - 1);
+        this.chunkSize = options.chunkSize ?? RIDE_CHUNK_SIZE;
+        this.grindChunk = options.grindChunk ?? GRIND_CHUNK;
+        this.now = options.now ?? (() => performance.now());
+    }
+    /** Open or create `<state>/rides` and the runner over it. */
+    static open(path, options = {}) {
+        return new RideRunner(RideCache.open(path, options.guard), options);
+    }
+    /** Drop a ride's cached leaves and price search: the tool calls this once the hyperjump is signed and recorded. */
+    forget(previousEventIdHex) {
+        this.cache.forget(previousEventIdHex);
+    }
+    /**
+     * Do as much of the ride as the budget allows, then return where it stands:
+     * `done: false` with progress (everything computed is on disk; call again),
+     * or `done: true` with a proof this server has verified at Level 1. Rejects
+     * on abort (name AbortError, progress kept), on a malformed job, on a
+     * thread failure, and if a ride recomputed from scratch still does not
+     * verify, which would be a bug. One ride at a time: the pool sizes itself
+     * to the machine, and a second would only slow both.
+     */
+    async run(job, options) {
+        if (this.running)
+            throw new Error('a ride is already computing; one ride at a time');
+        this.running = true;
+        try {
+            return await this.runRide(job, options);
+        }
+        finally {
+            this.running = false;
+        }
+    }
+    async runRide(job, options) {
+        const prev = job.previousEventIdHex;
+        if (typeof prev !== 'string' || !HEX_64.test(prev))
+            throw new Error('previousEventIdHex must be 64 lowercase hex characters');
+        for (const h of [job.fromHeight, job.toHeight]) {
+            if (!Number.isSafeInteger(h) || h < 0)
+                throw new Error('fromHeight and toHeight must be block heights');
+        }
+        // There is no zero-length ride (arkinox, 2026-10-07): a ride passes at
+        // least one block, and a job with none is a bug upstream, never a proof.
+        if (job.fromHeight === job.toHeight)
+            throw new Error('a ride passes at least one block: there is no zero-length ride');
+        const blocks = rideBlocks(job.fromHeight, job.toHeight).map((height) => {
+            const blockHash = job.blockHashFor(height);
+            if (typeof blockHash !== 'string' || !HEX_64.test(blockHash))
+                throw new Error(`block ${height} has no 64-hex block hash`);
+            return { height, blockHash };
+        });
+        const started = this.now();
+        const deadline = started + Math.max(0, options.budgetSeconds) * 1000;
+        // The budget, or a cut asked from outside (the session cap for a ride
+        // computing in the background, arkinox, 2026-10-11): either ends the
+        // call the same way, with everything computed on disk.
+        const past = () => this.now() >= deadline || options.stop?.() === true;
+        const signal = options.signal;
+        throwIfAborted(signal);
+        const notes = [];
+        const attemptsExpected = attemptsRequired(blocks.length);
+        const workSeconds = () => (this.now() - started) / 1000;
+        // Two passes at most: the second only after a failed self-verification
+        // emptied the cache, and then it computes everything afresh.
+        for (let pass = 0; pass < 2; pass++) {
+            const { leaves: cached, refused } = this.cache.readLeaves(prev);
+            if (refused > 0)
+                notes.push(`${refused} cached leaf line(s) failed their check and were dropped; those leaves are recomputed`);
+            const leafHexByHeight = new Map();
+            for (const b of blocks) {
+                const hex = cached.get(b.height);
+                if (hex !== undefined)
+                    leafHexByHeight.set(b.height, hex);
+            }
+            // Keys carry the previous event id (the file is named by it), so a
+            // cache from another chain position skips nothing: its leaves are
+            // worthless here (5.3 seeds differ).
+            const pending = blocks.filter((b) => !leafHexByHeight.has(b.height));
+            const progress = new ProgressReporter(this.now, options.onProgress, started, blocks.length, blocks.length - pending.length, attemptsExpected, notes);
+            progress.start();
+            const cut = () => ({ done: false, progress: progress.snapshot(), workSeconds: workSeconds() });
+            if (pending.length > 0) {
+                const outcome = await this.computeLeaves(prev, pending, leafHexByHeight, progress, past, signal);
+                if (outcome === 'cut')
+                    return cut();
+            }
+            // Leaves arrive in completion order (a pool property, not a protocol
+            // one); 5.4 requires ascending height, so assembly follows the blocks.
+            const tree = rideTree(blocks.map((b) => {
+                const hex = leafHexByHeight.get(b.height);
+                if (hex === undefined)
+                    throw new Error(`missing ride leaf for block ${b.height}`);
+                return hexToBytes(hex);
+            }));
+            const rootHex = bytesToHex(tree.root);
+            const from = this.cache.readGrind(prev, rootHex);
+            progress.priceStart(from);
+            const found = await this.searchNonce(prev, rootHex, attemptsExpected, from, progress, past, signal);
+            if (found === null)
+                return cut();
+            const proof = rideProofFor(tree, BigInt(found.nonce), found.G);
+            // The gate: the proof is checked the way a verifier will check it,
+            // the sampled leaves recomputed from the block hashes, before anyone
+            // signs it. Bounded work (SAMPLES leaves), run whatever the budget says.
+            progress.verifyStart();
+            const verification = await verifyRideLevel1({
+                previousEventIdHex: prev, fromHeight: job.fromHeight, toHeight: job.toHeight,
+                rootHex: proof.rootHex, mp: proof.mp, mn: proof.mnHex, blockHashFor: job.blockHashFor,
+            });
+            if (verification.ok) {
+                progress.finish();
+                return { done: true, proof, verification, progress: progress.snapshot(), workSeconds: workSeconds() };
+            }
+            notes.push(`the finished proof did not verify (${verification.reason}); the cached leaves and price search for this ride were discarded, and the ride is recomputed from scratch`);
+            this.cache.forget(prev);
+            if (past())
+                return cut();
+        }
+        throw new Error('the ride was recomputed from scratch and its proof still does not verify: a bug in the ride code, not in the cache');
+    }
+    /** Phase 1: the pending leaves, into `out` and the cache, until done or the deadline. */
+    async computeLeaves(prev, pending, out, progress, past, signal) {
+        const persister = new LeafPersister(this.cache, prev, this.now);
+        const landed = (height, leafHex) => {
+            out.set(height, leafHex);
+            persister.add(height, leafHex);
+            progress.leafDone();
+        };
+        try {
+            if (this.threads === 0) {
+                // Same semantics, sequential, with a yield to the event loop per
+                // leaf (a macrotask, not a microtask: arkinox, 2026-10-11), so an
+                // abort flagged between leaves is honored promptly and the server's
+                // other tools answer between leaves while a ride computes in the
+                // background on this thread.
+                for (const { height, blockHash } of pending) {
+                    throwIfAborted(signal);
+                    if (past())
+                        return 'cut';
+                    landed(height, bytesToHex(computeRideLeaf(prev, height, blockHash)));
+                    await yieldToLoop();
+                }
+                return 'finished';
+            }
+            const chunks = planChunks(pending, this.chunkSize);
+            let nextChunk = 0;
+            return await this.runPool(Math.min(this.threads, chunks.length), {
+                next: (id) => (nextChunk < chunks.length ? { type: 'chunk', id, previousEventIdHex: prev, chunk: chunks[nextChunk++] } : null),
+                onMessage: (msg) => {
+                    if (msg.type === 'leaf')
+                        landed(msg.height, msg.leafHex);
+                    return 'continue';
+                },
+            }, past, signal);
+        }
+        finally {
+            persister.flush();
+        }
+    }
+    /** Phase 2: the price search upward from the checkpoint, until a nonce meets the price or the deadline. */
+    async searchNonce(prev, rootHex, attempts, from, progress, past, signal) {
+        const checkpoint = new GrindPersister(this.cache, prev, rootHex, this.now);
+        try {
+            if (this.threads === 0) {
+                const root = hexToBytes(rootHex);
+                for (let nonce = from;; nonce++) {
+                    throwIfAborted(signal);
+                    if (past()) {
+                        checkpoint.set(nonce);
+                        return null;
+                    }
+                    const G = grindAttempt(prev, root, BigInt(nonce));
+                    progress.attemptDone();
+                    if (meetsPrice(G, attempts)) {
+                        checkpoint.set(nonce);
+                        return { nonce, G };
+                    }
+                    checkpoint.set(nonce + 1);
+                    await yieldToLoop();
+                }
+            }
+            // Disjoint nonce ranges pulled in order, the first nonce meeting the
+            // price wins. The checkpoint trails the lowest range still in flight
+            // (a range stopped at the flag stays in flight for this purpose: its
+            // remaining nonces are not known to miss), so a resumed search repeats
+            // at most one range per thread; once a nonce is found the checkpoint
+            // is that nonce, so a resume finds it again on its first attempt.
+            let nextStart = from;
+            const ranges = new Map();
+            let found = null;
+            const outcome = await this.runPool(Math.min(this.threads, attempts), {
+                next: (id) => {
+                    const start = nextStart;
+                    nextStart += this.grindChunk;
+                    ranges.set(id, start);
+                    return { type: 'grind', id, previousEventIdHex: prev, rootHex, attempts, start, count: this.grindChunk };
+                },
+                onMessage: (msg) => {
+                    if (msg.type !== 'attempt')
+                        return 'continue';
+                    progress.attemptDone();
+                    if (msg.gHex === null)
+                        return 'continue';
+                    found = { nonce: msg.nonce, G: hexToBytes(msg.gHex) };
+                    checkpoint.set(msg.nonce);
+                    return 'finish';
+                },
+                onDone: (id, stopped) => {
+                    if (stopped || found !== null)
+                        return;
+                    ranges.delete(id);
+                    checkpoint.set(grindCheckpoint(ranges.values(), nextStart));
+                },
+            }, past, signal);
+            if (found !== null)
+                return found;
+            if (outcome === 'finished')
+                throw new Error('the price search ended without a nonce');
+            return null;
+        }
+        finally {
+            checkpoint.flush();
+        }
+    }
+    /**
+     * The pull queue both phases run on: `size` threads, each handed the next
+     * request when it finishes one. Resolves 'finished' when nothing is left
+     * and nothing is in flight (or a handler said 'finish'), 'cut' once the
+     * deadline passed and every thread stopped at the flag or the grace ran
+     * out. A thread error or crash rejects; the signal rejects with AbortError.
+     */
+    runPool(size, handlers, past, signal) {
+        return new Promise((resolve, reject) => {
+            const stopBuffer = new SharedArrayBuffer(4);
+            const stop = new Int32Array(stopBuffer);
+            const workers = [];
+            let settled = false;
+            let cutting = false;
+            let inFlight = 0;
+            let nextId = 0;
+            let grace = null;
+            // The cut is also looked for on a timer, not only when a thread posts:
+            // when every thread is deep in a heavy leaf (2^22 pairings is many
+            // seconds), nothing posts, and a cut asked from outside would wait for
+            // the next leaf to be seen (arkinox, 2026-10-11).
+            const watch = setInterval(() => { if (!settled && !cutting && past())
+                cut(); }, CUT_POLL_MS);
+            const settle = (outcome) => {
+                if (settled)
+                    return;
+                settled = true;
+                clearInterval(watch);
+                Atomics.store(stop, 0, 1);
+                if (grace !== null)
+                    clearTimeout(grace);
+                signal?.removeEventListener('abort', onAbort);
+                for (const w of workers)
+                    void w.terminate();
+                if (outcome instanceof Error)
+                    reject(outcome);
+                else
+                    resolve(outcome);
+            };
+            const onAbort = () => settle(abortError());
+            const cut = () => {
+                if (cutting)
+                    return;
+                cutting = true;
+                // Threads see the flag between leaves and post their done; the
+                // leaf in hand is kept. Past the grace, they are terminated.
+                Atomics.store(stop, 0, 1);
+                if (inFlight === 0)
+                    settle('cut');
+                else
+                    grace = setTimeout(() => settle('cut'), GRACE_MS);
+            };
+            const assign = (worker) => {
+                if (settled)
+                    return;
+                if (!cutting && past())
+                    cut();
+                if (cutting) {
+                    if (inFlight === 0)
+                        settle('cut');
+                    return;
+                }
+                const request = handlers.next(++nextId);
+                if (request === null) {
+                    if (inFlight === 0)
+                        settle('finished');
+                    return;
+                }
+                inFlight++;
+                worker.postMessage(request);
+            };
+            signal?.addEventListener('abort', onAbort);
+            if (signal?.aborted) {
+                onAbort();
+                return;
+            }
+            // A budget already spent starts no thread: starting one costs more than the nothing it would be allowed to do.
+            if (past()) {
+                settle('cut');
+                return;
+            }
+            const spec = workerSpec();
+            const workerData = { stop: stopBuffer };
+            for (let i = 0; i < size; i++) {
+                const worker = new Worker(spec.url, spec.execArgv ? { workerData, execArgv: spec.execArgv } : { workerData });
+                workers.push(worker);
+                worker.on('message', (msg) => {
+                    if (settled)
+                        return;
+                    if (msg.type === 'error') {
+                        settle(new Error(msg.message));
+                        return;
+                    }
+                    if (msg.type === 'done') {
+                        inFlight--;
+                        handlers.onDone?.(msg.id, msg.stopped);
+                        // Pull, not pre-partition: a 2^22 block stalls only its own thread.
+                        assign(worker);
+                        return;
+                    }
+                    if (handlers.onMessage(msg) === 'finish')
+                        settle('finished');
+                    else if (!cutting && past())
+                        cut();
+                });
+                // A crashed thread never posts again; without this the ride would
+                // hang silently one chunk short of done.
+                worker.on('error', (err) => settle(err instanceof Error ? err : new Error(String(err))));
+                worker.on('exit', (code) => {
+                    if (!settled && code !== 0)
+                        settle(new Error(`a ride worker exited with code ${code}`));
+                });
+                assign(worker);
+            }
+        });
+    }
+}
+//# sourceMappingURL=rideRunner.js.map

@@ -1,0 +1,169 @@
+// sno.ts: validating an SNO object payload (DECK-0003 section 1.9) and
+// saying, in plain words, what is wrong with it. sno-core's fromPayload is
+// the arbiter: it returns a model or null and never a reason, so the checks
+// of 1.9 are restated here to name the reason, and fromPayload has the last
+// word.
+//
+// Two fields sno-core repairs rather than refuses (DECK-0003 1.11, 1.12):
+// `opacity`, which sno-core 0.1.18 knows, and `constrain`, which it carries
+// in `extra`. A valid one is kept as given; a malformed one is left out and
+// named in `repaired`, and for `constrain` the default ("opaque") is written
+// in its place when the object is published (walkConstrain.ts).
+//
+// `objects` (DECK-0003 1.10: the payloads of placed objects carried inside the
+// object that places them), which sno-core 0.1.20 knows, is left out and named
+// in `ignored`, as every unknown field was before: this tool writes no table
+// until the spec section is merged (arkin0x/cyberspace#81), and then only with
+// keys under the agent's own pubkey and never into a public event.
+import { blankName, fromPayload, readOpacity, toPayload } from 'sno-core/shards';
+import { CONSTRAIN_FIELD, chosenConstrain } from './walkConstrain.js';
+const MODES = new Set(['solid', 'points', 'lines']);
+function isInt(v) {
+    return typeof v === 'number' && Number.isInteger(v);
+}
+function triple(v, pred) {
+    return Array.isArray(v) && v.length === 3 && v.every(pred);
+}
+/** The checks of DECK-0003 1.9 in order, each failure in words. */
+export function validateSnoPayload(raw) {
+    const errors = [];
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+        return { ok: false, errors: ['The payload must be a JSON object (DECK-0003 1.1).'] };
+    const p = raw;
+    if (p.v !== 1 && p.v !== 2)
+        errors.push(`v must be 1 or 2; got ${JSON.stringify(p.v)} (1.9 rule 1).`);
+    if (typeof p.name !== 'string')
+        errors.push('name must be a string (1.1).');
+    else if (blankName(p.name))
+        errors.push('name must not be blank (1.9 rule 1a).');
+    for (const k of ['ticks', 'palette', 'facecolors', 'up', 'spin', 'refs', 'parts']) {
+        if (p[k] === null)
+            errors.push(`${k}, if present, must not be null: leave it out instead (1.1).`);
+    }
+    if (!Array.isArray(p.vertices))
+        errors.push('vertices must be an array (1.9 rule 2).');
+    if (!Array.isArray(p.colors))
+        errors.push('colors must be an array (1.9 rule 2).');
+    if (!Array.isArray(p.faces))
+        errors.push('faces must be an array (1.9 rule 2).');
+    if (Array.isArray(p.vertices) && Array.isArray(p.colors) && p.vertices.length !== p.colors.length) {
+        errors.push(`vertices and colors must have the same length; got ${p.vertices.length} vertices and ${p.colors.length} colors (1.9 rule 2).`);
+    }
+    if (typeof p.mode !== 'string' || !MODES.has(p.mode))
+        errors.push(`mode must be "solid", "points" or "lines"; got ${JSON.stringify(p.mode)} (1.9 rule 4).`);
+    if (!isInt(p.unit) || p.unit < 0 || p.unit > 84)
+        errors.push(`unit must be an integer from 0 to 84; got ${JSON.stringify(p.unit)} (1.9 rule 5).`);
+    const vertices = Array.isArray(p.vertices) ? p.vertices : [];
+    vertices.forEach((v, i) => {
+        if (!triple(v, isInt))
+            errors.push(`vertex ${i} must be three integers; got ${JSON.stringify(v)} (1.9 rule 6).`);
+    });
+    if (p.ticks !== undefined) {
+        if (!Array.isArray(p.ticks))
+            errors.push('ticks, if present, must be an array (1.9 rule 7).');
+        else {
+            let count = 0;
+            let bad = false;
+            for (const t of p.ticks) {
+                if (isInt(t) && t < 0)
+                    count += -t;
+                else if (triple(t, (n) => isInt(n) && n >= 0 && n <= 119))
+                    count += 1;
+                else {
+                    bad = true;
+                    break;
+                }
+            }
+            if (bad)
+                errors.push('every ticks entry must be three integers from 0 to 119, or a negative run count (1.9 rule 7).');
+            else if (count !== vertices.length)
+                errors.push(`ticks expands to ${count} entries for ${vertices.length} vertices; it must expand to exactly one per vertex (1.9 rule 7).`);
+        }
+    }
+    const faces = Array.isArray(p.faces) ? p.faces : [];
+    faces.forEach((f, i) => {
+        if (!triple(f, (n) => isInt(n) && n >= 0 && n < vertices.length) || new Set(f).size !== 3) {
+            errors.push(`face ${i} must be three distinct vertex indices from 0 to ${vertices.length - 1}; got ${JSON.stringify(f)} (1.9 rule 8).`);
+        }
+    });
+    if (p.v === 2 && Array.isArray(p.colors)) {
+        const paletteLength = Array.isArray(p.palette) ? p.palette.length : 256;
+        p.colors.forEach((c, i) => {
+            if (!isInt(c) || c < 0 || c >= paletteLength)
+                errors.push(`color ${i} must be a palette index from 0 to ${paletteLength - 1} in a v2 payload; got ${JSON.stringify(c)} (1.9 rule 8b).`);
+        });
+    }
+    if (p.v === 1 && Array.isArray(p.colors)) {
+        p.colors.forEach((c, i) => {
+            if (!triple(c, (n) => typeof n === 'number'))
+                errors.push(`color ${i} must be three numbers in a v1 payload; got ${JSON.stringify(c)} (1.9 rule 8b).`);
+        });
+    }
+    if (p.palette !== undefined && typeof p.palette !== 'string') {
+        if (!Array.isArray(p.palette) || p.palette.length < 2 || p.palette.length > 256 || !p.palette.every((c) => triple(c, (n) => isInt(n) && n >= 0 && n <= 255))) {
+            errors.push('palette, if present, must be a name, an nevent or naddr, or 2 to 256 entries of three integers 0..255 (1.9 rule 8a).');
+        }
+    }
+    if (p.facecolors !== undefined && p.facecolors !== null) {
+        const fc = p.facecolors;
+        let count = 0;
+        const ok = Array.isArray(fc) && fc.every((e, i) => isInt(e) && (e >= 0 ? (count += 1, true) : i > 0 && (count += -e, true)));
+        if (!ok)
+            errors.push('facecolors, if present, must be palette indices and negative run counts, starting with an index (1.9 rule 8c).');
+        else if (count !== faces.length)
+            errors.push(`facecolors expands to ${count} entries for ${faces.length} faces; it must expand to exactly one per face (1.9 rule 8c).`);
+    }
+    if (p.up !== undefined && typeof p.up !== 'boolean')
+        errors.push('up, if present, must be a boolean (1.9 rule 10).');
+    if (p.spin !== undefined && (!isInt(p.spin) || p.spin < 0 || p.spin > 359))
+        errors.push('spin, if present, must be an integer from 0 to 359 (1.9 rule 10).');
+    if (p.refs !== undefined) {
+        if (!Array.isArray(p.refs))
+            errors.push('refs, if present, must be an array (1.9 rule 11).');
+        else
+            p.refs.forEach((r, i) => {
+                const ok = Array.isArray(r) && (r.length === 2 || r.length === 3) && typeof r[1] === 'string' &&
+                    ((r[0] === 'e' && /^[0-9a-f]{64}$/.test(r[1])) || (r[0] === 'a' && /^33331:[0-9a-f]{64}:/.test(r[1])));
+                if (!ok)
+                    errors.push(`ref ${i} must be ["e", <64 hex>] or ["a", "33331:<64 hex>:<d>"], optionally with a relay URL (1.9 rule 11).`);
+            });
+    }
+    if (p.parts !== undefined) {
+        if (!Array.isArray(p.parts))
+            errors.push('parts, if present, must be an array (1.9 rule 12).');
+        else {
+            const refs = Array.isArray(p.refs) ? p.refs.length : 0;
+            if (refs === 0 && p.parts.length > 0)
+                errors.push('parts without refs is a reason to reject (1.9 rule 12).');
+            p.parts.forEach((part, i) => {
+                const ok = Array.isArray(part) && part.length === 8 && part.every(isInt) &&
+                    part[0] >= 0 && part[0] < refs &&
+                    [1, 2, 3].every((k) => part[k] >= -7680 && part[k] <= 7680) &&
+                    [4, 5, 6].every((k) => part[k] >= 0 && part[k] <= 359);
+                if (!ok)
+                    errors.push(`part ${i} must be eight integers: a refs index in range, three tick offsets in -7680..7680, three whole degrees 0..359, and a scale step (1.9 rule 12).`);
+            });
+        }
+    }
+    if (errors.length > 0)
+        return { ok: false, errors };
+    const read = fromPayload(raw, 'validate');
+    if (!read)
+        return { ok: false, errors: ['sno-core refuses this payload for a reason the checks above do not name; compare it with DECK-0003 section 1.'] };
+    const { extra, objects: _held, ...bare } = read;
+    const carried = extra ?? {};
+    const chosen = chosenConstrain(carried[CONSTRAIN_FIELD]);
+    const ignored = Object.keys(carried).filter((k) => k !== CONSTRAIN_FIELD);
+    // Not written yet (see the header): named back to the agent, as before 0.1.20.
+    if (p.objects !== undefined)
+        ignored.push('objects');
+    const repaired = [];
+    if (p.opacity !== undefined && p.opacity !== 100 && readOpacity(p.opacity) === undefined)
+        repaired.push('opacity');
+    if (CONSTRAIN_FIELD in carried && !chosen)
+        repaired.push(CONSTRAIN_FIELD);
+    const shard = chosen ? { ...bare, extra: { [CONSTRAIN_FIELD]: chosen } } : bare;
+    const payload = toPayload(shard);
+    return { ok: true, shard, payload, bytes: new TextEncoder().encode(JSON.stringify(payload)).length, vertices: shard.vertices.length, faces: shard.faces.length, ignored, repaired };
+}
+//# sourceMappingURL=sno.js.map
