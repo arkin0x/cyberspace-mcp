@@ -1,8 +1,9 @@
 // doctor.ts: `cyberspace-mcp doctor` (arkinox, 2026-10-13). Checks what an
 // agent needs to answer its operator, one line each, and says what to do
 // about each thing that is missing: the state directory, the key (present
-// and this server's own; never printed), the operator set, named in the
-// profile and following the agent, the operator's DM inbox (kind 10050),
+// and this server's own; never printed), the operator (optional, D2
+// 2026-11-09: none is INFO, and the operator checks are skipped) named in
+// the profile and following the agent, the operator's DM inbox (kind 10050),
 // the agent's own kind 10050, the relays answering, serve running, and the
 // wake command starting (run with --version, so no model is called), and
 // the lock with this machine's id for it. It reads; it writes nothing and
@@ -79,10 +80,10 @@ export async function runDoctor(argv, deps) {
     const checks = [];
     const add = (c) => {
         checks.push(c);
-        const mark = c.verdict === 'ok' ? 'ok  ' : c.verdict === 'warn' ? 'WARN' : 'FAIL';
+        const mark = c.verdict === 'ok' ? 'ok  ' : c.verdict === 'info' ? 'INFO' : c.verdict === 'warn' ? 'WARN' : 'FAIL';
         print(`${mark}  ${c.name}: ${c.detail}`);
         if (c.fix && c.verdict !== 'ok')
-            print(`      fix: ${c.fix}`);
+            print(`      ${c.verdict === 'info' ? 'to change' : 'fix'}: ${c.fix}`);
     };
     const done = () => {
         const failed = checks.filter((c) => c.verdict === 'fail').length;
@@ -94,7 +95,7 @@ export async function runDoctor(argv, deps) {
     add(nodeTooOld(process.versions.node) === null ? { name: 'node', verdict: 'ok', detail: `v${process.versions.node}` } : { name: 'node', verdict: 'fail', detail: `v${process.versions.node}`, fix: `install Node ${MIN_NODE_MAJOR} or newer` });
     // The state directory and the key.
     if (!existsSync(stateDir)) {
-        add({ name: 'state directory', verdict: 'fail', detail: `${stateDir} does not exist`, fix: 'cyberspace-mcp init --operator <your npub>' });
+        add({ name: 'state directory', verdict: 'fail', detail: `${stateDir} does not exist`, fix: 'cyberspace-mcp init' });
         return done();
     }
     const mode = statSync(stateDir).mode & 0o777;
@@ -140,8 +141,10 @@ export async function runDoctor(argv, deps) {
         serveSettings = serveSettingsFrom({ ...serve, noWake: true }, file);
     }
     const operator = settings.operator ? parsePubkey(settings.operator) : null;
-    if (!operator)
-        add({ name: 'operator', verdict: 'fail', detail: settings.operator ? `not an npub: ${JSON.stringify(settings.operator)}` : 'not set', fix: 'cyberspace-mcp init --operator <your npub>' });
+    if (settings.operator && !operator)
+        add({ name: 'operator', verdict: 'fail', detail: `not an npub: ${JSON.stringify(settings.operator)}`, fix: 'cyberspace-mcp init --operator <your npub>' });
+    else if (!operator)
+        add({ name: 'operator', verdict: 'info', detail: 'none: the agent answers only to its MCP client, and operator DMs are off', fix: 'to take orders from a human by nostr DM: cyberspace-mcp init --operator <their npub>' });
     else
         add({ name: 'operator', verdict: 'ok', detail: nip19.npubEncode(operator) });
     // The profile this server last published names the operator.
@@ -153,8 +156,10 @@ export async function runDoctor(argv, deps) {
         add({ name: 'profile', verdict: 'fail', detail: named ? `names ${nip19.npubEncode(named)}, not the configured operator; no orders are read until they agree` : 'names no operator', fix: 'run cyberspace-mcp init again (with serve stopped) to republish it' });
     else if (!profile.accepted?.length)
         add({ name: 'profile', verdict: 'fail', detail: 'no relay accepted it', fix: 'check the relays below, then run cyberspace-mcp init again' });
+    else if (!operator && !settings.operator && named)
+        add({ name: 'profile', verdict: 'warn', detail: `names ${nip19.npubEncode(named)} as operator, but none is configured; that operator still gives orders until your human configures one`, fix: `cyberspace-mcp init --operator ${nip19.npubEncode(named)} to keep them, or another npub to replace them` });
     else
-        add({ name: 'profile', verdict: 'ok', detail: `bot, operator named, on ${profile.accepted.join(', ')}` });
+        add({ name: 'profile', verdict: 'ok', detail: `bot, ${operator ? 'operator named' : 'no operator'}, on ${profile.accepted.join(', ')}` });
     // The relays, and what they say about the operator and the agent.
     if (pubkey && sk) {
         const secret = sk;
