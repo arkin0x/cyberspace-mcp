@@ -112,7 +112,12 @@ describe('the server', () => {
     expect(few.getInstructions()).toContain('shows 3 of its')
     expect(await prompts(few)).toEqual([])
     await few.close()
-    const line = await connect(selectTools([...STARTER_TOOLS, 'station', 'board', 'ride', 'ride_status', 'wait_for'], false))
+    // The line's tools alone are not enough: the plan's text also names inbox, message_operator and follow_operator.
+    const lineOnly = selectTools([...STARTER_TOOLS, 'station', 'board', 'ride', 'ride_status', 'wait_for'], false)
+    const noOperatorTools = await connect(lineOnly)
+    expect(await prompts(noOperatorTools)).toEqual([])
+    await noOperatorTools.close()
+    const line = await connect(selectTools([...lineOnly, 'inbox', 'follow_operator'], false))
     expect(await prompts(line)).toEqual(['meet'])
     await line.close()
   })

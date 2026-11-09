@@ -123,8 +123,8 @@ export const TOOL_NAMES: readonly string[] = [
 /** The waker's own tools: registered whenever serve runs a waker, whatever the selection (its turns close jobs with them). */
 const WAKER_TOOLS: readonly string[] = ['wake_again', 'work_done']
 
-/** The tools the meet prompt's plan walks through; the prompt is offered only when all of them are shown. */
-const MEET_TOOLS: readonly string[] = ['identity', 'whereami', 'hop', 'station', 'board', 'ride', 'ride_status', 'look', 'say', 'wait_for']
+/** Every tool the meet prompt's text names, its operator steps included; the prompt is offered only when all of them are shown. */
+const MEET_TOOLS: readonly string[] = ['inbox', 'message_operator', 'follow_operator', 'identity', 'whereami', 'hop', 'station', 'board', 'ride', 'ride_status', 'look', 'say', 'wait_for']
 
 /** Which tools a server shows: every one, or these names. */
 export type ToolSelection = 'all' | readonly string[]
