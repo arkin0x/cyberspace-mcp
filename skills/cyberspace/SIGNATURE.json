@@ -1,0 +1,9 @@
+{
+  "format": "cyberspace-mcp-signature-v1",
+  "pubkey": "5afe1212a3d7c7062166dcc8774c8a0f6c1399c1e0d9cc47ba0f72a94d877073",
+  "npub": "npub1ttlpyy4r6lrsvgtxmny8wny2pakp8xwpurvuc3a6pae2jnv8wpestxy4ks",
+  "signed_at": "2026-11-09T01:32:45Z",
+  "manifest_sha256": "472544ee8aa98872b45a23284c7fcce5a07efd790faa9bf54c6e8ab0dcfc92cb",
+  "manifest": "cyberspace-mcp signed manifest v1\nscope: skill\n3c43433303424e660e154b8983b47fda52429683b7875ecd36aea6ebd3ddfb8c  SKILL.md\n",
+  "sig": "f258a9438028c7cbf0d11a65ee4cc301c65cfc5a20132dbdc1bbb28c9e7a283af49f0fc0d33b7fad7a3efe658716eede2289ad104aaceb82ecb1e49c645bb495"
+}
