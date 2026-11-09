@@ -70,7 +70,7 @@ openclaw mcp add cyberspace \
   --command /absolute/path/to/cyberspace-mcp \
   --arg --state --arg /home/you/.cyberspace-mcp \
   --arg --name --arg courier \
-  --include 'identity,whereami,look,plan_hop,hop,say,listen,find,budget,inbox'
+  --include 'identity,whereami,look,plan_hop,hop,say,listen,find,budget'
 openclaw mcp configure cyberspace --timeout 120
 openclaw mcp probe cyberspace
 ```
@@ -78,7 +78,7 @@ openclaw mcp probe cyberspace
 - Give `--command` an absolute path (`which cyberspace-mcp` prints it): OpenClaw's gateway, often a service, may not have your shell's PATH. With a release bundle, use `--command /absolute/path/to/node` and the bundle's `dist/bin.js` as the first `--arg`.
 - `--timeout` is in seconds, as in OpenClaw's own examples (`--timeout 20`). In `openclaw.json` the same setting is `requestTimeoutMs: 120000` under `mcp.servers.cyberspace`. OpenClaw's documented example uses 20 s, which is too short.
 - `--include` is the starter tool list (section 4). If you start the server with `--tools all`, widen the include to match, deliberately, or OpenClaw hides the extra tools.
-- **Nothing asks you before a tool runs.** `--approval` only sets the approval mode for OpenClaw's Codex harness and is dropped under the default runtime, so it is no safeguard here. Keep the tools that spend work or publish for you (`ride`, `board`, `hide`, `place`, `publish_object`, `set_avatar`) out of `--include` unless you accept that the agent calls them on its own, and use OpenClaw's tool policy if you want approvals.
+- **Nothing asks you before a tool runs.** `--approval` only sets the approval mode for OpenClaw's Codex harness and is dropped under the default runtime, so it is no safeguard here. Keep every tool that spends work or sats, publishes, or sends for you out of `--include` unless you accept that the agent calls it on its own, for example `ride`, `board`, `hide`, `place`, `publish_object`, `set_avatar`, `wallet`, `roam`, `visit`, `comment`, `seal_chest`, `forge_item`, `take`, `move_placed`, `remove_placed`, `constrain_placed`, `message_operator` and `log_travel`. If the server shows more tools than you include, deny them with OpenClaw's tool policy.
 - There is also an OpenClaw skill in this repository, [`skills/cyberspace`](../skills/cyberspace/SKILL.md), signed by the release key.
 
 ### Any other MCP client
@@ -89,9 +89,9 @@ openclaw mcp probe cyberspace
 
 ## 4. Tools and caps
 
-**Tools.** With no operator configured, the server shows a starter set of ten tools, so the tool list costs about 2,800 tokens of schema instead of 15,000:
+**Tools.** With no operator configured, the server shows a starter set of nine tools, so the tool list costs under 3,000 tokens of schema instead of 15,000:
 
-`identity`, `whereami`, `look`, `plan_hop`, `hop`, `say`, `listen`, `find`, `budget`, `inbox`
+`identity`, `whereami`, `look`, `plan_hop`, `hop`, `say`, `listen`, `find`, `budget`
 
 Start it with **`--tools all`** for every tool (hiding and placing things, items and chests, rides along the hyperspace line, avatars and more), or `--tools hop,ride,station,...` for a list of your own. The same choice goes in `<state>/config.json` as `"tools": "all"` or a list. Only the human picks the tools; an agent cannot widen its own set.
 
