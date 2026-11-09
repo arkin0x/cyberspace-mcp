@@ -20,7 +20,7 @@ import { v2 as nip44 } from 'nostr-tools/nip44';
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import { normalizeURL } from 'nostr-tools/utils';
 import { toPayload } from 'sno-core/shards';
-import { Budget } from './budget.js';
+import { Budget, DAILY_BUDGET_FILE, DEFAULT_CAP_DAILY_SECONDS } from './budget.js';
 import { ACTION_KIND, chainTemplateProblem, hopTemplate, sidestepTemplate, spawnTemplate } from './chain/builder.js';
 import { findDivergence } from './chain/divergence.js';
 import { CHAIN_RULES_REVISION, buildChain, chainStatus, newestSpawn } from './chain/events.js';
@@ -192,7 +192,11 @@ export class Agent {
             guard: (event) => this.guardChainEvent(event),
         });
         this.keys = new KeyStore(dir);
-        this.budget = new Budget(config.capCallSeconds, config.capSessionSeconds);
+        this.budget = new Budget(config.capCallSeconds, config.capSessionSeconds, {
+            capDailySeconds: config.capDailySeconds ?? DEFAULT_CAP_DAILY_SECONDS,
+            store: { read: () => dir.readJson(DAILY_BUDGET_FILE, null), write: (r) => dir.writeJson(DAILY_BUDGET_FILE, r) },
+            now: config.budgetClock,
+        });
         // The wallet talks to its own relays with the connection's own key; nothing of it reaches the agent's relays (wallet.ts, nwc.ts).
         this.wallet = new Wallet(dir, {
             nwc: config.nwc ?? null, source: config.nwcSource ?? 'the configuration', maxPaymentSats: config.maxPaymentSats ?? DEFAULT_MAX_PAYMENT_SATS, maxDailySats: config.maxDailySats ?? DEFAULT_MAX_DAILY_SATS,
@@ -204,7 +208,7 @@ export class Agent {
             calibration: () => this.calibration, sign: (t) => this.sign(t), settle: () => this.settle(), refreshChain: () => this.refreshChain(), log: this.log,
             // The operator channel is built below; these are called only from tool calls and the background, long after.
             undeliverable: () => this.operatorChannel.undeliverable(), messageOperator: (text) => this.operatorChannel.message(text), wallet: this.wallet,
-        }, { manifestUrl: config.manifestUrl, fetch: config.lineFetch, threads: config.rideThreads, now: config.rideClock, hosakaUrl: config.hosakaUrl, hosakaFetch: config.hosakaFetch, hosakaPollMs: config.hosakaPollMs, hosakaQuoteWaitMs: config.hosakaQuoteWaitMs });
+        }, { manifestUrl: config.manifestUrl, fetch: config.lineFetch, threads: config.rideThreads ?? config.threads, now: config.rideClock, hosakaUrl: config.hosakaUrl, hosakaFetch: config.hosakaFetch, hosakaPollMs: config.hosakaPollMs, hosakaQuoteWaitMs: config.hosakaQuoteWaitMs });
         this.chat = new Chat(dir, this.relays, this.keys, {
             pubkey: this.pubkey, name: () => this.name, sign: (t) => this.sign(t), log: this.log,
             // The same operator DMs answer to: the one the profile names, unless the human configured another.
@@ -237,7 +241,14 @@ export class Agent {
                 this.budget.renew();
                 this.log(`session budget renewed by the operator's CONTINUE (renewal ${this.budget.renewals})`);
                 const ride = this.transit.rideState();
-                return `Your operator's CONTINUE (KEEP GOING) renewed your session budget: a fresh ${this.budget.capSessionSeconds} s of work (the session before it spent ${spent.toFixed(1)} s). The cap itself is unchanged.${ride.state === 'paused_cap' ? ` Your ride to block ${ride.to} is paused at the cap: call ride with to: ${ride.to} to resume it from the cache.` : ''}`;
+                // A KEEP GOING never renews the daily cap (D3): when today's allowance is what binds, say so instead of promising a fresh session.
+                const b = this.budget.state();
+                const dailyBinds = b.remainingTodaySeconds !== null && b.remainingTodaySeconds < b.capSessionSeconds;
+                const daily = dailyBinds ? ` But today's daily cap still binds: ${b.remainingTodaySeconds.toFixed(1)} s of work left of ${b.capDailySeconds} s until it starts over at ${b.dailyResetsAt}. A KEEP GOING never renews it; only your human raises it (--cap-daily-seconds).` : '';
+                const rideWords = ride.state !== 'paused_cap' ? ''
+                    : this.budget.remainingSeconds() > 0 ? ` Your ride to block ${ride.to} is paused at the cap: call ride with to: ${ride.to} to resume it from the cache.`
+                        : ` Your ride to block ${ride.to} stays paused at the daily cap until ${b.dailyResetsAt}; then ride with to: ${ride.to} resumes it from the cache.`;
+                return `Your operator's CONTINUE (KEEP GOING) renewed your session budget: a fresh ${this.budget.capSessionSeconds} s of work (the session before it spent ${spent.toFixed(1)} s). The cap itself is unchanged.${daily}${rideWords}`;
             },
         });
         this.follow = new OperatorWatch({
@@ -2368,12 +2379,12 @@ export class Agent {
         if (shard) {
             const payload = JSON.parse(template.content);
             const { bits, eventBytes } = avatarPrice(payload, template, this.pubkey);
-            const threads = this.config.avatarThreads ?? avatarThreads();
+            const threads = this.config.avatarThreads ?? avatarThreads(this.config.threads);
             const estimate = avatarSeconds(bits, eventBytes, this.calibration.sha256PerSec, threads);
             const over = this.budget.refusal(estimate);
             if (over)
                 throw new Refusal(`This avatar owes ${bits} bits of work (spec 8.10: reach and detail), about ${estimate.toFixed(1)} s expected on ${threads} thread(s). ${over} A smaller shape (nearer the build origin, fewer vertices and faces) costs less.`);
-            const limit = Math.min(this.budget.capCallSeconds, this.budget.capSessionSeconds - this.budget.spentSeconds);
+            const limit = Math.min(this.budget.capCallSeconds, this.budget.remainingSeconds());
             this.avatarBusy = true;
             let outcome;
             try {
@@ -2519,7 +2530,7 @@ export class Agent {
     budgetState() {
         const b = this.budget.state();
         return {
-            text: `Work: ${b.remainingSessionSeconds.toFixed(1)} s left of ${b.capSessionSeconds} s this session, at most ${b.capCallSeconds} s per call; ${b.spentSeconds.toFixed(1)} s spent over ${b.moves} move(s) and the keys derived above h${SCAN_MAX_HEIGHT}. Chat: ${b.chatLinesSaid} line(s) said, ${this.chat.unpromptedAllowance} unprompted line(s) allowed before the next arrival, one line per 5 s, 500 characters. Sidestep cap h${this.config.maxSidestepHeight}; hop ceiling h${this.ceilings().hop} on this machine.`,
+            text: `Work: ${b.remainingSessionSeconds.toFixed(1)} s left of ${b.capSessionSeconds} s this session, at most ${b.capCallSeconds} s per call; ${b.spentSeconds.toFixed(1)} s spent over ${b.moves} move(s) and the keys derived above h${SCAN_MAX_HEIGHT}.${b.capDailySeconds !== null ? ` Today (UTC, across restarts): ${b.spentTodaySeconds.toFixed(1)} s spent, ${b.remainingTodaySeconds.toFixed(1)} s left of the ${b.capDailySeconds} s daily cap, which starts over at ${b.dailyResetsAt}.` : ''} Chat: ${b.chatLinesSaid} line(s) said, ${this.chat.unpromptedAllowance} unprompted line(s) allowed before the next arrival, one line per 5 s, 500 characters. Sidestep cap h${this.config.maxSidestepHeight}; hop ceiling h${this.ceilings().hop} on this machine.`,
             data: { ...b, unpromptedAllowance: this.chat.unpromptedAllowance, ceilings: this.ceilings(), maxSidestepHeight: this.config.maxSidestepHeight },
         };
     }

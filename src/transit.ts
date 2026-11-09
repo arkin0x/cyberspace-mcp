@@ -481,16 +481,27 @@ export class Transit {
       blocks,
       expectedSeconds: Number(seconds.toFixed(2)),
       fitsCall: seconds <= budget.capCallSeconds,
-      fitsSession: seconds <= budget.remainingSessionSeconds,
+      // The session's seconds and, under the daily cap, today's: whichever is less (D3).
+      fitsSession: seconds <= budget.remainingSessionSeconds && (budget.remainingTodaySeconds === null || seconds <= budget.remainingTodaySeconds),
       calls: Math.max(1, Math.ceil(seconds / budget.capCallSeconds)),
     }
+  }
+
+  /** How a quote stands against the session cap and today's daily cap, naming whichever binds. */
+  private capWordsFor(q: RideQuote): string {
+    const b = this.body.budget.state()
+    const daily = b.remainingTodaySeconds
+    const dailyBinds = daily !== null && daily < b.remainingSessionSeconds
+    if (q.fitsSession) return `within the session cap (${b.remainingSessionSeconds.toFixed(1)} s left)${dailyBinds ? ` and today's daily cap (${daily.toFixed(1)} s left)` : ''}`
+    if ((q.expectedSeconds ?? 0) > b.remainingSessionSeconds) return `ABOVE the session cap (${b.remainingSessionSeconds.toFixed(1)} s left of ${b.capSessionSeconds} s)`
+    return `ABOVE today's daily cap (${(daily ?? 0).toFixed(1)} s left of ${b.capDailySeconds} s, counted across restarts; it starts over at ${b.dailyResetsAt}, and only your human raises it)`
   }
 
   private quoteWords(q: RideQuote): string {
     const b = this.body.budget.state()
     if (q.refused) return `Quote to block ${q.destination}: REFUSED. ${q.refused}`
     const exit = q.exitDistance === 0 ? 'you stand on that stop now' : `that stop is h${q.exitDistance} from where you stand now`
-    return `Quote to block ${q.destination}: from ${q.chained ? 'the stop you stand at' : 'your station'}, block ${q.fromHeight}${q.asOf !== undefined ? ` (as_of ${q.asOf})` : ''}, ${q.blocks} block(s), expected to take about ${q.expectedSeconds} s on this machine with ${threadWords(q.threads)}: ${q.fitsSession ? `within the session cap (${b.remainingSessionSeconds.toFixed(1)} s left)` : `ABOVE the session cap (${b.remainingSessionSeconds.toFixed(1)} s left of ${b.capSessionSeconds} s)`}, ${q.fitsCall ? 'within one call' : `about ${q.calls} calls at ${b.capCallSeconds} s each`}. After it you stand at ${stopWords(this.store.line.stopAt(q.destination)!, this.store.line.stopCoordHex(q.destination)!)}; ${exit}. Leaving the stop for another coordinate is a hop or a sidestep, priced by plan_hop.`
+    return `Quote to block ${q.destination}: from ${q.chained ? 'the stop you stand at' : 'your station'}, block ${q.fromHeight}${q.asOf !== undefined ? ` (as_of ${q.asOf})` : ''}, ${q.blocks} block(s), expected to take about ${q.expectedSeconds} s on this machine with ${threadWords(q.threads)}: ${this.capWordsFor(q)}, ${q.fitsCall ? 'within one call' : `about ${q.calls} calls at ${b.capCallSeconds} s each`}. After it you stand at ${stopWords(this.store.line.stopAt(q.destination)!, this.store.line.stopCoordHex(q.destination)!)}; ${exit}. Leaving the stop for another coordinate is a hop or a sidestep, priced by plan_hop.`
   }
 
   /**

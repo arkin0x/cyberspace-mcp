@@ -96,6 +96,19 @@ describe('the daily cap', () => {
     expect(new Budget(15, 180, { capDailySeconds: 1800, store: memoryStore({ day: '2026-11-08', spentSeconds: 1800 }), now: () => now }).refusal(1)).toBeNull()
   })
 
+  it('a clock set back never hands out a fresh allowance: a record of a later day is kept until that day is over', () => {
+    let now = Date.parse('2026-11-09T10:00:00Z')
+    const store = memoryStore({ day: '2026-11-10', spentSeconds: 1790 })
+    const b = new Budget(15, 180, { capDailySeconds: 1800, store, now: () => now })
+    expect(b.state().spentTodaySeconds).toBe(1790)
+    expect(b.refusal(11)).toMatch(/daily cap of 1800 s/)
+    expect(b.state().dailyResetsAt).toBe('2026-11-11T00:00:00.000Z')
+    b.spendWork(1)
+    expect(store.record).toEqual({ day: '2026-11-10', spentSeconds: 1791 })
+    now = Date.parse('2026-11-11T00:00:01Z')
+    expect(b.state().spentTodaySeconds).toBe(0)
+  })
+
   it('is none without a cap (a library caller that sets none), and a malformed record reads as zero', () => {
     expect(new Budget(15, 180).state().capDailySeconds).toBeNull()
     expect(new Budget(15, 180).remainingSeconds()).toBe(180)

@@ -364,7 +364,14 @@ describe('the hyperspace tools, on a fresh key over the fixture line', () => {
     expect(a.budget.state().remainingTodaySeconds).toBe(0)
     expect(a.rideStatus().text).toMatch(/paused at the daily cap: today's work .* has reached its 1800 s/)
     expect(a.rideStatus().text).toContain('--cap-daily-seconds')
-    a.budget.renew()
+    // A quote now names the daily cap that binds, not the session's.
+    const quote = await a.station({ destination: dest })
+    expect((quote.data.quote as { fitsSession: boolean }).fitsSession).toBe(false)
+    expect(quote.text).toMatch(/ABOVE today's daily cap \(0\.0 s left of 1800 s/)
+    // The operator's KEEP GOING renews the session and says plainly that the day still binds.
+    const renewed = (a.operatorChannel as unknown as { deps: { renew: () => string } }).deps.renew()
+    expect(renewed).toMatch(/today's daily cap still binds: 0\.0 s of work left of 1800 s/)
+    expect(renewed).toMatch(/stays paused at the daily cap until 2026-11-10T00:00:00\.000Z/)
     await expect(a.ride({ to: dest })).rejects.toThrow(/paused at the daily cap/)
     expect(a.transit.rideState()).toMatchObject({ state: 'paused_cap', done: paused.done })
     // A new UTC day: the allowance starts over and the ride resumes where it stopped.

@@ -355,7 +355,14 @@ export class Agent {
         this.budget.renew()
         this.log(`session budget renewed by the operator's CONTINUE (renewal ${this.budget.renewals})`)
         const ride = this.transit.rideState()
-        return `Your operator's CONTINUE (KEEP GOING) renewed your session budget: a fresh ${this.budget.capSessionSeconds} s of work (the session before it spent ${spent.toFixed(1)} s). The cap itself is unchanged.${ride.state === 'paused_cap' ? ` Your ride to block ${ride.to} is paused at the cap: call ride with to: ${ride.to} to resume it from the cache.` : ''}`
+        // A KEEP GOING never renews the daily cap (D3): when today's allowance is what binds, say so instead of promising a fresh session.
+        const b = this.budget.state()
+        const dailyBinds = b.remainingTodaySeconds !== null && b.remainingTodaySeconds < b.capSessionSeconds
+        const daily = dailyBinds ? ` But today's daily cap still binds: ${b.remainingTodaySeconds!.toFixed(1)} s of work left of ${b.capDailySeconds} s until it starts over at ${b.dailyResetsAt}. A KEEP GOING never renews it; only your human raises it (--cap-daily-seconds).` : ''
+        const rideWords = ride.state !== 'paused_cap' ? ''
+          : this.budget.remainingSeconds() > 0 ? ` Your ride to block ${ride.to} is paused at the cap: call ride with to: ${ride.to} to resume it from the cache.`
+            : ` Your ride to block ${ride.to} stays paused at the daily cap until ${b.dailyResetsAt}; then ride with to: ${ride.to} resumes it from the cache.`
+        return `Your operator's CONTINUE (KEEP GOING) renewed your session budget: a fresh ${this.budget.capSessionSeconds} s of work (the session before it spent ${spent.toFixed(1)} s). The cap itself is unchanged.${daily}${rideWords}`
       },
     })
     this.follow = new OperatorWatch({

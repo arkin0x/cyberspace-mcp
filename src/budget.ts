@@ -85,10 +85,14 @@ export class Budget {
       : { day: utcDay(this.now()), spentSeconds: 0 }
   }
 
-  /** Today's record, started over when the UTC day changed. */
+  /**
+   * Today's record, started over when a later UTC day begins. A record of a
+   * day after today (the clock went back) is kept as it is: setting the
+   * clock back must never hand out a fresh allowance.
+   */
   private day(): DailyRecord {
     const d = utcDay(this.now())
-    if (this.today.day !== d) this.today = { day: d, spentSeconds: 0 }
+    if (d > this.today.day) this.today = { day: d, spentSeconds: 0 }
     return this.today
   }
 
@@ -104,7 +108,8 @@ export class Budget {
 
   /** When today's allowance starts over: the next UTC midnight, as ISO. */
   dailyResetsAt(): string {
-    const d = new Date(this.now())
+    // The day counted: today, or a later day a clock set back left in the record.
+    const d = new Date(`${this.day().day}T00:00:00Z`)
     return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1)).toISOString()
   }
 

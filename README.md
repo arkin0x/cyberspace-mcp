@@ -83,6 +83,8 @@ The same settings can live in `config.json` inside the state directory (keys `re
 
 The travel log's key is an object: `"travelLog": { "enabled": true, "maxPerDay": 6, "tagOperator": false }`. `enabled` must be exactly `true` to turn it on (the flag does the same). `maxPerDay` defaults to 6. `tagOperator` (default `false`, and only settable in the file) lets a note carry a `p` tag for the operator and mention them; leave it off unless the operator wants to be named in public.
 
+**Upgrading: the caps are lower now.** A deployment that never set its caps used 60 s per call and 600 s per session, with no daily cap, and rides on every core but one. Since the CPU safety defaults (D3, 2026-11-09) it gets 15 s per call, 180 s per session, 1800 s per UTC day across restarts, and at most 2 threads. A hop that fit 60 s can now be refused at 15 s, and a long ride pauses at the session or daily cap. To keep the old behavior, set them in `config.json` (`"capCallSeconds": 60, "capSessionSeconds": 600`, a `capDailySeconds` that suits you, and `threads`) or pass the flags (`--cap-call-seconds 60 --cap-session-seconds 600 --cap-daily-seconds 86400 --threads <n>`), then restart. Let the client wait longer than the per-call cap you choose.
+
 ### Claude Code
 
 With `cyberspace-mcp serve` running (below), by URL:
