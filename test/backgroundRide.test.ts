@@ -208,10 +208,20 @@ describe('a ride in the background, on real threads (arkinox, 2026-10-11)', () =
     expect(new Set(heldAtPause).size).toBe(heldAtPause.length)
     expect((await a.ordersWaiting()).data.ride).toMatchObject({ state: 'paused', done: heldAtPause.length })
 
-    // Resume: the cached leaves are picked up, and the work goes on.
+    // Resume: the cached leaves are picked up, and the work goes on: two
+    // more leaves while it computes, or the whole ride to ready. How many
+    // leaves the pause held is up to the machine's load (the leaves in hand
+    // finish first; 5 to 12 of 16 in a loop on two loaded cores). Asking for
+    // two more leaves while "computing" could never be met once the pause
+    // held 15 or 16, nor once the rest of the ride finished between two polls
+    // of a starved main thread: CI waited out the 120 s here (2026-11-09),
+    // and the next test then resumed and signed that same ride.
     const resumed = await a.ride({ to })
     expect(resumed.text).toContain('Resumed from the pause')
-    await until(() => a.transit.rideState().done >= heldAtPause.length + 2 && a.transit.rideState().state === 'computing')
+    await until(() => {
+      const r = a.transit.rideState()
+      return r.state === 'ready' || (r.state === 'computing' && r.done >= heldAtPause.length + 2)
+    })
     expect((a.rideStatus().data.ride as { progress: { leavesResumed: number } }).progress.leavesResumed).toBe(heldAtPause.length)
   }, 180_000)
 
