@@ -250,13 +250,17 @@ describe('an agent on a fresh key', () => {
     const here = a.keeper.place()
     const other = here.plane === 0 ? 1 : 0
     const twin = { x: here.position.x.toString(), y: here.position.y.toString(), z: here.position.z.toString(), plane: other }
-    const first = await a.hide({ contents: { message: 'said in this plane' }, coordinate: { dx: 0 }, height: 8 })
+    const first = await a.hide({ contents: { message: 'said in this plane' }, coordinate: { dx: 0 }, height: 8, hint_heights: [10, 10, 10] })
     expect(first.data.entries).toBe(1)
     // The twin cube in the other plane has the same key and lookup id, so it is the same bag, rewritten whole.
     const second = await a.hide({ contents: { message: 'said in the twin plane' }, coordinate: twin, height: 8 })
     expect(second.data.lookupId).toBe(first.data.lookupId)
     expect(second.data.carried).toBe(1)
     expect(second.data.entries).toBe(2)
+    // The hint keeps the plane it named: the bag still holds an entry there (spec 7.6 Planes, The hint).
+    const bagNow = mine.all().filter((e) => e.kind === 33330 && e.id === second.data.bagId)[0]
+    const hintCoord = bagNow.tags.find((t) => t[0] === 'hint')![1]
+    expect(parseInt(hintCoord[63], 16) & 1).toBe(here.plane)
     const found = await a.find({})
     const bag = (found.data.bags as OpenedBag[]).find((b) => b.lookupId === first.data.lookupId)!
     expect(bag.entries.map((e) => e.label)).toEqual(['said in this plane'])
@@ -384,6 +388,12 @@ describe('an agent on a fresh key', () => {
     expect(await a.chat.receive(await envelope('from the twin plane', here.plane === 0 ? 1 : 0))).toEqual([])
     const heard = await a.chat.receive(await envelope('from this plane', here.plane))
     expect(heard.map((l) => l.text)).toEqual(['from this plane'])
+    expect(heard[0].plane).toBe(here.plane)
+    // A change of plane alone keeps the room and changes the history heard: this plane's line is not the other plane's.
+    a.chat.enter(placeOf(here.position, here.plane === 0 ? 1 : 0))
+    expect(a.chat.linesHere().map((l) => l.text)).not.toContain('from this plane')
+    a.chat.enter(here)
+    expect(a.chat.linesHere().map((l) => l.text)).toContain('from this plane')
   })
 
   it('finds a key item and holds it, and opens chests sealed to the key and to itself, never reporting a secret', async () => {

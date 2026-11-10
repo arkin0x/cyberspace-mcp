@@ -38,6 +38,11 @@ import { SCAN_MAX_HEIGHT } from './space/regionKeys.js';
 export const SAY_INTERVAL_S = 5;
 /** Lines kept, oldest dropped first. */
 const CHAT_MAX = 500;
+/** A heard line's plane, from its C, as a field to spread: none when it names none. */
+function planeOf(e) {
+    const p = planeOfC(e.tags);
+    return p === null ? {} : { plane: p };
+}
 const FILE = 'chat.json';
 /** The 26 positions one cube of side 2^h away from `at`, those inside cyberspace. */
 export function neighborPositions(at, h) {
@@ -223,7 +228,7 @@ export class Chat extends EventEmitter {
         this.lastSaidAt = now;
         if (!replyTo)
             this.unpromptedAllowance--;
-        const line = { id: inner.id, from: inner.pubkey, text: inner.content, at: inner.created_at, region: key.lookupId, height: key.height, mine: true, addressed: false, heardAt: now };
+        const line = { id: inner.id, from: inner.pubkey, text: inner.content, at: inner.created_at, region: key.lookupId, height: key.height, mine: true, addressed: false, heardAt: now, plane: place.plane };
         this.lines = mergeLines(this.lines, [line]);
         this.save();
         return { id: inner.id, region: key.lookupId, accepted: result.accepted, reasons: result.reasons };
@@ -248,7 +253,7 @@ export class Chat extends EventEmitter {
             return [];
         const me = { pubkey: this.me.pubkey, npub: this.npub, name: this.me.name() };
         const add = inners.map((e) => ({
-            id: e.id, from: e.pubkey, text: e.content.slice(0, MAX_CHAT_LENGTH), at: e.created_at, region, height: key.height,
+            id: e.id, from: e.pubkey, text: e.content.slice(0, MAX_CHAT_LENGTH), at: e.created_at, region, height: key.height, ...planeOf(e),
             mine: e.pubkey === this.me.pubkey, addressed: e.pubkey !== this.me.pubkey && mentionsMe(e, me), heardAt: now, unread: e.pubkey !== this.me.pubkey,
         }));
         const before = this.lines;
@@ -261,10 +266,19 @@ export class Chat extends EventEmitter {
             this.emit('line', l);
         return fresh;
     }
-    /** Lines heard since a time (inclusive), or since the last call with "last". */
+    /**
+     * The lines kept that belong to the plane the agent stands in: one said in
+     * the other plane, kept before a change of plane, is not part of this
+     * room's history here (DECK-0005 §3.2, The plane). A line with no plane is
+     * in both.
+     */
+    linesHere() {
+        return this.lines.filter((l) => l.plane === undefined || this.plane === null || l.plane === this.plane);
+    }
+    /** Lines heard since a time (inclusive), or since the last call with "last", in the plane the agent stands in. */
     heard(since, now = nowSeconds()) {
         const from = since === 'last' ? (this.lastListenAt ?? 0) : since;
-        const out = this.lines.filter((l) => l.heardAt >= from || l.at >= from);
+        const out = this.linesHere().filter((l) => l.heardAt >= from || l.at >= from);
         const read = new Set(out.map((l) => l.id));
         // Returned is read: what orders_waiting counts as unread is what listen has not shown.
         this.lines = this.lines.map((l) => (l.unread && read.has(l.id) ? { ...l, unread: false } : l));
@@ -293,7 +307,7 @@ export class Chat extends EventEmitter {
                 if (!kept.has(id))
                     this.woken.delete(id);
         }
-        const unread = this.lines.filter((l) => l.unread && !l.mine);
+        const unread = this.linesHere().filter((l) => l.unread && !l.mine);
         const addressed = unread.filter((l) => l.addressed);
         const fresh = addressed.filter((l) => !this.woken.has(l.id));
         const windowS = (this.me.wakeMinutes ?? DEFAULT_CHAT_WAKE_MINUTES) * 60;

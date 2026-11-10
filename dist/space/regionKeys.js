@@ -59,7 +59,7 @@ export function sealerOfSeen(c) {
  * (`unread`): find here to read them.
  */
 export function bagInPlane(bag, plane) {
-    const entries = bag.entries.filter((e) => e.plane === plane);
+    const entries = bag.entries.filter((e) => e.anyPlane || e.plane === plane);
     const readHere = bag.plane === undefined || bag.plane === plane;
     return { entries, elsewhere: bag.entries.length - entries.length + (readHere ? bag.elsewhere ?? 0 : 0), unread: readHere ? 0 : bag.elsewhere ?? 0 };
 }

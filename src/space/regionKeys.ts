@@ -58,6 +58,8 @@ export interface EntrySummary {
   author: string
   at: { x: string; y: string; z: string }
   plane: Plane
+  /** The entry names no plane (a reference with no coordinate), so it stands in both (spec §7.6 Planes); `plane` is then only where it was read. */
+  anyPlane?: true
   createdAt: number
   /** A message's preview, a shard's name, a key's or chest's name. Text from cyberspace: untrusted. */
   label: string
@@ -227,7 +229,7 @@ export interface OpenedBag {
  * (`unread`): find here to read them.
  */
 export function bagInPlane(bag: OpenedBag, plane: Plane): { entries: EntrySummary[]; elsewhere: number; unread: number } {
-  const entries = bag.entries.filter((e) => e.plane === plane)
+  const entries = bag.entries.filter((e) => e.anyPlane || e.plane === plane)
   const readHere = bag.plane === undefined || bag.plane === plane
   return { entries, elsewhere: bag.entries.length - entries.length + (readHere ? bag.elsewhere ?? 0 : 0), unread: readHere ? 0 : bag.elsewhere ?? 0 }
 }

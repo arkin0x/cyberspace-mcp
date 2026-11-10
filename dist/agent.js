@@ -33,7 +33,7 @@ import { causeWords, decideSelfCheck } from './chain/selfCheck.js';
 import { AVATAR_KIND, MAX_AVATAR_BYTES, avatarPrice, avatarSeconds, avatarTemplate, nonceTagged, paidShard, verifyAvatarWork } from './avatar.js';
 import { avatarThreads, mineAvatar } from './avatarMine.js';
 import { Chat } from './chat.js';
-import { CHAT_KIND, HIDDEN_KIND, MAX_ABOUT, MAX_ITEM_NAME, carriedTags, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference, audioLabel, itemLineage, keyInnerTemplate, messageInnerTemplate, messagePreview, objectTemplate, payloadBytes, referenceCount, referenceTo, rumorOf, shardInnerTemplate, unbag, wantsReference, entryKey, } from './hidden/bags.js';
+import { CHAT_KIND, HIDDEN_KIND, MAX_ABOUT, MAX_ITEM_NAME, bagEntries, carriedTags, hintPlaneFor, namesNoPlane, planeOfEntry, sameHintBox, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference, audioLabel, itemLineage, keyInnerTemplate, messageInnerTemplate, messagePreview, objectTemplate, payloadBytes, referenceCount, referenceTo, rumorOf, shardInnerTemplate, unbag, wantsReference, entryKey, } from './hidden/bags.js';
 import { MAX_COMMENT_LENGTH, itemKind, sealedComment } from './hidden/comments.js';
 import { forgeKey, openWithSecret, openerFor, readContents, requiresLabel, sealEntries } from './hidden/chests.js';
 import { CASHU_TOKEN, chestStatus, contentLine, contentRow, handle, itemRow, placeWords, purposeOf, takenRow } from './items.js';
@@ -659,7 +659,7 @@ export class Agent {
             keys: this.keys.keysContaining(place.position),
             bags: this.keys.bagsContaining(place.position),
             people,
-            lines: this.chat.lines,
+            lines: this.chat.linesHere(),
             budget: this.budget.state(),
             relays: { canonical: this.relays.canonical, others: this.relays.others },
             blind,
@@ -1569,6 +1569,7 @@ export class Agent {
         const label = h.type === 'message' ? messagePreview(h.text ?? '', 80) : h.type === 'shard' ? (h.shard?.name ?? 'shard') : h.type === 'key' ? (h.key?.name ?? 'key') : h.type === 'audio' ? (h.audio ? audioLabel(h.audio) : 'audio') : (h.chest?.name ?? 'chest');
         const summary = {
             type: h.type, eventId: h.eventId, author: h.inner.pubkey, at: { x: h.at.x.toString(), y: h.at.y.toString(), z: h.at.z.toString() }, plane: h.plane, createdAt: h.createdAt, label,
+            ...(namesNoPlane(h) ? { anyPlane: true } : {}),
             ...(h.type === 'message' && CASHU_TOKEN.test(h.text ?? '') ? { coin: true } : {}),
             ...(h.ref ? { byReference: true } : {}),
             ...(!h.ref && itemLineage(h.inner) !== h.eventId ? { lineage: itemLineage(h.inner) } : {}),
@@ -1653,7 +1654,6 @@ export class Agent {
                 const base = { x: BigInt(key.base.x), y: BigInt(key.base.y), z: BigInt(key.base.z) };
                 const items = await unbag(ev, regionKey, (ref) => this.resolveReference(ref), { at: base, plane }, key.height);
                 const refs = await referenceCount(ev, regionKey);
-                const resolved = items.filter((h) => h.ref).length;
                 if (items.length === 0 && refs === 0) {
                     unreadable.push(`bag ${ev.id.slice(0, 8)}... by ${ev.pubkey.slice(0, 8)}... in the h${key.height} cube did not open with the key for that cube, or holds nothing this server reads`);
                     continue;
@@ -1663,10 +1663,14 @@ export class Agent {
                 // Planes): only what stands in this plane is found here. An entry with
                 // no C took this plane from unbag's origin. What the other plane holds
                 // is counted, never summarized, so no item there is held from here.
-                const here = items.filter((h) => h.plane === plane);
+                const here = items.filter((h) => h.plane === plane || namesNoPlane(h));
+                // Not retrieved, counted as find counts what it lists: the references
+                // in this plane, or naming none, that did not resolve.
+                const refsHere = (await bagEntries(ev, regionKey)).filter((e) => isReference(e) && [null, plane].includes(planeOfEntry(e))).length;
+                const missingHere = Math.max(0, refsHere - here.filter((h) => h.ref).length);
                 const bag = {
                     lookupId: key.lookupId, bagId: ev.id, author: ev.pubkey, createdAt: ev.created_at, height: key.height, base: key.base,
-                    entries: here.map((h) => this.summarize(h, key.lookupId)), missing: refs - resolved, riddle: settings.riddle, hint: settings.hint, at: nowSeconds(),
+                    entries: here.map((h) => this.summarize(h, key.lookupId)), missing: missingHere, riddle: settings.riddle, hint: settings.hint, at: nowSeconds(),
                     plane, elsewhere: items.length - here.length,
                 };
                 this.keys.noteBag(bag);
@@ -1734,7 +1738,8 @@ export class Agent {
         const candidates = (await this.relays.query(filter)).filter((ev) => {
             const h = heightHint(ev);
             const read = parseHint(ev.tags, h ?? 1);
-            return read && read.heights.join(',') === heights.join(',') && tagValue(ev, 'hint') === hintTag[1];
+            // The box on the axes alone: the hint's plane names where to look, and a bag's twin in the other plane is the same bag (spec 7.7).
+            return read && read.heights.join(',') === heights.join(',') && sameHintBox(tagValue(ev, 'hint'), hintTag[1]);
         });
         if (candidates.length === 0)
             return { text: `No bag on the relays carries the hint ${hintTag[1].slice(0, 16)}... at heights ${heights.join(',')}.`, data: { hint: hintTag, bags: [], unreadable: [] } };
@@ -1924,7 +1929,9 @@ export class Agent {
             const merged = [...carried, ...entries.filter((e) => !have.has(entryKey(e)))];
             const riddle = (input.riddle ?? currentSettings?.riddle ?? '').slice(0, MAX_RIDDLE_LENGTH);
             const createdAt = Math.max(now, (current?.created_at ?? 0) + 1, this.placements.floor(key.lookupId));
-            const template = await bagTemplate(merged, regionKey, key.lookupId, height, createdAt, HIDDEN_KIND, { heightTag: currentSettings?.heightTag ?? true, hint, riddle, contents: currentSettings?.contents, money: currentSettings?.money }, { at: at.position, plane: at.plane });
+            // A hint the agent gives now names its plane; one carried forward keeps its own while the bag holds an entry there (spec 7.6 Planes, The hint).
+            const hintPlane = input.hint_heights ? at.plane : hintPlaneFor(current, merged, at.plane);
+            const template = await bagTemplate(merged, regionKey, key.lookupId, height, createdAt, HIDDEN_KIND, { heightTag: currentSettings?.heightTag ?? true, hint, riddle, contents: currentSettings?.contents, money: currentSettings?.money }, { at: at.position, plane: hintPlane });
             const bag = this.sign(template);
             // Recorded whole before it is sent, so no later rewrite builds on an older copy, whichever relays take it.
             this.keys.noteOwnBag(key, createdAt, { bagId: bag.id, event: bag });
@@ -2010,7 +2017,7 @@ export class Agent {
             const merged = have.has(entryKey(ref)) ? carried : [...carried, ref];
             const settings = current ? bagSettingsOf(current, height) : { heightTag: true, hint: null, riddle: '' };
             const createdAt = Math.max(now, (current?.created_at ?? 0) + 1, this.placements.floor(key.lookupId));
-            const bag = this.sign(await bagTemplate(merged, regionKey, key.lookupId, height, createdAt, HIDDEN_KIND, settings, { at: at.position, plane: at.plane }));
+            const bag = this.sign(await bagTemplate(merged, regionKey, key.lookupId, height, createdAt, HIDDEN_KIND, settings, { at: at.position, plane: hintPlaneFor(current, merged, at.plane) }));
             // Recorded whole before it is sent, so no later rewrite builds on an older copy, whichever relays take it.
             this.keys.noteOwnBag(key, createdAt, { bagId: bag.id, event: bag });
             const entry = this.outbox.add(bag);

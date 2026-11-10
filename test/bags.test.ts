@@ -7,7 +7,7 @@ import { generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { newShard } from 'sno-core/shards'
 import {
   CHAT_BAG_KIND, CHAT_KIND, HIDDEN_KIND, KEY_KIND, bagEntries, bagSettingsOf, bagTemplate, heightHint, chatInnerTemplate, chatInners, chatRumor, chestInnerTemplate, chestItemOf, ciphertextOf,
-  keyInnerTemplate, keyItemOf, messageInnerTemplate, objectTemplate, readItem, referenceTo, unbag, entryKey, planeOfC,
+  keyInnerTemplate, keyItemOf, messageInnerTemplate, objectTemplate, readItem, referenceTo, unbag, entryKey, planeOfC, planeOfEntry, hintPlaneFor, sameHintBox,
 } from '../src/hidden/bags.js'
 import { forgeKey, openWithSecret, openerFor, readContents, sealEntries } from '../src/hidden/chests.js'
 import { decryptForRegion, encryptForRegion } from '../src/hidden/crypto.js'
@@ -289,5 +289,31 @@ describe('planeOfC (spec 7.6 Planes)', () => {
     expect(planeOfC([['C', c]])).toBeNull()
     expect(planeOfC([['p', `${c}5`]])).toBeNull()
     expect(planeOfC([])).toBeNull()
+  })
+})
+
+describe('planes of entries and of the hint (spec 7.6 Planes)', () => {
+  const c = 'c4924924924924924924920c53c81e9d260623340e5c3a75b6de6e4715cd172'
+  const d = `${c}4`
+  const i = `${c}5`
+  const item = (coord?: string) => ({ kind: 1, pubkey: 'p'.repeat(64), created_at: 1, content: 'x', tags: coord ? [['C', coord]] : [], id: 'i'.repeat(64) })
+  it('an entry names the plane of its C, or of its reference coordinate, or none', () => {
+    expect(planeOfEntry(item(d))).toBe(0)
+    expect(planeOfEntry(item(i))).toBe(1)
+    expect(planeOfEntry(item())).toBeNull()
+    expect(planeOfEntry(['a', '33331:p:d', '', i])).toBe(1)
+    expect(planeOfEntry(['a', '33331:p:d', ''])).toBeNull()
+  })
+  it('the hint keeps its plane while the bag holds an entry there, and otherwise moves to one that does', () => {
+    const hinted = (coord: string) => ({ tags: [['hint', coord, '10', '10', '10']] })
+    expect(hintPlaneFor(null, [item(i)], 1)).toBe(1)
+    expect(hintPlaneFor(hinted(d), [item(d), item(i)], 1)).toBe(0)
+    expect(hintPlaneFor(hinted(d), [item(i)], 1)).toBe(1)
+    expect(hintPlaneFor(hinted(d), [item(i), ['a', '33331:p:d', '']], 1)).toBe(0)
+  })
+  it('two hints name the same box whatever plane each names', () => {
+    expect(sameHintBox(d, i)).toBe(true)
+    expect(sameHintBox(d, `${c}6`)).toBe(false)
+    expect(sameHintBox(d, undefined)).toBe(false)
   })
 })
