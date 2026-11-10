@@ -57,4 +57,12 @@ export const EMBEDDED_CHECKPOINTS: Checkpoint[] = [
   // against blockstream.info and blockchain.info. Head-blob checkpoints sit one
   // every 1,000 blocks (h % 1000 == 999), as every older one does too.
   { height: 971999, blockHash: '00000000000000000000d5c8611c63c98822c10b9ff61cec2d728429a2fd2d82' },
+  // Pinned 2026-11-10 (the same entry as ONOSENDAI#658), when nth headers-v1
+  // grew the head blob from 971999 to 975226 (arkin0x/nth#10). The head does
+  // not end on a checkpoint height this time, so this pin lands INSIDE the
+  // head and is verified there; the 227 blocks after it share its difficulty
+  // window and end on the manifest's own checkpoint. Cross-checked against
+  // blockstream.info and mempool.space, and the 80-byte header from
+  // blockstream.info hashes to it.
+  { height: 974999, blockHash: '0000000000000000000034698d1530f1294ec6c2937e0e366df8f17a5b614376' },
 ]
