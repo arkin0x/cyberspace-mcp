@@ -15,7 +15,8 @@ import { generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { fromPayload } from 'sno-core/shards'
 import { Agent, Refusal } from '../src/agent.js'
 import { hopTemplate, spawnTemplate } from '../src/chain/builder.js'
-import { bytesToHex, signEvent } from '../src/nostr/event.js'
+import { CHAT_BAG_KIND, bagTemplate, chatInnerTemplate, chatRumor } from '../src/hidden/bags.js'
+import { bytesToHex, hexToBytes, signEvent } from '../src/nostr/event.js'
 import { DEFAULT_RELAY } from '../src/nostr/relays.js'
 import type { Calibration } from '../src/space/calibration.js'
 import { placeFromHex, placeOf } from '../src/space/coords.js'
@@ -245,6 +246,33 @@ describe('an agent on a fresh key', () => {
     expect(entriesOf(await a.find({})).map((e) => e.type)).toContain('shard')
   }, 30_000)
 
+  it('one bag holds both planes: a rewrite from the other plane keeps this plane\'s entries, and find and look show each plane only its own (spec 7.6 Planes)', async () => {
+    const here = a.keeper.place()
+    const other = here.plane === 0 ? 1 : 0
+    const twin = { x: here.position.x.toString(), y: here.position.y.toString(), z: here.position.z.toString(), plane: other }
+    const first = await a.hide({ contents: { message: 'said in this plane' }, coordinate: { dx: 0 }, height: 8 })
+    expect(first.data.entries).toBe(1)
+    // The twin cube in the other plane has the same key and lookup id, so it is the same bag, rewritten whole.
+    const second = await a.hide({ contents: { message: 'said in the twin plane' }, coordinate: twin, height: 8 })
+    expect(second.data.lookupId).toBe(first.data.lookupId)
+    expect(second.data.carried).toBe(1)
+    expect(second.data.entries).toBe(2)
+    const found = await a.find({})
+    const bag = (found.data.bags as OpenedBag[]).find((b) => b.lookupId === first.data.lookupId)!
+    expect(bag.entries.map((e) => e.label)).toEqual(['said in this plane'])
+    expect(bag.plane).toBe(here.plane)
+    expect(bag.elsewhere).toBe(1)
+    expect(found.text).toContain('said in this plane')
+    expect(found.text).not.toContain('said in the twin plane')
+    expect(found.text).toContain('1 more in')
+    const look = await a.look()
+    expect(look.text).toContain('said in this plane')
+    expect(look.text).not.toContain('said in the twin plane')
+    const lookBag = (look.data.bags as OpenedBag[]).find((b) => b.lookupId === first.data.lookupId)!
+    expect(lookBag.entries.map((e) => e.label)).toEqual(['said in this plane'])
+    expect(lookBag.elsewhere).toBe(1)
+  }, 30_000)
+
   it('a found shard carrying `objects`, placed by its id, is signed without them (validateSnoPayload is the only guard)', async () => {
     // As find reads one (sno-core fromPayload knows DECK-0003 1.10): someone's object carrying the piece it places.
     const THEM = getPublicKey(generateSecretKey())
@@ -344,6 +372,19 @@ describe('an agent on a fresh key', () => {
     expect((look.data.people as Array<{ pubkey: string }>).map((p) => p.pubkey)).toContain(pubB)
     expect(look.text).toContain('WHO IS HERE')
   }, 60_000)
+
+  it('a line said in the other plane at the same X, Y and Z is not heard (DECK-0005 3.2, The plane)', async () => {
+    const room = a.chat.room.current!
+    const here = a.keeper.place()
+    const sk = generateSecretKey()
+    const speaker = getPublicKey(sk)
+    const now = Math.floor(Date.now() / 1000)
+    const envelope = async (text: string, plane: 0 | 1) => signEvent(await bagTemplate([chatRumor(chatInnerTemplate(text, here.position, plane, now, room.lookupId), speaker)], hexToBytes(room.keyHex), room.lookupId, room.height, now, CHAT_BAG_KIND), sk)
+    // The room's key and d are the same in both planes, so the twin plane's envelope opens here; its line's C says where it was said.
+    expect(await a.chat.receive(await envelope('from the twin plane', here.plane === 0 ? 1 : 0))).toEqual([])
+    const heard = await a.chat.receive(await envelope('from this plane', here.plane))
+    expect(heard.map((l) => l.text)).toEqual(['from this plane'])
+  })
 
   it('finds a key item and holds it, and opens chests sealed to the key and to itself, never reporting a secret', async () => {
     const here = a.here()

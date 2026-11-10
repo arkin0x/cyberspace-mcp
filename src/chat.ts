@@ -32,7 +32,8 @@
 import { EventEmitter } from 'node:events'
 import { nip19 } from 'nostr-tools'
 import type { Filter } from 'nostr-tools/filter'
-import { CHAT_BAG_KIND, MAX_CHAT_LENGTH, bagTemplate, chatInnerTemplate, chatInners, chatRumor } from './hidden/bags.js'
+import type { Plane } from 'cyberspace-core'
+import { CHAT_BAG_KIND, MAX_CHAT_LENGTH, bagTemplate, chatInnerTemplate, chatInners, chatRumor, planeOfC } from './hidden/bags.js'
 import { hexToBytes, nowSeconds, type EventTemplate, type NostrEvent } from './nostr/event.js'
 import type { Relays } from './nostr/relays.js'
 import { AXIS_LIMIT, type Place, type Position } from './space/coords.js'
@@ -168,6 +169,8 @@ export class Chat extends EventEmitter {
   private current: HeldKey | null = null
   private neighbors = new Map<string, HeldKey>()
   private cube: string | null = null
+  /** The plane the agent stands in: a line is heard only there (DECK-0005 §3.2, The plane). */
+  private plane: Plane | null = null
   private stopLive: (() => void) | null = null
   private readonly npub: string
   /** Resolves when the current subscription has heard a relay say EOSE: it is listening. */
@@ -211,6 +214,9 @@ export class Chat extends EventEmitter {
    * around it, and listen on all 27. Recomputed only when the cube changes.
    */
   enter(place: Place): void {
+    // Before the cube check: the keys are the same in both planes, so a
+    // change of plane alone keeps the room and changes only what is heard.
+    this.plane = place.plane
     const key = cubeKey(place.position, SCAN_MAX_HEIGHT)
     if (key === this.cube && this.current) return
     this.cube = key
@@ -288,7 +294,14 @@ export class Chat extends EventEmitter {
     if (!region) return []
     const key = this.current?.lookupId === region ? this.current : this.neighbors.get(region) ?? this.keys.byLookupId(region)
     if (!key) return []
-    const inners = await chatInners(outer, hexToBytes(key.keyHex))
+    // A room's key and d are shared by both planes, so a line said in the
+    // other plane at these X, Y and Z arrives here too; its C says which
+    // plane it was said in, and only lines of this plane are heard. A line
+    // with no C names no plane, and is heard in both (spec §7.6 Planes).
+    const inners = (await chatInners(outer, hexToBytes(key.keyHex))).filter((e) => {
+      const p = planeOfC(e.tags)
+      return p === null || this.plane === null || p === this.plane
+    })
     if (inners.length === 0) return []
     const me = { pubkey: this.me.pubkey, npub: this.npub, name: this.me.name() }
     const add = inners.map((e): ChatLine => ({

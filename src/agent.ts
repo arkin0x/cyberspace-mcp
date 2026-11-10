@@ -65,7 +65,7 @@ import { describePlace, distanceBetween, distanceWords, parseCoordinate, placeFr
 import { apartOnBestAxis, nearestClear, overlapping, spacingFor, type Body } from './space/personalSpace.js'
 import { AvatarSizes } from './avatarSizes.js'
 import { planSummary, priceNextStep, type Ceilings, type PricedStep } from './space/plan.js'
-import { KeyStore, keyItemOfHeld, MAX_COMPUTE_HEIGHT, SCAN_MAX_HEIGHT, SCAN_MIN_HEIGHT, sealerOfSeen, type EntrySummary, type HeldItem, type HeldKey, type ItemPlace, type OpenedBag, type SeenChest } from './space/regionKeys.js'
+import { bagInPlane, KeyStore, keyItemOfHeld, planeName, MAX_COMPUTE_HEIGHT, SCAN_MAX_HEIGHT, SCAN_MIN_HEIGHT, sealerOfSeen, type EntrySummary, type HeldItem, type HeldKey, type ItemPlace, type OpenedBag, type SeenChest } from './space/regionKeys.js'
 import { StateDir, type HeldLock } from './state/dir.js'
 import { Refusal, type ToolResult } from './tool.js'
 import { Transit } from './transit.js'
@@ -1757,9 +1757,15 @@ export class Agent {
           continue
         }
         const settings = bagSettingsOf(ev, key.height)
+        // One bag holds both planes, and each entry's C says which (spec §7.6
+        // Planes): only what stands in this plane is found here. An entry with
+        // no C took this plane from unbag's origin. What the other plane holds
+        // is counted, never summarized, so no item there is held from here.
+        const here = items.filter((h) => h.plane === plane)
         const bag: OpenedBag = {
           lookupId: key.lookupId, bagId: ev.id, author: ev.pubkey, createdAt: ev.created_at, height: key.height, base: key.base,
-          entries: items.map((h) => this.summarize(h, key.lookupId)), missing: refs - resolved, riddle: settings.riddle, hint: settings.hint, at: nowSeconds(),
+          entries: here.map((h) => this.summarize(h, key.lookupId)), missing: refs - resolved, riddle: settings.riddle, hint: settings.hint, at: nowSeconds(),
+          plane, elsewhere: items.length - here.length,
         }
         this.keys.noteBag(bag)
         bags.push(bag)
@@ -1771,8 +1777,11 @@ export class Agent {
   private describeBags(bags: OpenedBag[], here: Place): string[] {
     const out: string[] = []
     for (const b of bags) {
-      out.push(`bag by ${b.author.slice(0, 8)}... in the h${b.height} cube (base x ${b.base.x} y ${b.base.y} z ${b.base.z}), ${b.entries.length} entr${b.entries.length === 1 ? 'y' : 'ies'}${b.missing ? `, ${b.missing} reference(s) not retrieved` : ''}${b.riddle ? `, riddle (untrusted): "${b.riddle}"` : ''}${b.hint ? `, hinted at heights ${b.hint.join(',')}` : ''}`)
-      for (const e of b.entries) {
+      const plane = b.plane ?? here.plane
+      const { entries, elsewhere } = bagInPlane(b, plane)
+      const other = elsewhere ? `, and ${elsewhere} more in ${planeName(plane === 0 ? 1 : 0)} (one bag holds both planes; they are not here)` : ''
+      out.push(`bag by ${b.author.slice(0, 8)}... in the h${b.height} cube (base x ${b.base.x} y ${b.base.y} z ${b.base.z}), ${entries.length} entr${entries.length === 1 ? 'y' : 'ies'} in ${planeName(plane)}${other}${b.missing ? `, ${b.missing} reference(s) not retrieved` : ''}${b.riddle ? `, riddle (untrusted): "${b.riddle}"` : ''}${b.hint ? `, hinted at heights ${b.hint.join(',')}` : ''}`)
+      for (const e of entries) {
         const at = placeOf({ x: BigInt(e.at.x), y: BigInt(e.at.y), z: BigInt(e.at.z) }, e.plane)
         const same = at.hex === here.hex ? 'right here' : `at x ${e.at.x} y ${e.at.y} z ${e.at.z}`
         let more = ''

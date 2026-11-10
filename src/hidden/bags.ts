@@ -905,6 +905,19 @@ async function fromReference(ref: Reference, outer: NostrEvent, regionKey: Uint8
 }
 
 /**
+ * The plane an entry's `C` names (spec §7.6 Planes): the low bit of its
+ * 64-hex coordinate, or null when it carries no well-formed `C`. A region's
+ * key and lookup id are the same in both planes, so one bag, and one chat
+ * room, holds both, and only an entry's own `C` says which plane it is in.
+ * An entry with no `C` names no plane, and is in both.
+ */
+export function planeOfC(tags: readonly (readonly string[])[]): Plane | null {
+  const c = tags.find((t) => t[0] === 'C')?.[1]?.toLowerCase()
+  if (!c || !HEX_64.test(c)) return null
+  return (parseInt(c[63], 16) & 1) as Plane
+}
+
+/**
  * The chat lines in an ephemeral envelope: every inner that is a CHAT_KIND,
  * is said by the key that signed the envelope, and whose id is its own hash.
  * A line is a rumor (chatRumor) with no signature; a line from an older

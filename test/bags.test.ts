@@ -7,7 +7,7 @@ import { generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { newShard } from 'sno-core/shards'
 import {
   CHAT_BAG_KIND, CHAT_KIND, HIDDEN_KIND, KEY_KIND, bagEntries, bagSettingsOf, bagTemplate, heightHint, chatInnerTemplate, chatInners, chatRumor, chestInnerTemplate, chestItemOf, ciphertextOf,
-  keyInnerTemplate, keyItemOf, messageInnerTemplate, objectTemplate, readItem, referenceTo, unbag, entryKey,
+  keyInnerTemplate, keyItemOf, messageInnerTemplate, objectTemplate, readItem, referenceTo, unbag, entryKey, planeOfC,
 } from '../src/hidden/bags.js'
 import { forgeKey, openWithSecret, openerFor, readContents, sealEntries } from '../src/hidden/chests.js'
 import { decryptForRegion, encryptForRegion } from '../src/hidden/crypto.js'
@@ -277,5 +277,17 @@ describe('key and chest items (Keys and Chests B1, as ONOSENDAI writes them at f
     expect(openerFor(read, [held], 'me')).toEqual({ by: 'key', key: held })
     expect(openerFor(read, [], lockPub)).toEqual({ by: 'self' })
     expect(openerFor(read, [], 'someone else')).toBeNull()
+  })
+})
+
+describe('planeOfC (spec 7.6 Planes)', () => {
+  it('reads the plane from the low bit of a well-formed C, and none without one', () => {
+    const c = 'c4924924924924924924920c53c81e9d260623340e5c3a75b6de6e4715cd172'
+    expect(planeOfC([['C', `${c}4`]])).toBe(0)
+    expect(planeOfC([['C', `${c}5`]])).toBe(1)
+    expect(planeOfC([['C', `${c}F`]])).toBe(1)
+    expect(planeOfC([['C', c]])).toBeNull()
+    expect(planeOfC([['p', `${c}5`]])).toBeNull()
+    expect(planeOfC([])).toBeNull()
   })
 })
