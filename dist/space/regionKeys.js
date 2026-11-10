@@ -52,6 +52,21 @@ export function keyItemOfHeld(held) {
 export function sealerOfSeen(c) {
     return !c.inChest || c.vouches ? c.author : undefined;
 }
+/**
+ * The entries of a noted bag that stand in `plane` (spec §7.6 Planes), and
+ * how many it holds in the other plane, as far as this server knows. A bag
+ * read from the other plane says what it holds in this one only as a count
+ * (`unread`): find here to read them.
+ */
+export function bagInPlane(bag, plane) {
+    const entries = bag.entries.filter((e) => e.anyPlane || e.plane === plane);
+    const readHere = bag.plane === undefined || bag.plane === plane;
+    return { entries, elsewhere: bag.entries.length - entries.length + (readHere ? bag.elsewhere ?? 0 : 0), unread: readHere ? 0 : bag.elsewhere ?? 0 };
+}
+/** The name of a plane, as reports say it. */
+export function planeName(plane) {
+    return plane === 0 ? 'dataspace' : 'ideaspace';
+}
 const KEYS_FILE = 'keys/regions.json';
 const BAGS_FILE = 'keys/bags.json';
 const ITEMS_FILE = 'keys/items.json';

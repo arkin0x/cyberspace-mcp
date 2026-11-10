@@ -32,7 +32,8 @@
 import { EventEmitter } from 'node:events'
 import { nip19 } from 'nostr-tools'
 import type { Filter } from 'nostr-tools/filter'
-import { CHAT_BAG_KIND, MAX_CHAT_LENGTH, bagTemplate, chatInnerTemplate, chatInners, chatRumor } from './hidden/bags.js'
+import type { Plane } from 'cyberspace-core'
+import { CHAT_BAG_KIND, MAX_CHAT_LENGTH, bagTemplate, chatInnerTemplate, chatInners, chatRumor, planeOfC } from './hidden/bags.js'
 import { hexToBytes, nowSeconds, type EventTemplate, type NostrEvent } from './nostr/event.js'
 import type { Relays } from './nostr/relays.js'
 import { AXIS_LIMIT, type Place, type Position } from './space/coords.js'
@@ -43,6 +44,12 @@ import type { StateDir } from './state/dir.js'
 export const SAY_INTERVAL_S = 5
 /** Lines kept, oldest dropped first. */
 const CHAT_MAX = 500
+
+/** A heard line's plane, from its C, as a field to spread: none when it names none. */
+function planeOf(e: { tags: string[][] }): { plane?: Plane } {
+  const p = planeOfC(e.tags)
+  return p === null ? {} : { plane: p }
+}
 
 export interface ChatLine {
   /** The inner event's id: the line's identity, what stops a repeat. */
@@ -62,6 +69,8 @@ export interface ChatLine {
   heardAt: number
   /** Not yet returned by listen. Lines kept before this field existed read as read. */
   unread?: boolean
+  /** The plane its C names (DECK-0005 §3.2, The plane). Absent: it names none, or was kept before this field existed; heard in both. */
+  plane?: Plane
 }
 
 /** What orders_waiting says about chat, from memory: lines from others that listen has not returned yet. */
@@ -168,6 +177,8 @@ export class Chat extends EventEmitter {
   private current: HeldKey | null = null
   private neighbors = new Map<string, HeldKey>()
   private cube: string | null = null
+  /** The plane the agent stands in: a line is heard only there (DECK-0005 §3.2, The plane). */
+  private plane: Plane | null = null
   private stopLive: (() => void) | null = null
   private readonly npub: string
   /** Resolves when the current subscription has heard a relay say EOSE: it is listening. */
@@ -211,6 +222,9 @@ export class Chat extends EventEmitter {
    * around it, and listen on all 27. Recomputed only when the cube changes.
    */
   enter(place: Place): void {
+    // Before the cube check: the keys are the same in both planes, so a
+    // change of plane alone keeps the room and changes only what is heard.
+    this.plane = place.plane
     const key = cubeKey(place.position, SCAN_MAX_HEIGHT)
     if (key === this.cube && this.current) return
     this.cube = key
@@ -276,7 +290,7 @@ export class Chat extends EventEmitter {
     if (!result.ok) return { refused: `Not sent: ${result.reason}` }
     this.lastSaidAt = now
     if (!replyTo) this.unpromptedAllowance--
-    const line: ChatLine = { id: inner.id, from: inner.pubkey, text: inner.content, at: inner.created_at, region: key.lookupId, height: key.height, mine: true, addressed: false, heardAt: now }
+    const line: ChatLine = { id: inner.id, from: inner.pubkey, text: inner.content, at: inner.created_at, region: key.lookupId, height: key.height, mine: true, addressed: false, heardAt: now, plane: place.plane }
     this.lines = mergeLines(this.lines, [line])
     this.save()
     return { id: inner.id, region: key.lookupId, accepted: result.accepted, reasons: result.reasons }
@@ -288,11 +302,18 @@ export class Chat extends EventEmitter {
     if (!region) return []
     const key = this.current?.lookupId === region ? this.current : this.neighbors.get(region) ?? this.keys.byLookupId(region)
     if (!key) return []
-    const inners = await chatInners(outer, hexToBytes(key.keyHex))
+    // A room's key and d are shared by both planes, so a line said in the
+    // other plane at these X, Y and Z arrives here too; its C says which
+    // plane it was said in, and only lines of this plane are heard. A line
+    // with no C names no plane, and is heard in both (spec §7.6 Planes).
+    const inners = (await chatInners(outer, hexToBytes(key.keyHex))).filter((e) => {
+      const p = planeOfC(e.tags)
+      return p === null || this.plane === null || p === this.plane
+    })
     if (inners.length === 0) return []
     const me = { pubkey: this.me.pubkey, npub: this.npub, name: this.me.name() }
     const add = inners.map((e): ChatLine => ({
-      id: e.id, from: e.pubkey, text: e.content.slice(0, MAX_CHAT_LENGTH), at: e.created_at, region, height: key.height,
+      id: e.id, from: e.pubkey, text: e.content.slice(0, MAX_CHAT_LENGTH), at: e.created_at, region, height: key.height, ...planeOf(e),
       mine: e.pubkey === this.me.pubkey, addressed: e.pubkey !== this.me.pubkey && mentionsMe(e, me), heardAt: now, unread: e.pubkey !== this.me.pubkey,
     }))
     const before = this.lines
@@ -304,10 +325,20 @@ export class Chat extends EventEmitter {
     return fresh
   }
 
-  /** Lines heard since a time (inclusive), or since the last call with "last". */
+  /**
+   * The lines kept that belong to the plane the agent stands in: one said in
+   * the other plane, kept before a change of plane, is not part of this
+   * room's history here (DECK-0005 §3.2, The plane). A line with no plane is
+   * in both.
+   */
+  linesHere(): ChatLine[] {
+    return this.lines.filter((l) => l.plane === undefined || this.plane === null || l.plane === this.plane)
+  }
+
+  /** Lines heard since a time (inclusive), or since the last call with "last", in the plane the agent stands in. */
   heard(since: number | 'last', now: number = nowSeconds()): ChatLine[] {
     const from = since === 'last' ? (this.lastListenAt ?? 0) : since
-    const out = this.lines.filter((l) => l.heardAt >= from || l.at >= from)
+    const out = this.linesHere().filter((l) => l.heardAt >= from || l.at >= from)
     const read = new Set(out.map((l) => l.id))
     // Returned is read: what orders_waiting counts as unread is what listen has not shown.
     this.lines = this.lines.map((l) => (l.unread && read.has(l.id) ? { ...l, unread: false } : l))
@@ -336,7 +367,7 @@ export class Chat extends EventEmitter {
       const kept = new Set(this.lines.map((l) => l.id))
       for (const id of this.woken) if (!kept.has(id)) this.woken.delete(id)
     }
-    const unread = this.lines.filter((l) => l.unread && !l.mine)
+    const unread = this.linesHere().filter((l) => l.unread && !l.mine)
     const addressed = unread.filter((l) => l.addressed)
     const fresh = addressed.filter((l) => !this.woken.has(l.id))
     const windowS = (this.me.wakeMinutes ?? DEFAULT_CHAT_WAKE_MINUTES) * 60

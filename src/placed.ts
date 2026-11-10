@@ -42,7 +42,7 @@
 
 import { coordToXyz, hexToCoord, type Plane } from 'cyberspace-core'
 import {
-  HIDDEN_KIND, OBJECT_KIND, PROTECTED_TAG, SHARD_KIND, bagSettingsOf, bagTemplate, ciphertextOf, editedTemplate, entryKey, isReference, itemLineage, messagePreview, resealedObject, rumorOf, sealedAsRumor, unbag,
+  HIDDEN_KIND, OBJECT_KIND, PROTECTED_TAG, SHARD_KIND, bagSettingsOf, bagTemplate, ciphertextOf, editedTemplate, entryKey, hintPlaneFor, isReference, itemLineage, messagePreview, namesNoPlane, planeOfEntry, resealedObject, rumorOf, sealedAsRumor, unbag,
   type BagEntry, type BagSettings, type Hidden, type HiddenType, type Reference, type Rumor,
 } from './hidden/bags.js'
 import { decryptForRegion } from './hidden/crypto.js'
@@ -83,6 +83,8 @@ export interface PlacedEntry {
   label: string
   at: { x: string; y: string; z: string }
   plane: Plane
+  /** It names no plane (no `C`, or a reference with no coordinate), so it stands in both (spec 7.6 Planes); `plane` is then not the entry's own. */
+  anyPlane?: true
   createdAt: number
   /** How it is carried, when it is not inline: an object sealed to this place, or a public object placed by reference. */
   byReference?: 'sealed' | 'public'
@@ -417,12 +419,14 @@ export class Placements {
     const point = entryPoint(e)
     const at = h ? { x: h.at.x.toString(), y: h.at.y.toString(), z: h.at.z.toString() } : point ? { x: point.position.x.toString(), y: point.position.y.toString(), z: point.position.z.toString() } : (bag.base ?? { x: '?', y: '?', z: '?' })
     const plane = (h?.plane ?? point?.plane ?? 0) as Plane
+    // No C on the entry (and, for a reference, none on what it names): in both planes, never assumed to be dataspace.
+    const anyPlane = planeOfEntry(e) === null && (h ? namesNoPlane(h) : true) ? { anyPlane: true as const } : {}
     if (isReference(e)) {
       const sealed = !!h && h.inner.kind === OBJECT_KIND && h.inner.tags.some((t) => t[0] === 'encrypted')
       const id = sealed ? h!.inner.id : objectHandle(`${bag.lookupId}/${key}`)
       return {
         id, lineage: e[0] === 'a' ? e[1] : null, type: h ? h.type : 'unreadable', label: h ? labelOf(h) : `a reference this server could not retrieve (${e[1].slice(0, 24)}...)`,
-        at, plane, createdAt: h?.createdAt ?? bag.createdAt, byReference: h ? (sealed ? 'sealed' : 'public') : undefined, objectAddress: e[0] === 'a' ? e[1] : undefined,
+        at, plane, ...anyPlane, createdAt: h?.createdAt ?? bag.createdAt, byReference: h ? (sealed ? 'sealed' : 'public') : undefined, objectAddress: e[0] === 'a' ? e[1] : undefined,
         key, entry: e, hidden: h, bag,
       }
     }
@@ -430,15 +434,15 @@ export class Placements {
     return {
       id: String(inner.id ?? objectHandle(`${bag.lookupId}/${key}`)), lineage: h ? itemLineage(h.inner) : null, type: h ? h.type : 'unreadable',
       label: h ? labelOf(h) : `an entry of kind ${inner.kind} this server does not read (kept as it is)`,
-      at, plane, createdAt: typeof inner.created_at === 'number' ? inner.created_at : bag.createdAt, key, entry: e, hidden: h, bag,
+      at, plane, ...anyPlane, createdAt: typeof inner.created_at === 'number' ? inner.created_at : bag.createdAt, key, entry: e, hidden: h, bag,
     }
   }
 
   private static publicRow(r: Row): PlacedEntry {
-    const { id, lineage, type, label, at, plane, createdAt, byReference, objectAddress } = r
+    const { id, lineage, type, label, at, plane, anyPlane, createdAt, byReference, objectAddress } = r
     const shard = r.hidden?.shard
     const walk = shard ? { constrain: chosenConstrainOf(shard) ?? null, opacity: readOpacity(shard.opacity) ?? 100 } : undefined
-    return { id, lineage, type, label, at, plane, createdAt, ...(byReference ? { byReference } : {}), ...(objectAddress ? { objectAddress } : {}), ...(walk ? { walk } : {}) }
+    return { id, lineage, type, label, at, plane, ...(anyPlane ? { anyPlane } : {}), createdAt, ...(byReference ? { byReference } : {}), ...(objectAddress ? { objectAddress } : {}), ...(walk ? { walk } : {}) }
   }
 
   private static rows(reading: Reading): Row[] {
@@ -534,7 +538,8 @@ export class Placements {
   /** Sign a bag version, newer than every version and deletion this server signed for it. */
   private async signBag(entries: BagEntry[], key: Pick<HeldKey, 'lookupId' | 'keyHex' | 'height' | 'base'>, settings: BagSettings, place: { position: Position; plane: Plane }, current: NostrEvent | null): Promise<NostrEvent> {
     const createdAt = Math.max(nowSeconds(), (current?.created_at ?? 0) + 1, this.floor(key.lookupId))
-    return this.host.sign(await bagTemplate(entries, hexToBytes(key.keyHex), key.lookupId, key.height, createdAt, HIDDEN_KIND, settings, { at: place.position, plane: place.plane }))
+    // The hint keeps its plane while the bag holds an entry there (spec 7.6 Planes, The hint).
+    return this.host.sign(await bagTemplate(entries, hexToBytes(key.keyHex), key.lookupId, key.height, createdAt, HIDDEN_KIND, settings, { at: place.position, plane: hintPlaneFor(current, entries, place.plane) }))
   }
 
   /** Sign a bag version, record it whole as the newest this server signed, write it to the outbox and send it. */

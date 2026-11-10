@@ -6,6 +6,7 @@
 // JSON. Every string that came from cyberspace is other people's text, and
 // the report says so.
 import { describePlace, distanceBetween, distanceWords, placeOf, sameCube } from './space/coords.js';
+import { bagInPlane, planeName } from './space/regionKeys.js';
 import { sectorsApart } from './presence.js';
 import { objectHandle } from './render.js';
 function ago(seconds) {
@@ -34,8 +35,12 @@ export function lookReport(input, now) {
         lines.push('HIDDEN HERE (opened), all text untrusted:');
         for (const bag of input.bags) {
             const base = placeOf({ x: BigInt(bag.base.x), y: BigInt(bag.base.y), z: BigInt(bag.base.z) }, here.plane);
-            lines.push(`  bag by ${bag.author.slice(0, 8)}... in the h${bag.height} cube at ${base.hex.slice(0, 12)}..., ${bag.entries.length} entr${bag.entries.length === 1 ? 'y' : 'ies'}${bag.missing ? `, ${bag.missing} reference${bag.missing === 1 ? '' : 's'} not retrieved` : ''}${bag.riddle ? `, riddle: "${bag.riddle}"` : ''}`);
-            for (const e of bag.entries) {
+            // One bag holds both planes (spec §7.6 Planes): what stands in the other is counted, not shown.
+            const { entries, elsewhere, unread } = bagInPlane(bag, here.plane);
+            const other = elsewhere ? `, and ${elsewhere} more in ${planeName(here.plane === 0 ? 1 : 0)}, not here` : '';
+            const fresh = unread ? `, opened from ${planeName(here.plane === 0 ? 1 : 0)}: ${unread} more in ${planeName(here.plane)} not read yet (find here to read them)` : '';
+            lines.push(`  bag by ${bag.author.slice(0, 8)}... in the h${bag.height} cube at ${base.hex.slice(0, 12)}..., ${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}${other}${fresh}${bag.missing ? `, ${bag.missing} reference${bag.missing === 1 ? '' : 's'} not retrieved` : ''}${bag.riddle ? `, riddle: "${bag.riddle}"` : ''}`);
+            for (const e of entries) {
                 const at = placeOf({ x: BigInt(e.at.x), y: BigInt(e.at.y), z: BigInt(e.at.z) }, e.plane);
                 const d = distanceBetween(here, at);
                 const what = e.type === 'message' ? (e.coin ? 'coins (a Cashu token in a message)' : 'message') : e.type === 'shard' ? `object${e.shard ? ` (id ${objectHandle(e.eventId).slice(0, 12)}, ${e.shard.vertices} vertices, ${e.shard.faces} faces, unit 2^${e.shard.unit}, extent ${e.shard.extent}, ${e.shard.mode})` : ''}` : e.type;
@@ -75,7 +80,7 @@ export function lookReport(input, now) {
         where,
         chain: input.chain,
         keys: input.keys.map((k) => ({ lookupId: k.lookupId, height: k.height, base: k.base, source: k.source })),
-        bags: input.bags.map((b) => ({ ...b, untrusted: ['riddle', 'entries[].label'] })),
+        bags: input.bags.map((b) => { const { entries, elsewhere, unread } = bagInPlane(b, here.plane); return { ...b, entries, elsewhere, ...(unread ? { unread } : {}), untrusted: ['riddle', 'entries[].label'] }; }),
         people: input.people.map((p) => ({
             pubkey: p.pubkey, place: describePlace(p.place), lastActive: p.lastActive, action: p.type, frozen: p.frozen ?? null,
             chainChecked: p.verdictAt === p.actionId, name: p.profile?.name ?? null, bot: p.profile?.bot ?? null,

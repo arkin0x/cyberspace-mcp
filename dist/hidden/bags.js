@@ -787,6 +787,74 @@ async function fromReference(ref, outer, regionKey, keyHex, resolve, facts, orig
     return null;
 }
 /**
+ * The plane an entry's `C` names (spec §7.6 Planes): the low bit of its
+ * 64-hex coordinate, or null when it carries no well-formed `C`. A region's
+ * key and lookup id are the same in both planes, so one bag, and one chat
+ * room, holds both, and only an entry's own `C` says which plane it is in.
+ * An entry with no `C` names no plane, and is in both.
+ */
+export function planeOfC(tags) {
+    const c = tags.find((t) => t[0] === 'C')?.[1]?.toLowerCase();
+    if (!c || !HEX_64.test(c))
+        return null;
+    return (parseInt(c[63], 16) & 1);
+}
+/** The plane a 64-hex coordinate is in, or null when it is not one. */
+function planeOfHex(hex) {
+    const c = hex?.toLowerCase();
+    if (!c || !HEX_64.test(c))
+        return null;
+    return (parseInt(c[63], 16) & 1);
+}
+/**
+ * The plane a bag entry names (spec §7.6 Planes): an item's `C`, a
+ * reference's `<coord_hex>`. Null when it names none, and is in both.
+ */
+export function planeOfEntry(e) {
+    return isReference(e) ? planeOfHex(e[3]) : planeOfC(e.tags);
+}
+/**
+ * Whether an opened entry names no plane, and so stands in both (spec §7.6
+ * Planes): a reference with no `<coord_hex>` whose event carries no `C` of
+ * its own (a sealed entry's item does), or an item with no `C`. unbag gave
+ * such an entry its origin's plane; that plane is the reader's, not the
+ * entry's.
+ */
+export function namesNoPlane(h) {
+    if (h.ref && planeOfHex(h.ref[3]) !== null)
+        return false;
+    return planeOfC(h.inner.tags) === null;
+}
+/**
+ * Whether two hint coordinates name the same box, whatever plane each names
+ * (spec §7.7): a region and its twin in the other plane share one key and
+ * one bag, so a hint's plane says where to look, not which bag it is.
+ */
+export function sameHintBox(a, b) {
+    if (!a || !b || !HEX_64.test(a) || !HEX_64.test(b))
+        return false;
+    return a.slice(0, 63) === b.slice(0, 63) && parseInt(a[63], 16) >> 1 === parseInt(b[63], 16) >> 1;
+}
+/**
+ * The plane a rewritten bag's hint names (spec §7.6 Planes, The hint): the
+ * plane of the hint it replaces, while the bag still holds an entry there
+ * (an entry that names no plane is in both); otherwise a plane the bag holds
+ * an entry in, the writer's first. A bag with no hint before takes the
+ * writer's plane.
+ */
+export function hintPlaneFor(current, entries, writer) {
+    const was = planeOfHex(current?.tags.find((t) => t[0] === 'hint')?.[1]);
+    if (was === null)
+        return writer;
+    const planes = entries.map(planeOfEntry);
+    const holds = (p) => planes.some((q) => q === null || q === p);
+    if (holds(was))
+        return was;
+    if (holds(writer))
+        return writer;
+    return was;
+}
+/**
  * The chat lines in an ephemeral envelope: every inner that is a CHAT_KIND,
  * is said by the key that signed the envelope, and whose id is its own hash.
  * A line is a rumor (chatRumor) with no signature; a line from an older
