@@ -51,6 +51,8 @@ function writeKits(): string {
   file(maze, 'shared/plugs/ceiling/plug-ceiling-door.json', box('Maze Kit: ceiling plug, door', [-1, 8, -1.5], [1, 8.01, 1.5]))
   file(maze, 'shared/plugs/ceiling-recessed/plug-ceiling-recessed-door.json', box('Maze Kit: recessed plug, door', [-1, 7.5, -1.5], [1, 8, 1.5]))
   file(maze, 'shared/plugs/reducers/wall/plug-wall-reduce-hallway-door.json', box('Maze Kit: reducer', [-2, -8, 8], [2, -2, 8.25]))
+  file(maze, 'test/rooms/room-floor-hall.json', box('Maze Kit: test floor hall', [-8, -8, -8], [8, 8, 8], { constrain: 'all' }))
+  file(maze, 'shared/plugs/reducers/floor/plug-floor-reduce-hallway-door.json', box('Maze Kit: floor reducer', [-2, -8.25, -3], [2, -8, 3]))
   file(maze, 'locks/doors/door-standard/door-standard.json', box('Maze Kit: door (2 x 3)', [-1, 0, -0.5], [1, 3, 0], { constrain: 'all' }))
   file(maze, 'test/decor/barrel.json', box('Maze Kit: barrel', [-0.4, 0, -0.4], [0.4, 1, 0.4], { constrain: 'all' }))
   const tile = (id: string, openings: unknown[], floorSeals: unknown[], extra: Record<string, unknown> = {}) => ({
@@ -66,6 +68,8 @@ function writeKits(): string {
       tile('test/rooms/room-hatch', [door('+z'), { face: '+y', size: 'door', w: 2, h: 3, cell: [0, 0, 0] }], [{ cell: [0, 0, 0], seals: ['window', 'door', 'door-x'] }]),
       tile('test/rooms/room-partial', [door('-z')], [{ cell: [0, 0, 0], seals: ['window'] }]),
       tile('test/rooms/room-hall', [{ face: '-z', size: 'hallway', w: 4, h: 6, cell: [0, 0, 0] }, door('+z')], [{ cell: [0, 0, 0], seals: ['window'] }]),
+      tile('test/rooms/room-floor-hall', [{ face: '-y', size: 'hallway', w: 4, h: 6, cell: [0, 0, 0] }, door('+z')], []),
+      { id: 'maze-kit/shared/plugs/reducers/floor/plug-floor-reduce-hallway-door', file: 'shared/plugs/reducers/floor/plug-floor-reduce-hallway-door.json', name: 'floor reducer', set: 'shared', group: 'plugs/reducers/floor', kind: 'reducer', bytes: 600, vertices: 8, faces: 12, unit: 0, bounds: { min: [-2, -8.25, -3], max: [2, -8, 3] }, constrain: null, bag: bag([-2, -8, -3], [2, -8, 3]), tags: ['reducer'], notes: [], reducer: { side: 'floor', from: 'hallway', to: 'door' } },
       { id: 'maze-kit/shared/plugs/wall/plug-wall-door', file: 'shared/plugs/wall/plug-wall-door.json', name: 'wall plug, door', set: 'shared', group: 'plugs/wall', kind: 'plug', bytes: 600, vertices: 8, faces: 12, unit: 0, bounds: { min: [-1, -8, -8.25], max: [1, -5, -8] }, constrain: 'all', bag: bag([-1, -8, -8.25], [1, -5, -8]), tags: ['plug'], notes: [], plug: { side: 'wall', size: 'door' } },
       { id: 'maze-kit/shared/plugs/ceiling/plug-ceiling-door', file: 'shared/plugs/ceiling/plug-ceiling-door.json', name: 'ceiling plug, door', set: 'shared', group: 'plugs/ceiling', kind: 'plug', bytes: 600, vertices: 8, faces: 12, unit: 0, bounds: { min: [-1, 8, -1.5], max: [1, 8.01, 1.5] }, constrain: 'all', bag: bag([-1, 8, -1.5], [1, 8, 1.5]), tags: ['plug'], notes: [], plug: { side: 'ceiling', size: 'door' } },
       { id: 'maze-kit/shared/plugs/ceiling-recessed/plug-ceiling-recessed-door', file: 'shared/plugs/ceiling-recessed/plug-ceiling-recessed-door.json', name: 'recessed plug, door', set: 'shared', group: 'plugs/ceiling-recessed', kind: 'recessed-plug', bytes: 600, vertices: 8, faces: 12, unit: 0, bounds: { min: [-1, 7.5, -1.5], max: [1, 8, 1.5] }, constrain: 'all', bag: bag([-1, 7.5, -1.5], [1, 8, 1.5]), tags: ['plug'], notes: [], plug: { side: 'ceiling-recessed', size: 'door' } },
@@ -78,6 +82,10 @@ function writeKits(): string {
   // Landscape: a 64 slab of flat ground (its top at 0), and a step wall along x.
   file(land, 'plains/tiles/flat.json', box('Landscape Kit: flat', [-32, -16, -32], [32, 0, 32], { constrain: 'all' }))
   file(land, 'plains/walls/step-64.json', box('Landscape Kit: step', [-32, -1, -3], [32, 12, 3], { constrain: 'all' }))
+  file(land, 'plains/walls/rock-wall-64.json', box('Landscape Kit: rock wall', [-32, -1, -3], [32, 14, 3], { constrain: 'all' }))
+  file(land, 'plains/walls/low-wall-64.json', box('Landscape Kit: low wall', [-32, -1, -1], [32, 5, 1], { constrain: 'all' }))
+  file(land, 'plains/walls/ramp-bank-64.json', box('Landscape Kit: ramp bank', [-32, -1, -3], [32, 13, 5], { constrain: 'all' }))
+  file(land, 'plains/walls/ramp-bank-mirror-64.json', box('Landscape Kit: ramp bank mirrored', [-32, -1, -3], [32, 13, 5], { constrain: 'all' }))
   file(land, 'plains/decor/rock.json', box('Landscape Kit: rock', [-1, -0.2, -1], [1, 1.5, 1], { constrain: 'all' }))
   const lcat = {
     format: 'cyberspace-kit-catalog-1', kit: 'landscape-kit', title: 'Test landscape kit', generated: '2026-11-15T00:00:00Z', source: { repo: 'test' }, standard: { tile: 64 },
@@ -85,6 +93,10 @@ function writeKits(): string {
       { id: 'landscape-kit/plains/tiles/flat', file: 'plains/tiles/flat.json', name: 'flat', set: 'plains', group: 'tiles', kind: 'tile', bytes: 600, vertices: 8, faces: 12, unit: 0, bounds: { min: [-32, -16, -32], max: [32, 0, 32] }, constrain: 'all', bag: bag([-32, -16, -32], [32, 0, 32]), tags: ['ground'], notes: [], footprint: [64, 64], edges: { px: 'L0', nx: 'L0', pz: 'L0', nz: 'L0' }, base: -16, step: 2 },
       { id: 'landscape-kit/plains/tiles/ramp', file: 'plains/tiles/flat.json', name: 'ramp', set: 'plains', group: 'tiles', kind: 'tile', bytes: 600, vertices: 8, faces: 12, unit: 0, bounds: { min: [-32, -16, -32], max: [32, 0, 32] }, constrain: 'all', bag: bag([-32, -16, -32], [32, 0, 32]), tags: ['ground', 'ramp'], notes: [], footprint: [64, 64], edges: { px: 'L10', nx: 'L0', pz: 'R+', nz: 'R+' }, base: -16, step: 2 },
       { id: 'landscape-kit/plains/walls/step-64', file: 'plains/walls/step-64.json', name: 'step 64', set: 'plains', group: 'walls', kind: 'wall', bytes: 600, vertices: 8, faces: 12, unit: 0, bounds: { min: [-32, -1, -3], max: [32, 12, 3] }, constrain: 'all', bag: bag([-32, -1, -3], [32, 12, 3]), tags: ['wall', 'step-wall'], notes: [], wall: { kind: 'step', length: 64, height: 12.8, segments: [[[-32, 0], [32, 0]]], hides: [[[-32, 0], [32, 0]]], low: '-z' } },
+      { id: 'landscape-kit/plains/walls/rock-wall-64', file: 'plains/walls/rock-wall-64.json', name: 'rock wall 64', set: 'plains', group: 'walls', kind: 'wall', bytes: 600, vertices: 8, faces: 12, unit: 0, bounds: { min: [-32, -1, -3], max: [32, 14, 3] }, constrain: 'all', bag: bag([-32, -1, -3], [32, 14, 3]), tags: ['wall', 'seam-wall'], notes: [], wall: { kind: 'seam', length: 64, height: 14, segments: [[[-32, 0], [32, 0]]], hides: [[[-32, 0], [32, 0]]] } },
+      { id: 'landscape-kit/plains/walls/low-wall-64', file: 'plains/walls/low-wall-64.json', name: 'low wall 64', set: 'plains', group: 'walls', kind: 'wall', bytes: 600, vertices: 8, faces: 12, unit: 0, bounds: { min: [-32, -1, -1], max: [32, 5, 1] }, constrain: 'all', bag: bag([-32, -1, -1], [32, 5, 1]), tags: ['wall', 'seam-wall'], notes: [], wall: { kind: 'seam', length: 64, height: 5, segments: [[[-32, 0], [32, 0]]], hides: [[[-32, 0], [32, 0]]] } },
+      { id: 'landscape-kit/plains/walls/ramp-bank-64', file: 'plains/walls/ramp-bank-64.json', name: 'ramp bank 64', set: 'plains', group: 'walls', kind: 'wall', bytes: 600, vertices: 8, faces: 12, unit: 0, bounds: { min: [-32, -1, -3], max: [32, 13, 5] }, constrain: 'all', bag: bag([-32, -1, -3], [32, 13, 5]), tags: ['wall', 'step-wall'], notes: [], wall: { kind: 'ramp-step', length: 64, height: 12.8, segments: [[[-32, 0], [32, 0]]], hides: [[[-32, 0], [32, 0]]], low: '-z' } },
+      { id: 'landscape-kit/plains/walls/ramp-bank-mirror-64', file: 'plains/walls/ramp-bank-mirror-64.json', name: 'ramp bank mirrored 64', set: 'plains', group: 'walls', kind: 'wall', bytes: 600, vertices: 8, faces: 12, unit: 0, bounds: { min: [-32, -1, -3], max: [32, 13, 5] }, constrain: 'all', bag: bag([-32, -1, -3], [32, 13, 5]), tags: ['wall', 'step-wall'], notes: [], wall: { kind: 'ramp-step', length: 64, height: 12.8, segments: [[[-32, 0], [32, 0]]], hides: [[[-32, 0], [32, 0]]], low: '-z' } },
       { id: 'landscape-kit/plains/decor/rock', file: 'plains/decor/rock.json', name: 'rock', set: 'plains', group: 'decor', kind: 'decor', bytes: 600, vertices: 8, faces: 12, unit: 0, bounds: { min: [-1, -0.2, -1], max: [1, 1.5, 1] }, constrain: 'all', bag: bag([-1, -0.2, -1], [1, 1.5, 1]), tags: ['decor'], notes: [], mount: 'floor', size: [2, 2, 2], solid: true, sink: 0.2 },
     ],
   }
@@ -112,7 +124,7 @@ describe('kits: the library', () => {
     expect(() => lib.get('nothing-here')).toThrow(/No kit piece/)
     expect(searchKits(lib, { text: 'barrel' }).pieces.map((p) => p.id)).toEqual(['maze-kit/test/decor/barrel'])
     expect(searchKits(lib, { kind: 'plug' }).total).toBe(2)
-    expect(searchKits(lib, { opening: 'hallway' }).pieces.map((p) => p.id)).toEqual(['maze-kit/shared/plugs/reducers/wall/plug-wall-reduce-hallway-door', 'maze-kit/test/rooms/room-hall'])
+    expect(searchKits(lib, { opening: 'hallway' }).pieces.map((p) => p.id)).toEqual(['maze-kit/shared/plugs/reducers/floor/plug-floor-reduce-hallway-door', 'maze-kit/shared/plugs/reducers/wall/plug-wall-reduce-hallway-door', 'maze-kit/test/rooms/room-floor-hall', 'maze-kit/test/rooms/room-hall'])
     expect(searchKits(lib, { edge: 'R+' }).pieces.map((p) => p.id)).toEqual(['landscape-kit/plains/tiles/ramp'])
   })
 
@@ -135,7 +147,9 @@ describe('kits: the library', () => {
     expect(kitPieceIn(lib, { name: 'Maze Kit: anything', vertices: [], faces: [] })).toBe('Maze Kit: anything')
     const k = kitObject(lib, 'test/decor/barrel')
     expect(kitPieceIn(lib, k.shard)).toBe('maze-kit/test/decor/barrel')
-    expect(kitPieceIn(lib, { ...k.shard, name: 'my own barrel' })).toBeNull()
+    // Renamed, turned or scaled, it is still the kit's shape.
+    expect(kitPieceIn(lib, { ...kitObject(lib, 'test/decor/barrel', { turn: 270, scale: 2 }).shard, name: 'my own barrel' })).toBe('maze-kit/test/decor/barrel')
+    expect(kitPieceIn(lib, { name: 'mine', vertices: k.shard.vertices.slice(0, 7), faces: k.shard.faces.slice(0, 10) })).toBeNull()
   })
 })
 
@@ -183,6 +197,13 @@ describe('check_layout: the Maze Kit rules', () => {
     expect(r.errors[0].fix).toContain('plug-wall-reduce-hallway-door at [0, 0, 16], or')
     const ok = checkLayout(lib, { placements: [...base, P('shared/plugs/reducers/wall/plug-wall-reduce-hallway-door', [0, 0, 16], 0)] })
     expect(ok.errors).toEqual([])
+  })
+
+  it('turns a floor reducer with the hatches it joins', () => {
+    const base = [P('test/rooms/room-hatch', [0, 0, 0], 0, { open: ['+z'] }), P('test/rooms/room-floor-hall', [0, 16, 0], 0, { open: ['+z'] })]
+    expect(codes(checkLayout(lib, { placements: base }))).toEqual(['needs-reducer'])
+    expect(checkLayout(lib, { placements: [...base, P('shared/plugs/reducers/floor/plug-floor-reduce-hallway-door', [0, 16, 0], 0)] }).errors).toEqual([])
+    expect(codes(checkLayout(lib, { placements: [...base, P('shared/plugs/reducers/floor/plug-floor-reduce-hallway-door', [0, 16, 0], 90)] }))).toEqual(['plug-turn', 'needs-reducer'])
   })
 
   it('seals a ceiling hatch with the floor above when it covers it, and asks for the recessed plug when it does not', () => {
@@ -236,9 +257,31 @@ describe('check_layout: the Landscape Kit rules', () => {
     // The low tile is on -x: the plumb face (-z, built) turns to -x at 90.
     expect(r.errors[0].fix).toContain('turn 90')
     const wrong = checkLayout(lib, { placements: [...raised, P('landscape-kit/plains/walls/step-64', [32, 0, 0], 270)] })
-    expect(codes(wrong)).toEqual(['step-facing'])
+    expect(codes(wrong)).toEqual(['step-facing', 'edge-mismatch'])
     const right = checkLayout(lib, { placements: [...raised, P('landscape-kit/plains/walls/step-64', [32, 0, 0], 90)] })
     expect(right.errors).toEqual([])
+  })
+
+  it('hides a step only with a wall on the low ground: high enough, the right kind, the right way', () => {
+    const raised = [P('landscape-kit/plains/tiles/flat', [0, 0, 0]), P('landscape-kit/plains/tiles/flat', [64, 10, 0])]
+    // A seam wall 14 high on the low ground hides it; up in the air or too low it does not.
+    expect(checkLayout(lib, { placements: [...raised, P('landscape-kit/plains/walls/rock-wall-64', [32, 0, 0], 90)] }).errors).toEqual([])
+    expect(codes(checkLayout(lib, { placements: [...raised, P('landscape-kit/plains/walls/rock-wall-64', [32, 500, 0], 90)] }))).toEqual(['wall-cannot-hide', 'edge-mismatch'])
+    expect(codes(checkLayout(lib, { placements: [...raised, P('landscape-kit/plains/walls/low-wall-64', [32, 0, 0], 90)] }))).toEqual(['wall-cannot-hide', 'edge-mismatch'])
+    // A wall on a seam that already matches is on an edge, not off it.
+    const flat = checkLayout(lib, { placements: [P('landscape-kit/plains/tiles/flat', [0, 0, 0]), P('landscape-kit/plains/tiles/flat', [64, 0, 0]), P('landscape-kit/plains/walls/low-wall-64', [32, 0, 0], 90)] })
+    expect(flat.warnings.map((w) => w.code)).not.toContain('wall-off-seam')
+  })
+
+  it('lines a ramp\'s side only with a ramp bank, the ramp on its +z side', () => {
+    // The ramp's pz side (R+) faces a ground tile at +z.
+    const base = [P('landscape-kit/plains/tiles/ramp', [0, 0, 0]), P('landscape-kit/plains/tiles/flat', [0, 0, 64])]
+    expect(codes(checkLayout(lib, { placements: base }))).toEqual(['edge-mismatch'])
+    // Turned 180 to face the ramp, the bank's high end is at -x, but this ramp rises toward +x: the mirrored bank fits.
+    expect(codes(checkLayout(lib, { placements: [...base, P('landscape-kit/plains/walls/ramp-bank-64', [0, 0, 32], 180)] }))).toEqual(['wall-cannot-hide', 'edge-mismatch'])
+    expect(checkLayout(lib, { placements: [...base, P('landscape-kit/plains/walls/ramp-bank-mirror-64', [0, 0, 32], 180)] }).errors).toEqual([])
+    expect(codes(checkLayout(lib, { placements: [...base, P('landscape-kit/plains/walls/ramp-bank-64', [0, 0, 32], 0)] }))).toEqual(['wall-cannot-hide', 'edge-mismatch'])
+    expect(codes(checkLayout(lib, { placements: [...base, P('landscape-kit/plains/walls/rock-wall-64', [0, 0, 32], 0)] }))).toEqual(['wall-cannot-hide', 'edge-mismatch'])
   })
 
   it('reads a turned edge reversed, and wants a ramp\'s side lined', () => {
@@ -299,7 +342,7 @@ describe('the kit tools over MCP', () => {
     const hidden: unknown[] = []
     const client = await connect(hidden)
     const text = (r: unknown) => ((r as { content: Array<{ type: string; text?: string }> }).content.find((c) => c.type === 'text')?.text ?? '')
-    expect(text(await client.callTool({ name: 'kit', arguments: {} }))).toContain('maze-kit (Test maze kit): 10 pieces')
+    expect(text(await client.callTool({ name: 'kit', arguments: {} }))).toContain('maze-kit (Test maze kit): 12 pieces')
     expect(text(await client.callTool({ name: 'kit', arguments: { text: 'barrel' } }))).toContain('maze-kit/test/decor/barrel')
     const piece = await client.callTool({ name: 'kit_piece', arguments: { piece: 'rooms/room', turn: 90 } })
     expect(text(piece)).toContain('+z -> +x (door)')

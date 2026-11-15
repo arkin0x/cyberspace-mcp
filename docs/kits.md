@@ -62,28 +62,28 @@ Faces, cells, bounds and wall lines are in **world axes** (sno-core's model
 frame: cyberspace x, y, z). The kits' own READMEs name faces in the SNO wire
 frame, whose +z is world -z; the exporters convert.
 
-## Installing and refreshing (the owner's machine)
+## Installing and refreshing
 
-The kits' repositories write the folders (arkin0x/maze-kit and
-arkin0x/landscape-kit, both private):
+Each kit's own repository (private) writes its folder:
 
-    cd /data/projects/maze-kit      && npm run export-local -- --out /data/repos/csmcp/kits
-    cd /data/projects/landscape-kit && npm run export-local -- --out /data/repos/csmcp/kits
+    npm run export-local -- --out <kits dir>
 
-Each reads the kit's zips (the Syncthing `zips/` folder by default, or
-`--zips <dir>`) for the payloads and its own piece list for the metadata,
-writes the new folder beside the old one and swaps it in, so a running
-server never reads half a kit; it re-reads a catalog when the file changes,
-with no restart. After a kit changes: `npm run build`, `npm run zip`, then
-`npm run export-local` again. The script reports pieces left out (joins,
-flooded rooms and composites, which name other pieces by the workshop's
-placeholder and only resolve after a workshop import) and any piece of the
-checkout that is not in the zips yet.
+run in the kit's checkout. It reads the kit's workshop zips for the
+payloads (`--zips <dir>` for another folder) and its own piece list for the
+metadata, writes the new folder beside the old one and swaps it in, so a
+running server never reads half a kit; the server re-reads a catalog when
+the file changes, with no restart. After a kit changes: build it, write its
+zips, then run `export-local` again. The script reports pieces left out
+(joins, flooded rooms and composites, which name other pieces by the
+workshop's placeholder and only resolve after a workshop import) and any
+piece of the checkout that is not in the zips yet. The Maze Kit's exporter
+also copies the build briefs (they name pieces, so they live with the kits,
+never here) to `<kits dir>/briefs`.
 
 ## Checking the tools against the kits
 
 `CYBERSPACE_KITS_DIR=<kits> npm run eval:kits` runs the build briefs in
-evals/kits/briefs without a model: it drives `kit_piece`, `check_layout`,
+`<kits>/briefs` without a model: it drives `kit_piece`, `check_layout`,
 `render` and `place` (with a recorder in place of hide, so nothing is
 published) and checks each brief's assertions. evals/kits/README.md says how
 to run the same briefs with the agent itself.

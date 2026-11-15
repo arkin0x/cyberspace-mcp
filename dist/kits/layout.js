@@ -141,6 +141,9 @@ export function checkLayout(lib, input) {
         checkMaze(lib, maze, err, warn);
     if (land.length)
         checkLandscape(lib, land, err, warn);
+    const unruled = placed.filter((p) => p.entry.kind === 'course' || (p.entry.kit !== 'maze-kit' && p.entry.kit !== 'landscape-kit'));
+    if (unruled.length)
+        warn('no-rules', unruled, `${unruled.length} placement(s) have no fitting rules here (${[...new Set(unruled.map((p) => p.entry.kind === 'course' ? 'AeroCarnival course pieces: their jump classes are in the kit README' : `kit ${p.entry.kit}`))].join('; ')}); only overlaps and the bag are checked for them.`);
     checkOverlaps(placed, warn);
     const bag = checkBags(placed, input, err, warn);
     const counts = { placements: placed.length };
@@ -275,6 +278,14 @@ function checkMaze(lib, maze, err, warn) {
                 err('reducer-misplaced', [p], `${where(p)} joins a ${e.reducer.from} to a ${e.reducer.to}, but across the ${face} side at ${at(nb)} there is ${small ? `a ${small.size} opening` : 'no opening facing back'}.`);
                 continue;
             }
+            if (e.reducer.side === 'floor' && big.along) {
+                // A floor reducer's rims are long hatches too: it turns with the hatches it joins.
+                const redAlong = turnY([0, 0, 1], p.q)[2] !== 0 ? 'z' : 'x';
+                if (redAlong !== big.along) {
+                    err('plug-turn', [p, big.p], `${where(p)} is turned across the ${big.size} hatch of ${where(big.p)}: a floor reducer turns with the hatches it joins.`, `turn it ${big.p.q * 90}`);
+                    continue;
+                }
+            }
             if (big.along && small.along && big.along !== small.along) {
                 err('turn-mismatch', [big.p, small.p], `The ${big.size} hatch of ${where(big.p)} and the ${small.size} hatch of ${where(small.p)} cross at right angles: long hatches meet only when the two tiles are turned alike or 180 apart.`);
                 continue;
@@ -284,6 +295,10 @@ function checkMaze(lib, maze, err, warn) {
             reducers.push({ r: p, big, small });
         }
         else if (e.kind === 'door' || e.kind === 'door-open') {
+            if (p.s !== ref.s) {
+                err('mixed-scale', [p], `${where(p)} has scale ${p.s}; the tiles have ${ref.s}, and a door fits only tiles of its own scale.`);
+                continue;
+            }
             const toTile = mul(turnY([0, -8, -8], p.q), p.k);
             const c = cellOf(sub(p.at, toTile));
             const face = turnFace('-z', p.q);
@@ -507,44 +522,75 @@ function checkLandscape(lib, land, err, warn) {
             touched.push([a, b]);
             if (e.p.i > o.p.i)
                 continue;
+            const k = e.axis === 'z' ? 1 : 0;
+            const onSeam = coverOn(e.axis, e.line).filter((sg) => Math.min(Math.max(sg.a[k], sg.b[k]), b) - Math.max(Math.min(sg.a[k], sg.b[k]), a) > 1e-6);
+            // A wall on any seam is on an edge, whether or not the seam needs it (a low ruin wall, a hedge between fields).
+            for (const sg of onSeam)
+                used.add(sg.w.i);
             const exact = Math.abs(o.a - e.a) < 1e-6 && Math.abs(o.b - e.b) < 1e-6;
             const matches = e.sig === o.sig && (e.flat !== null || exact);
             if (matches)
                 continue;
-            // A step: hidden by walls standing on this seam, over the whole stretch.
-            const cover = coverOn(e.axis, e.line).map((s) => (e.axis === 'z' ? [s.a[1], s.b[1]] : [s.a[0], s.b[0]]));
-            const gaps = uncovered(a, b, cover);
-            const seg = (s) => (e.axis === 'z' ? `x ${r1(e.line)}, z ${r1(s[0])} to ${r1(s[1])}` : `z ${r1(e.line)}, x ${r1(s[0])} to ${r1(s[1])}`);
-            for (const w of coverOn(e.axis, e.line))
-                if (Math.min(Math.max(w.a[e.axis === 'z' ? 1 : 0], w.b[e.axis === 'z' ? 1 : 0]), b) - Math.max(Math.min(w.a[e.axis === 'z' ? 1 : 0], w.b[e.axis === 'z' ? 1 : 0]), a) > 1e-6)
-                    used.add(w.w.i);
-            const ramp = e.profile[0] === 'R' || o.profile[0] === 'R';
-            const words = e.flat !== null && o.flat !== null
-                ? `a step from ${Math.min(e.flat, o.flat)} to ${Math.max(e.flat, o.flat)}`
-                : ramp ? 'a ramp\'s side' : `edges that do not match (${e.profile} at ${e.p.at[1]} against ${o.profile} at ${o.p.at[1]})`;
-            if (gaps.length) {
-                const low = e.flat !== null && o.flat !== null ? (e.flat < o.flat ? e : o) : null;
-                const turn = low ? WALL_TURN[low === e ? sideFace(OPP_SIDE[e.side]) : sideFace(OPP_SIDE[o.side])] : undefined;
-                err('edge-mismatch', [e.p, o.p], `Between ${where(e.p)} and ${where(o.p)} the seam at ${gaps.map(seg).join(' and ')} is ${words}, and nothing hides it, so the raised tile's skirt shows.`, ramp ? 'line it with landscape-kit/plains/walls/steps/ramp-bank/ramp-bank-64 (the ramp tile on the bank\'s +z side, its high end at the bank\'s +x; the mirrored bank for the other side), or join it to another ramp'
-                    : low && turn !== undefined ? `stand step walls on that seam with their plumb -z side toward the low tile (turn ${turn}), base at y ${low.flat}: for example landscape-kit/plains/walls/steps/cliff/cliff-step-${Math.min(64, Math.round(gaps[0][1] - gaps[0][0])) >= 64 ? 64 : 32}, centred on the stretch; or any seam wall 14 or more high`
-                        : 'change one tile so the profiles match, or stand a wall on the seam');
-            }
-            else if (e.flat !== null && o.flat !== null && e.flat !== o.flat) {
-                // Covered: a step wall must face the low tile.
-                const low = e.flat < o.flat ? e : o;
-                const lowDir = NORMAL[sideFace(OPP_SIDE[low.side])];
-                const k = e.axis === 'z' ? 1 : 0;
-                for (const s of coverOn(e.axis, e.line)) {
-                    if (Math.min(Math.max(s.a[k], s.b[k]), b) - Math.max(Math.min(s.a[k], s.b[k]), a) <= 1e-6)
-                        continue;
-                    if (s.w.entry.wall.kind !== 'step' || /corner/.test(s.w.entry.id))
-                        continue;
-                    const plumb = turnY([0, 0, -1], s.w.q);
-                    if (plumb[0] !== lowDir[0] || plumb[2] !== lowDir[2])
-                        err('step-facing', [s.w], `${where(s.w)} has its plumb face toward the raised tile; it must face the low tile ${where(low.p)}.`, `turn it ${WALL_TURN[sideFace(OPP_SIDE[low.side])]}`);
-                    else if (Math.abs(s.w.at[1] - low.flat) > 1)
-                        warn('step-height', [s.w], `${where(s.w)} stands at y ${s.w.at[1]}; a step wall's base is the low ground's level, ${low.flat}.`, `place it at y ${low.flat}`);
+            const seg = (sp) => (e.axis === 'z' ? `x ${r1(e.line)}, z ${r1(sp[0])} to ${r1(sp[1])}` : `z ${r1(e.line)}, x ${r1(sp[0])} to ${r1(sp[1])}`);
+            const rampEdge = e.profile[0] === 'R' ? e : o.profile[0] === 'R' ? o : null;
+            const flatStep = e.flat !== null && o.flat !== null;
+            const low = flatStep ? (e.flat < o.flat ? e : o) : null;
+            const lowY = flatStep ? Math.min(e.flat, o.flat) : Math.min(e.p.at[1], o.p.at[1]);
+            const lowDir = low ? NORMAL[sideFace(OPP_SIDE[low.side])] : null;
+            // Which walls on this seam hide it: standing on the low ground; a step wall facing the low tile, or a seam wall 14 or more high; a ramp side only a ramp bank with the ramp tile on its +z side.
+            const why = new Map();
+            const hides = onSeam.filter((sg) => {
+                const w = sg.w, info = w.entry.wall;
+                if (Math.abs(w.at[1] - lowY) > 1) {
+                    why.set(w.i, `stands at y ${w.at[1]}; its base must be at the low ground's level, ${lowY}`);
+                    return false;
                 }
+                if (rampEdge) {
+                    if (info.kind !== 'ramp-step') {
+                        why.set(w.i, 'is not a ramp bank, and only a ramp bank lines a ramp\'s side');
+                        return false;
+                    }
+                    const toRamp = NORMAL[sideFace(OPP_SIDE[rampEdge.side])];
+                    const plus = turnY([0, 0, 1], w.q);
+                    if (plus[0] !== toRamp[0] || plus[2] !== toRamp[2]) {
+                        why.set(w.i, `has the ramp on its wrong side: turn it ${(WALL_TURN[sideFace(rampEdge.side)] ?? 0)} so its +z side faces the ramp tile`);
+                        return false;
+                    }
+                    // Its high end must be where the ramp is high: +x for the bank, -x for the mirrored one; R+ rises toward + along the seam.
+                    const high = turnY([/mirror/.test(w.entry.id) ? -1 : 1, 0, 0], w.q);
+                    const rises = (rampEdge.profile.endsWith('+') ? 1 : -1);
+                    if ((rampEdge.axis === 'x' ? high[0] : high[2]) !== rises) {
+                        why.set(w.i, `rises the wrong way along the ramp: use the ${/mirror/.test(w.entry.id) ? 'plain' : 'mirrored'} ramp bank`);
+                        return false;
+                    }
+                    return true;
+                }
+                if (info.kind === 'step') {
+                    if (/corner/.test(w.entry.id) || !lowDir)
+                        return true;
+                    const plumb = turnY([0, 0, -1], w.q);
+                    if (plumb[0] !== lowDir[0] || plumb[2] !== lowDir[2]) {
+                        why.set(w.i, `has its plumb face toward the raised tile; it must face the low tile ${where(low.p)} (turn it ${WALL_TURN[sideFace(OPP_SIDE[low.side])]})`);
+                        return false;
+                    }
+                    return true;
+                }
+                if (info.kind === 'seam' && info.height >= 14)
+                    return true;
+                why.set(w.i, `is ${info.height} high; a seam wall must be 14 or more to hide a step`);
+                return false;
+            });
+            const gaps = uncovered(a, b, hides.map((sg) => [sg.a[k], sg.b[k]]));
+            for (const sg of onSeam)
+                if (why.has(sg.w.i))
+                    err(why.get(sg.w.i).startsWith('has its plumb') ? 'step-facing' : 'wall-cannot-hide', [sg.w], `${where(sg.w)} ${why.get(sg.w.i)}.`);
+            why.clear();
+            if (gaps.length) {
+                const words = flatStep ? `a step from ${Math.min(e.flat, o.flat)} to ${Math.max(e.flat, o.flat)}` : rampEdge ? 'a ramp\'s side' : `edges that do not match (${e.profile} at ${e.p.at[1]} against ${o.profile} at ${o.p.at[1]})`;
+                const turn = low ? WALL_TURN[sideFace(OPP_SIDE[low.side])] : undefined;
+                err('edge-mismatch', [e.p, o.p], `Between ${where(e.p)} and ${where(o.p)} the seam at ${gaps.map(seg).join(' and ')} is ${words}, and nothing hides it, so the raised tile's skirt shows.`, rampEdge ? `line it with a ramp bank (landscape-kit/plains/walls/steps/ramp-bank/ramp-bank-64, or the mirrored one) at y ${lowY}, turned ${WALL_TURN[sideFace(rampEdge.side)]} so its +z side faces the ramp tile, or join it to another ramp`
+                    : low && turn !== undefined ? `stand step walls on that seam with their plumb -z side toward the low tile (turn ${turn}), base at y ${low.flat}: for example landscape-kit/plains/walls/steps/cliff/cliff-step-${gaps[0][1] - gaps[0][0] >= 64 ? 64 : 32}, centred on the stretch; or any seam wall 14 or more high`
+                        : 'change one tile so the profiles match, or stand a wall on the seam');
             }
         }
         const open = uncovered(e.a, e.b, touched);

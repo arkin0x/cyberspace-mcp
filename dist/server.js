@@ -589,7 +589,7 @@ export function createServer(agent, log = () => { }, hooks = {}, options = {}) {
             turn: z.number().int().optional().describe('With kit: quarter turns about Y in degrees (0, 90, 180, 270).'),
             scale: z.number().int().min(0).optional().describe('With kit: each step doubles the piece.'),
             layout: z.array(placementSchema).min(1).max(400).optional().describe('A planned build of kit pieces (the placements check_layout takes), drawn as one picture in gibsons from the layout origin.'),
-            cut: z.number().optional().describe('With layout: leave out faces reaching above this height (gibsons above the layout origin), so a top view shows enclosed rooms like a plan; 2 above a floor is a good cut.'),
+            cut: z.number().optional().describe('With layout: leave out faces reaching above this height (gibsons above the layout origin), so a top view shows enclosed rooms like a plan; 3 above a floor is a good cut.'),
             view: z.enum(['iso', 'front', 'back', 'top', 'side']).optional().describe('iso (default), front (from +Z), back, top (from +Y), side (from +X).'),
             yaw: z.number().optional().describe('Degrees about +Y, 0 looking from +Z, 90 from +X. Overrides the view\'s.'),
             pitch: z.number().min(-90).max(90).optional().describe('Degrees above the horizon, 90 looking straight down. Overrides the view\'s.'),

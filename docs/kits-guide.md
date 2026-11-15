@@ -105,12 +105,15 @@ player using the kits.
 - **Edges** carry profiles: L0 flat at 0, L10 flat at 10, S the seabed at
   -10, V a valley crossing, B beach, K low cliff, R ramp (B, K, R with a
   direction). Two edges meet only with the same profile at the same world
-  height; a turned edge reads reversed (`check_layout` works it out).
+  height; a turn that points an edge the other way reverses its direction
+  (`check_layout` works it out).
 - **Raised ground:** place tiles 10 higher. Where a raised tile meets ground
   tiles, stand **step walls** on the seam, base at the low ground's level,
   their plumb face (built facing -z) turned toward the low tile; outer and
-  inner corners for corners. Any seam wall 14 or more high also hides a step.
-  A ramp tile climbs from 0 to 10; line its sides with ramp banks or join
+  inner corners for corners. Any seam wall 14 or more high, standing on the
+  low ground, also hides a step. A ramp tile climbs from 0 to 10; line its
+  sides with ramp banks (the ramp on the bank's +z side, the bank's high end
+  where the ramp is high; the mirrored bank for the other side) or join
   other ramps.
 - **Coast:** shore tiles have the sea on their -z side. Join beach to beach
   and cliff to cliff along the coast; headland and bay corners turn it. Sea
@@ -134,45 +137,33 @@ player using the kits.
 
 ## Worked examples
 
-These pass `check_layout` against the kits (evals/kits/briefs has them in
-full).
+The full placements of these, checked against the kits, are in the briefs
+beside your kits (`<kits>/briefs`); ask your human if you need them.
 
-**1. A four-room dungeon with a vault door.** Rooms along the cardinal
-directions, entrance on -z:
+**1. A four-room dungeon with a vault door.** Four rooms on a 2 by 2 grid
+along the cardinal directions, the way in on one side (`open`). Choose rooms
+whose doors line up, turning a room 90 or 180 so its doors face its
+neighbours. Plug every door that faces nothing (wall plugs turned onto the
+face), plug a skylight or the top of a stair with a ceiling plug (turned with
+its tile). Close the vault's doorway with the standard door at the tile's
+position plus the turned (0, -8, -8), and put the treasure chest on the
+vault floor (the tile's position minus 8 in y). It fits one bag of height 6.
+Then forge the key (`forge_item`) in another room and seal the prize in a
+chest in the vault (`seal_chest`, locked to the key). The kit's door seals
+the vault and stops walkers, but this server cannot yet write a door that
+opens (a DECK-0004 door). Until it can, the key opens the chest, not the
+door; ask your operator before promising a door that opens.
 
-    A room-small    at [0, 0, 0]              open -z (the way in)
-    B cistern-baths at [0, 0, 16]             doors +z, +x, -z, -x, skylight +y
-    C cistern-steps at [16, 0, 16] turned 180 its doors now face -z and -x
-    D room-small    at [16, 0, 0]             the vault
-    vault door (locks/doors/door-standard) at [16, -8, 8]: C's -z opening, D's +z
-    plugs: B +z (wall door plug turned 180), B -x (turned 90),
-           B skylight (ceiling window plug), C stair top (ceiling hallway
-           plug turned 180), D -z (wall door plug turned 0)
-    treasure chest (locks/chests/chest) at [16, -8, 0], a barrel in B at [-4, -8, 20]
+**2. A raised ruin on a coast (3 by 3 Landscape region).** A row of shore
+tiles on the -z side, the sea beyond them; the middle tile placed 10 higher
+with a ground tile on each side of it; four step walls on its four seams,
+each at y 0 with its plumb face toward the low tile (turn 90 on its -x seam,
+270 on +x, 0 on -z, 180 on +z); seam walls along the inland region edges;
+ruins on the raised tile at the height `check_layout` gives (about 10).
+Height 8. Only the two ends of the coast stay as region edges.
 
-It fits one bag of height 6. Then forge the key (`forge_item`) in room B or
-C and seal the prize in a chest in the vault (`seal_chest`, locked to the
-key). The door here is the kit's closed door model: it seals the vault and
-stops walkers, but this server cannot yet write a door that opens (a DECK-0004
-door). Until it can, the key opens the chest, not the door; ask your operator
-before promising a door that opens.
-
-**2. A raised ruin on a coast (3 by 3 Landscape region).** Coast row on the
--z side, the raised ruin in the middle:
-
-    row z 0:   beach, shore-meadow, beach (sea toward -z)
-    row z 64:  forest-floor, grassland at y 10 (the raised ruin), dell
-    row z 128: meadow, rolling-hills, knoll
-    step walls cliff-step-64: [32, 0, 64] turned 90, [96, 0, 64] turned 270,
-                              [64, 0, 32] turned 0, [64, 0, 96] turned 180
-    rock-wall-64 along the inland region edges: z 160 at x 0, 64, 128;
-                              x -32 and x 160 at z 64 and 128, turned 90
-    ruins on the raised tile at y 10: toppled column, broken arch, foundation
-
-Height 8. Only the two coast ends stay as region edges.
-
-**3. Decorating.** One cistern room (baths) at [0, 0, 0], way in on -z, the
-other three doors and the skylight plugged; a barrel, a box, a skull pile,
-red mushrooms and a block at y -8, each 5 or 6 from the centre and apart from
-the others. On ground: ruins and decor at the y `check_layout` gives, a low
-ruined wall can stand on a seam (centred on its length).
+**3. Decorating.** One room with its way in open and its other doors and
+skylight plugged; five decor objects at y -8 (the floor), each 5 or 6 from
+the centre and apart from the others. On open ground, ruins and decor at the
+y `check_layout` gives; a low ruined wall can stand on a seam, centred on its
+length.

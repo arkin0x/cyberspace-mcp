@@ -10,6 +10,7 @@
 // first of <state>/kits and <state>/../kits that holds a catalog. With none,
 // every kit tool says that no kits are installed and where it looked.
 
+import { createHash } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 
@@ -22,8 +23,10 @@ type Seg = [[number, number], [number, number]]
 
 /** One piece of a kit, as its catalog lists it. Every field past the first block is optional: a kit says what it knows. */
 export interface KitEntry {
-  /** The kit's folder name, added on load. */
+  /** The kit's name, from its catalog (maze-kit, landscape-kit): which rules check_layout applies. Added on load. */
   kit: string
+  /** The folder the kit was read from, added on load (its files are under it). */
+  folder: string
   id: string
   file: string
   name: string
@@ -68,6 +71,8 @@ export interface KitEntry {
 export interface KitCatalog {
   format: string
   kit: string
+  /** The folder it was read from, added on load. */
+  folder: string
   title: string
   generated: string
   source: { repo?: string; commit?: string; zips?: string[] }
@@ -87,7 +92,7 @@ export function kitsDirCandidates(stateDir: string, kitsDir?: string): string[] 
 
 /** The kits in one directory, read once and again whenever a catalog file changes. */
 export class KitLibrary {
-  private loaded: { dir: string; stamp: string; catalogs: KitCatalog[]; byId: Map<string, KitEntry> } | null = null
+  private loaded: { dir: string; stamp: string; catalogs: KitCatalog[]; byId: Map<string, KitEntry>; shapes?: Map<string, string> } | null = null
 
   constructor(private readonly candidates: string[]) {}
 
@@ -116,10 +121,13 @@ export class KitLibrary {
       let c: KitCatalog
       try { c = JSON.parse(readFileSync(f, 'utf8')) as KitCatalog } catch { continue }
       if (c.format !== CATALOG_FORMAT || !Array.isArray(c.pieces)) continue
-      const kit = f.split(sep).slice(-2)[0]
-      c.kit = kit
+      const folder = f.split(sep).slice(-2)[0]
+      // The catalog names its kit; the folder is only where it lives (a kit copied to another folder keeps its rules).
+      c.folder = folder
+      c.kit = typeof c.kit === 'string' && c.kit ? c.kit : folder
       for (const p of c.pieces) {
-        p.kit = kit
+        p.kit = c.kit
+        p.folder = folder
         p.tags ??= []
         p.notes ??= []
         byId.set(p.id, p)
@@ -140,7 +148,7 @@ export class KitLibrary {
   }
 
   catalogOf(entry: KitEntry): KitCatalog {
-    return this.load().catalogs.find((c) => c.kit === entry.kit)!
+    return this.load().catalogs.find((c) => c.folder === entry.folder)!
   }
 
   /**
@@ -161,10 +169,29 @@ export class KitLibrary {
     throw new KitError(`No kit piece "${q}".${loose.length ? ` Close: ${loose.slice(0, 8).map((p) => p.id).join(', ')}.` : ' Search with kit.'}`)
   }
 
+  /**
+   * Every piece's shape fingerprint (shapeKey), read once per catalog: what a
+   * turned, scaled or renamed copy still has, so a kit piece published on its
+   * own is known whatever it is called.
+   */
+  shapes(): Map<string, string> {
+    const l = this.load()
+    if (l.shapes) return l.shapes
+    const shapes = new Map<string, string>()
+    for (const e of l.byId.values()) {
+      try {
+        const raw = this.payload(e) as { vertices?: unknown[]; faces?: unknown }
+        if (Array.isArray(raw.vertices) && Array.isArray(raw.faces)) shapes.set(shapeKey(raw.vertices.length, raw.faces as unknown[]), e.id)
+      } catch { /* a missing payload is said when it is used */ }
+    }
+    l.shapes = shapes
+    return shapes
+  }
+
   /** A piece's payload as the kit holds it, parsed. */
   payload(entry: KitEntry): unknown {
     const { dir } = this.load()
-    const root = resolve(dir, entry.kit)
+    const root = resolve(dir, entry.folder)
     const file = resolve(root, entry.file)
     if (!file.startsWith(root + sep)) throw new KitError(`${entry.id}: its file is outside its kit's folder.`)
     if (!existsSync(file)) throw new KitError(`${entry.id}: its payload ${file} is missing; your human should refresh the kit (docs/kits.md).`)
@@ -266,4 +293,9 @@ export function overview(lib: KitLibrary): { text: string; kits: Array<Record<st
   })
   const text = kits.map((k) => `${k.kit} (${k.title}): ${k.pieces} pieces. Sets: ${Object.entries(k.sets as Record<string, number>).map(([s, n]) => `${s} ${n}`).join(', ')}. Kinds: ${Object.entries(k.kinds as Record<string, number>).map(([s, n]) => `${s} ${n}`).join(', ')}.`).join('\n')
   return { text, kits }
+}
+
+/** A shape's fingerprint: its vertex count and its faces, which a quarter turn, a scale or a new name never change. */
+export function shapeKey(vertexCount: number, faces: unknown[]): string {
+  return createHash('sha256').update(`${vertexCount}|${JSON.stringify(faces)}`).digest('hex')
 }

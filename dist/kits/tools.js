@@ -4,7 +4,7 @@
 // signed, published or sent. A KitError becomes the tool's refusal.
 import { renderShard } from '../render.js';
 import { Refusal } from '../tool.js';
-import { KitError, overview, pieceLine, searchKits } from './library.js';
+import { KitError, overview, pieceLine, searchKits, shapeKey } from './library.js';
 import { checkLayout, layoutModel, resolvePlacements } from './layout.js';
 import { kitObject, quarters, scaleStep, turnY } from './transform.js';
 /** Run a kit function, turning its KitError into a refusal. */
@@ -83,7 +83,7 @@ export function checkLayoutTool(lib, input) {
     return kitCall(() => {
         const r = checkLayout(lib, input);
         return {
-            text: `${r.text}\nLook at it with render (layout: the same placements; view "top" with cut 2 above a floor shows the rooms like a plan, "iso" the whole build).`,
+            text: `${r.text}\nLook at it with render (layout: the same placements; view "top" with cut 3 above a floor shows the rooms like a plan, "iso" the whole build).`,
             data: { ok: r.ok, errors: r.errors, warnings: r.warnings, counts: r.counts, bag: r.bag },
         };
     });
@@ -117,10 +117,10 @@ export function renderLayout(lib, input) {
     });
 }
 /**
- * Whether a payload is a kit piece as the kit ships it, or a turned or scaled
- * copy of one: its name is a kit's ("Maze Kit: ...") or a piece's own name,
- * with that piece's vertex and face counts. Publishing one on its own (as a
- * public object or an avatar) is refused: kits are never published
+ * Whether a payload is a kit piece, or a turned, scaled or renamed copy of
+ * one: its name is a kit's ("Maze Kit: ..."), or its shape (vertex count and
+ * faces, which none of those change) is a piece's. Publishing one on its own
+ * (as a public object or an avatar) is refused: kits are never published
  * (arkinox, 2026-11-15). Null when it is not one, or no kits are installed.
  */
 export function kitPieceIn(lib, shard) {
@@ -130,8 +130,7 @@ export function kitPieceIn(lib, shard) {
     if (!lib.dir())
         return null;
     try {
-        const hit = lib.entries().find((e) => e.name === name && e.vertices === shard.vertices.length && e.faces === shard.faces.length);
-        return hit ? hit.id : null;
+        return lib.shapes().get(shapeKey(shard.vertices.length, shard.faces)) ?? null;
     }
     catch {
         return null;

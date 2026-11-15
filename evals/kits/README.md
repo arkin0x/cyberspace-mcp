@@ -1,14 +1,11 @@
 # Kit build briefs
 
-Five briefs for building with the kits, each a JSON file in `briefs/`:
-
-| Brief | Kit | What it asks |
-|---|---|---|
-| 01-dungeon-four-rooms | Maze Kit | four rooms on the cardinal directions, a way in, a vault behind the standard door, a treasure chest, everything else sealed |
-| 02-vertical-shaft | Maze Kit | a stair room climbing through a ceiling hatch into a shaft, a side room off it |
-| 03-landscape-raised-ruin-coast | Landscape Kit | a 3 by 3 region, a raised ruin hidden behind step walls facing the low ground, a coastline, inland edges lined |
-| 04-decorate-room | Maze Kit | one sealed room with five decor objects on its floor, clear of walls and each other |
-| 05-meadow-ruins | Landscape Kit | a ruin and decor scattered across two meadow tiles, each at the ground's height |
+Build briefs for the kit tools. They name kit pieces, so they are not in this
+repository: they live with the kits, in `<kits>/briefs/*.json` (the Maze
+Kit's exporter writes them there). Five today: a four-room dungeon with a
+vault door, a two-level build joined by a stair and a shaft, a 3 by 3
+Landscape region with a raised ruin behind step walls and a coastline, a
+decorated room, and ruins scattered across a meadow.
 
 Each file has the `brief` (the words an agent is given), a `solution` (the
 placements a good build uses, checked against the kits) and `assert` (what
@@ -18,7 +15,7 @@ show).
 
 ## Dry run, no model
 
-    CYBERSPACE_KITS_DIR=/data/repos/csmcp/kits npm run eval:kits
+    CYBERSPACE_KITS_DIR=<kits dir> npm run eval:kits
 
 For each brief it calls the MCP tools the way an agent does: `kit_piece`
 for every piece, `check_layout` (the assertions), `check_layout` again with

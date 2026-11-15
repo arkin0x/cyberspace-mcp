@@ -9,6 +9,7 @@
 // Where: the kitsDir setting (config.json "kitsDir", --kits-dir), else the
 // first of <state>/kits and <state>/../kits that holds a catalog. With none,
 // every kit tool says that no kits are installed and where it looked.
+import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 export const CATALOG_FORMAT = 'cyberspace-kit-catalog-1';
@@ -60,10 +61,13 @@ export class KitLibrary {
             }
             if (c.format !== CATALOG_FORMAT || !Array.isArray(c.pieces))
                 continue;
-            const kit = f.split(sep).slice(-2)[0];
-            c.kit = kit;
+            const folder = f.split(sep).slice(-2)[0];
+            // The catalog names its kit; the folder is only where it lives (a kit copied to another folder keeps its rules).
+            c.folder = folder;
+            c.kit = typeof c.kit === 'string' && c.kit ? c.kit : folder;
             for (const p of c.pieces) {
-                p.kit = kit;
+                p.kit = c.kit;
+                p.folder = folder;
                 p.tags ??= [];
                 p.notes ??= [];
                 byId.set(p.id, p);
@@ -82,7 +86,7 @@ export class KitLibrary {
         return this.load().catalogs.flatMap((c) => c.pieces);
     }
     catalogOf(entry) {
-        return this.load().catalogs.find((c) => c.kit === entry.kit);
+        return this.load().catalogs.find((c) => c.folder === entry.folder);
     }
     /**
      * One piece by its id (maze-kit/forest/halls/hall-straight), or by the end
@@ -105,10 +109,31 @@ export class KitLibrary {
         const loose = [...byId.values()].filter((p) => p.id.includes(q) || p.name.toLowerCase() === q.toLowerCase());
         throw new KitError(`No kit piece "${q}".${loose.length ? ` Close: ${loose.slice(0, 8).map((p) => p.id).join(', ')}.` : ' Search with kit.'}`);
     }
+    /**
+     * Every piece's shape fingerprint (shapeKey), read once per catalog: what a
+     * turned, scaled or renamed copy still has, so a kit piece published on its
+     * own is known whatever it is called.
+     */
+    shapes() {
+        const l = this.load();
+        if (l.shapes)
+            return l.shapes;
+        const shapes = new Map();
+        for (const e of l.byId.values()) {
+            try {
+                const raw = this.payload(e);
+                if (Array.isArray(raw.vertices) && Array.isArray(raw.faces))
+                    shapes.set(shapeKey(raw.vertices.length, raw.faces), e.id);
+            }
+            catch { /* a missing payload is said when it is used */ }
+        }
+        l.shapes = shapes;
+        return shapes;
+    }
     /** A piece's payload as the kit holds it, parsed. */
     payload(entry) {
         const { dir } = this.load();
-        const root = resolve(dir, entry.kit);
+        const root = resolve(dir, entry.folder);
         const file = resolve(root, entry.file);
         if (!file.startsWith(root + sep))
             throw new KitError(`${entry.id}: its file is outside its kit's folder.`);
@@ -224,5 +249,9 @@ export function overview(lib) {
     });
     const text = kits.map((k) => `${k.kit} (${k.title}): ${k.pieces} pieces. Sets: ${Object.entries(k.sets).map(([s, n]) => `${s} ${n}`).join(', ')}. Kinds: ${Object.entries(k.kinds).map(([s, n]) => `${s} ${n}`).join(', ')}.`).join('\n');
     return { text, kits };
+}
+/** A shape's fingerprint: its vertex count and its faces, which a quarter turn, a scale or a new name never change. */
+export function shapeKey(vertexCount, faces) {
+    return createHash('sha256').update(`${vertexCount}|${JSON.stringify(faces)}`).digest('hex');
 }
 //# sourceMappingURL=library.js.map
