@@ -50,6 +50,8 @@ export interface Settings {
   tools?: 'all' | 'starter' | string[]
   /** --machine-id: this machine's id for the lock, in place of $CYBERSPACE_MCP_MACHINE_ID and <state>.machine-id (lock.ts). Never from config.json, which travels with the state directory. */
   machineId?: string
+  /** Where the building kits are (kits/library.ts); default the first of <state>/kits and <state>/../kits that holds one. */
+  kitsDir?: string
 }
 
 const DEFAULTS = {
@@ -88,6 +90,7 @@ export interface ParsedArgs {
   publishMaxPerDay?: number
   machineId?: string
   tools?: 'all' | 'starter' | string[]
+  kitsDir?: string
   help?: boolean
 }
 
@@ -140,11 +143,14 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
                                 $CYBERSPACE_MCP_MACHINE_ID, else <state>.machine-id (made once,
                                 beside the state directory; never sync or copy it). An id given here
                                 or in the environment must be unique to this machine.
+  --kits-dir <dir>              Where the building kits are (one folder per kit, each with a
+                                catalog.json; docs/kits.md). Default <state>/kits, else
+                                <state>/../kits. Kits are local data and never published.
   --help                        This text.
 
 The same keys may live in <state>/config.json: relays, operator, name, about,
 capCallSeconds, capSessionSeconds, capDailySeconds, threads, maxSidestepHeight, allowRespawn, hosakaUrl,
-nwc, maxPaymentSats, maxDailySats, chatWakeMinutes, publishMaxPerDay, and travelLog: { "enabled": true,
+nwc, maxPaymentSats, maxDailySats, chatWakeMinutes, publishMaxPerDay, kitsDir, and travelLog: { "enabled": true,
 "maxPerDay": 6, "tagOperator": false }. The wallet string may also be the "nwc" key
 of <state>/wallet.json, which the server only reads.`
 
@@ -211,6 +217,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case '--publish-max-per-day': out.publishMaxPerDay = Math.max(1, Math.floor(num(a, next()))); break
       case '--machine-id': out.machineId = next(); if (!out.machineId) throw new Error('--machine-id needs a value'); break
       case '--tools': out.tools = toolsSetting('--tools', next()); break
+      case '--kits-dir': out.kitsDir = next(); if (!out.kitsDir) throw new Error('--kits-dir needs a directory'); out.kitsDir = expandHome(out.kitsDir); break
       case '--help': case '-h': out.help = true; break
       // An argument that looks like a wallet string is never echoed, even into an error (arkinox, 2026-10-11).
       default: throw new Error(`unknown argument ${/walletconnect|secret=/i.test(a) ? '(it looks like a wallet connection string, so it is not repeated here; use --nwc <uri>)' : JSON.stringify(a)}; try --help`)
@@ -238,6 +245,7 @@ interface FileConfig {
   chatWakeMinutes?: unknown
   publishMaxPerDay?: unknown
   tools?: unknown
+  kitsDir?: unknown
 }
 
 /** <state>/wallet.json, which the human writes and the server only reads: {"nwc": "nostr+walletconnect://..."}. */
@@ -315,6 +323,7 @@ export function settingsFrom(args: ParsedArgs, file: FileConfig, walletFile: Wal
     publishMaxPerDay: args.publishMaxPerDay ?? (posNum(file.publishMaxPerDay) !== undefined ? Math.max(1, Math.floor(posNum(file.publishMaxPerDay)!)) : DEFAULTS.publishMaxPerDay),
     ...(args.machineId ? { machineId: args.machineId } : {}),
     ...(tools !== undefined ? { tools } : {}),
+    ...((args.kitsDir ?? str(file.kitsDir)) ? { kitsDir: args.kitsDir ?? expandHome(str(file.kitsDir)!) } : {}),
   }
 }
 

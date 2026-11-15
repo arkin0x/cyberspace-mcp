@@ -52,6 +52,9 @@ import { ROAM_MAX_MINUTES, ROAM_MIN_MINUTES, Roam, roamCandidates, searchRoam } 
 import { profileTemplate, MAX_PICTURE_URL, pictureUrl, publishedFields } from './profile.js';
 import { objectHandle, renderShard } from './render.js';
 import { validateSnoPayload } from './sno.js';
+import { KitLibrary, kitsDirCandidates } from './kits/library.js';
+import { KIT_PUBLISH_REFUSAL, checkLayoutTool, clipWords, kitCall, kitPieceIn, kitPieceTool, kitShard, kitTool, renderLayout } from './kits/tools.js';
+import { kitObject } from './kits/transform.js';
 import { chosenConstrainOf, walkWords, withAuthoredConstrain } from './walkConstrain.js';
 import { DEFAULT_PUBLISH_PER_DAY, MAX_ALT_LENGTH, MAX_NAME_LENGTH, dProblem, newObjectId, objectPointers, publicObjectTemplate } from './publicObject.js';
 import { hopCeiling, loadOrMeasure, projectCantorMs } from './space/calibration.js';
@@ -110,6 +113,8 @@ export const STOPPED_WORDS = 'Stopped. I\'ll wait for your next message.';
 export class Agent {
     config;
     pubkey;
+    /** The kits on this machine (kit, kit_piece, check_layout, place and render with kit); read from disk, never published. */
+    kits;
     npub;
     relays;
     keeper;
@@ -169,6 +174,7 @@ export class Agent {
         this.pubkey = getPublicKey(sk);
         this.npub = nip19.npubEncode(this.pubkey);
         this.calibration = calibration;
+        this.kits = new KitLibrary(kitsDirCandidates(config.stateDir, config.kitsDir));
         this.name = config.name ?? null;
         const urls = config.relays.map((u) => normalizeRelay(u)).filter((u) => !!u);
         if (urls.length === 0)
@@ -1960,6 +1966,20 @@ export class Agent {
         });
     }
     async place(input) {
+        // A kit piece, turned and scaled as asked, goes through the same hide as any payload: building with it, under the build's own name.
+        if (input.kit !== undefined) {
+            if (input.object !== undefined || input.address !== undefined || input.id !== undefined)
+                throw new Refusal('Give kit alone, or object, address or id: not both.');
+            const k = kitCall(() => kitObject(this.kits, String(input.kit), { turn: input.turn, scale: input.scale }));
+            const at = this.target(input.coordinate, this.keeper.place());
+            const clipped = kitCall(() => clipWords(k.entry, input.turn, input.scale, at.position, input.height));
+            if (clipped)
+                throw new Refusal(`Not placed: ${clipped}`);
+            const r = await this.hide({ contents: { object: k.payload }, coordinate: input.coordinate, height: input.height });
+            return { ...r, text: `Kit piece ${k.entry.id}${k.turn ? ` turned ${k.turn}` : ''}${k.scale ? ` at scale ${k.scale}` : ''}, as "${k.shard.name}": ${r.text}`, data: { ...r.data, kit: { piece: k.entry.id, turn: k.turn, scale: k.scale } } };
+        }
+        if (input.turn !== undefined || input.scale !== undefined)
+            throw new Refusal('turn and scale go with kit (a kit piece); a payload you give is placed as it is.');
         // An object find or open_chest listed, or one taken from a chest, by its id: its payload is placed as given.
         if (input.id !== undefined && input.object === undefined && input.address === undefined) {
             return this.hide({ contents: { object: toPayload(this.objectById(input.id).shard) }, coordinate: input.coordinate, height: input.height });
@@ -2319,13 +2339,37 @@ export class Agent {
      * 33331 by its address. Drawn on this machine's CPU (render.ts); nothing is
      * signed or published, and only an address asks a relay anything.
      */
+    /** kit: the kits installed here, or the pieces that fit a search (kits/library.ts). Local; nothing is sent. */
+    kit(input) {
+        return kitTool(this.kits, input);
+    }
+    /** kit_piece: one kit piece in full, and its payload when asked. Local; nothing is sent. */
+    kitPiece(input) {
+        return kitPieceTool(this.kits, input);
+    }
+    /** check_layout: the kits' rules over a planned build (kits/layout.ts). origin, when given, is read like any coordinate (from where you stand for { dx, dy, dz }). */
+    checkLayout(input) {
+        const origin = input.origin !== undefined ? this.target(input.origin, this.keeper.place()).position : undefined;
+        return checkLayoutTool(this.kits, { placements: input.placements, origin, height: input.height });
+    }
     async render(input) {
-        const given = [input.object, input.id, input.address].filter((x) => x !== undefined).length;
+        const given = [input.object, input.id, input.address, input.kit, input.layout].filter((x) => x !== undefined).length;
         if (given !== 1)
-            throw new Refusal('Give exactly one of: object (an SNO payload), id (an object find or look listed), or address (a public kind 33331).');
+            throw new Refusal('Give exactly one of: object (an SNO payload), id (an object find or look listed), address (a public kind 33331), kit (a kit piece) or layout (a planned build of kit pieces).');
+        if (input.layout !== undefined)
+            return renderLayout(this.kits, { layout: input.layout, cut: input.cut, view: input.view, yaw: input.yaw, pitch: input.pitch, size: input.size });
+        if (input.cut !== undefined)
+            throw new Refusal('cut goes with layout.');
+        if ((input.turn !== undefined || input.scale !== undefined) && input.kit === undefined)
+            throw new Refusal('turn and scale go with kit.');
         let shard;
         let source;
-        if (input.object !== undefined) {
+        if (input.kit !== undefined) {
+            const k = kitShard(this.kits, { kit: input.kit, turn: input.turn, scale: input.scale });
+            shard = k.shard;
+            source = k.source;
+        }
+        else if (input.object !== undefined) {
             let raw = input.object;
             // A payload sent as a JSON string is read as the object it spells.
             if (typeof raw === 'string') {
@@ -2373,7 +2417,7 @@ export class Agent {
         }
         return {
             // An object found in cyberspace was named by someone else.
-            text: source === 'payload' ? r.caption : `${r.caption} Its name is the author's text (untrusted).`,
+            text: source === 'payload' ? r.caption : source.startsWith('kit piece') ? `${source}: ${r.caption}` : `${r.caption} Its name is the author's text (untrusted).`,
             images: [{ data: r.png.toString('base64'), mimeType: 'image/png' }],
             data: { source, name: shard.name, mode: shard.mode, unit: shard.unit, vertices: r.vertices, faces: r.faces, bounds: r.bounds, view: r.view, size: r.size, backFacing: r.backFacing, partsNotDrawn: r.partsNotDrawn, pngBytes: r.png.length, ms: Math.round(r.ms) },
         };
@@ -2421,6 +2465,9 @@ export class Agent {
                 throw new Refusal(`Not set: the payload is not valid SNO. ${v.errors.join(' ')}`);
             if (v.bytes > MAX_AVATAR_BYTES)
                 throw new Refusal(`Not set: the payload is ${v.bytes} bytes, and an avatar is at most ${MAX_AVATAR_BYTES} (every try of the work hashes the whole event). Use fewer vertices.`);
+            const kitHit = kitPieceIn(this.kits, v.shard);
+            if (kitHit)
+                throw new Refusal(`Not set: ${kitHit} ${KIT_PUBLISH_REFUSAL}`);
             shard = v.shard;
             source = 'payload';
         }
@@ -2539,6 +2586,9 @@ export class Agent {
         const v = validateSnoPayload(raw);
         if (!v.ok)
             throw new Refusal(`Not published: the payload is not valid SNO. ${v.errors.join(' ')}`);
+        const kitHit = kitPieceIn(this.kits, v.shard);
+        if (kitHit)
+            throw new Refusal(`Not published: ${kitHit} ${KIT_PUBLISH_REFUSAL}`);
         const replacing = input.d !== undefined;
         const d = replacing ? String(input.d) : newObjectId();
         const bad = dProblem(d);

@@ -43,6 +43,15 @@ export function agentsMarkdown(): string {
   }
 }
 
+/** The kits guide (docs/kits-guide.md), read beside the build like agents.md; a short stand-in when the file is not there. */
+export function kitsMarkdown(): string {
+  try {
+    return readFileSync(new URL('../docs/kits-guide.md', import.meta.url), 'utf8')
+  } catch {
+    return '# Building with kits\n\nThe guide (docs/kits-guide.md) is not beside this build. Use kit to see what is installed, kit_piece for one piece, check_layout before placing anything, render with layout to look, and place with kit to build. Never publish a kit or a kit piece on its own.\n'
+  }
+}
+
 const AGENTS_MD = `# agents.md (placeholder)
 
 The guide for AI agents in cyberspace is being written in the spec repository
@@ -116,7 +125,7 @@ export const STARTER_TOOLS: readonly string[] = ['identity', 'whereami', 'look',
 export const TOOL_NAMES: readonly string[] = [
   'identity', 'whereami', 'look', 'plan_hop', 'hop', 'station', 'board', 'ride', 'ride_status', 'say', 'listen', 'wait_for',
   'find', 'hide', 'items', 'forge_item', 'seal_chest', 'open_chest', 'comment', 'take', 'place', 'placed', 'remove_placed',
-  'move_placed', 'constrain_placed', 'set_avatar', 'publish_object', 'validate_object', 'render', 'budget', 'outbox', 'inbox',
+  'move_placed', 'constrain_placed', 'set_avatar', 'publish_object', 'validate_object', 'render', 'kit', 'kit_piece', 'check_layout', 'budget', 'outbox', 'inbox',
   'orders_waiting', 'follow_operator', 'roam', 'visit', 'wallet', 'message_operator', 'log_travel', 'wake_again', 'work_done',
 ]
 
@@ -179,6 +188,17 @@ const coordinate = z.union([
     dz: z.union([z.string(), z.number()]).optional(),
   }).describe('An offset in gibsons from where you stand.'),
 ]).describe('A coordinate: 64-hex, {x, y, z, plane}, or {dx, dy, dz} from where you stand.')
+
+/** One kit piece in a planned build (check_layout, render's layout). */
+const placementSchema = z.object({
+  piece: z.string().describe('The kit piece\'s id (or the unique end of it).'),
+  at: z.union([z.tuple([z.number().int(), z.number().int(), z.number().int()]), z.object({ x: z.number().int(), y: z.number().int(), z: z.number().int() })]).describe('Whole gibsons from the layout origin: [x, y, z].'),
+  turn: z.number().int().optional().describe('Quarter turns about Y in degrees: 0, 90, 180, 270.'),
+  scale: z.number().int().min(0).optional(),
+  label: z.string().max(80).optional().describe('Your name for it, used in the findings.'),
+  open: z.array(z.enum(['+x', '-x', '+y', '-y', '+z', '-z'])).optional().describe('World faces of this tile left open on purpose: the way in from outside.'),
+  height: z.number().int().min(0).max(16).optional().describe('This piece\'s bag height, in place of the layout\'s.'),
+})
 
 const snoPayload = z.record(z.string(), z.unknown()).describe('An SNO object payload (DECK-0003 section 1): v, name, unit, mode, vertices, colors, faces, and the optional fields.')
 
@@ -530,8 +550,17 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   server.registerTool('place', {
     title: 'Place an object',
-    description: 'Validate an SNO payload (DECK-0003 1.9) and hide it as an object at a coordinate and height: inline when small, by reference as a hidden kind 33331 when large. Or place a published public object by its address (33331:<pubkey>:<d> or naddr) as a reference. Or place an object find or open_chest listed, or one you took from a chest, by its id. A payload you place (or copy by its id) is written with its WALK setting, "constrain" (DECK-0003 1.12): "opaque" unless the payload says "all" or "off", so walkers in WALK cannot pass through a solid, opaque object; the answer says which. A public object placed by its address keeps its author\'s setting. constrain_placed changes it later.',
-    inputSchema: { object: snoPayload.optional(), address: z.string().optional(), id: z.string().optional().describe('An object\'s id as find, open_chest or items lists it (at least 8 hex characters).'), coordinate, height: z.number().int().min(0).max(MAX_KEY_HEIGHT) },
+    description: 'Validate an SNO payload (DECK-0003 1.9) and hide it as an object at a coordinate and height: inline when small, by reference as a hidden kind 33331 when large. Or place a published public object by its address (33331:<pubkey>:<d> or naddr) as a reference. Or place an object find or open_chest listed, or one you took from a chest, by its id. Or place a kit piece by its id (kit, with turn and scale): a piece of the kits installed on this machine, for building (kit lists them; check_layout checks a whole build first); it is refused when the height you give would clip it. A payload you place (or copy by its id) is written with its WALK setting, "constrain" (DECK-0003 1.12): "opaque" unless the payload says "all" or "off", so walkers in WALK cannot pass through a solid, opaque object; the answer says which. A public object placed by its address keeps its author\'s setting. constrain_placed changes it later.',
+    inputSchema: {
+      object: snoPayload.optional(),
+      address: z.string().optional(),
+      id: z.string().optional().describe('An object\'s id as find, open_chest or items lists it (at least 8 hex characters).'),
+      kit: z.string().optional().describe('A kit piece by its id as kit lists it (maze-kit/forest/halls/hall-straight): placed as part of your build, turned and scaled as asked, under its own name without the kit\'s.'),
+      turn: z.number().int().optional().describe('With kit: quarter turns about Y in degrees, 0, 90, 180 or 270 (90 takes +x to -z and +z to +x).'),
+      scale: z.number().int().min(0).optional().describe('With kit: each step doubles the piece; 0 (the default) is the size the kit was built at, 1 gibson a unit.'),
+      coordinate,
+      height: z.number().int().min(0).max(MAX_KEY_HEIGHT),
+    },
     annotations: { readOnlyHint: false, destructiveHint: false },
   }, async (args) => call(() => agent.place(args)))
 
@@ -618,11 +647,16 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   server.registerTool('render', {
     title: 'Render an object',
-    description: 'See an object: draws it to a PNG image on this machine and returns the image with a one-line caption (vertex and face counts, bounds in units, the size of a unit). Nothing is signed or published. Give exactly one of: object (an SNO payload; render it before you place it), id (an object find, look or open_chest listed, or one you took from a chest, by its id), or address (a public kind 33331, "33331:<pubkey>:<d>" or naddr). Faces are lit flat with their front as the winding gives it (counter-clockwise seen from the front, DECK-0003 1.4); a face seen from its back is drawn darker, and the caption counts them, so a face wound the wrong way shows. A floor grid of whole units and the axes from the origin (+X red, +Y green, +Z blue) give the scale. Placed parts are not drawn.',
+    description: 'See an object: draws it to a PNG image on this machine and returns the image with a one-line caption (vertex and face counts, bounds in units, the size of a unit). Nothing is signed or published. Give exactly one of: object (an SNO payload; render it before you place it), id (an object find, look or open_chest listed, or one you took from a chest, by its id), address (a public kind 33331, "33331:<pubkey>:<d>" or naddr), kit (a kit piece, with turn and scale), or layout (a planned build of kit pieces, the placements check_layout takes: look at it before you place anything; view top with cut shows enclosed rooms as a plan). Faces are lit flat with their front as the winding gives it (counter-clockwise seen from the front, DECK-0003 1.4); a face seen from its back is drawn darker, and the caption counts them, so a face wound the wrong way shows. A floor grid of whole units and the axes from the origin (+X red, +Y green, +Z blue) give the scale. Placed parts are not drawn.',
     inputSchema: {
       object: z.unknown().optional().describe('An SNO payload (DECK-0003 section 1), as you would give place.'),
       id: z.string().optional().describe('An object\'s id as find lists it (at least 8 hex characters).'),
       address: z.string().optional().describe('A public kind 33331 object: "33331:<pubkey hex>:<d>" or its naddr.'),
+      kit: z.string().optional().describe('A kit piece by its id, drawn as it would be placed (with turn and scale).'),
+      turn: z.number().int().optional().describe('With kit: quarter turns about Y in degrees (0, 90, 180, 270).'),
+      scale: z.number().int().min(0).optional().describe('With kit: each step doubles the piece.'),
+      layout: z.array(placementSchema).min(1).max(400).optional().describe('A planned build of kit pieces (the placements check_layout takes), drawn as one picture in gibsons from the layout origin.'),
+      cut: z.number().optional().describe('With layout: leave out faces reaching above this height (gibsons above the layout origin), so a top view shows enclosed rooms like a plan; 2 above a floor is a good cut.'),
       view: z.enum(['iso', 'front', 'back', 'top', 'side']).optional().describe('iso (default), front (from +Z), back, top (from +Y), side (from +X).'),
       yaw: z.number().optional().describe('Degrees about +Y, 0 looking from +Z, 90 from +X. Overrides the view\'s.'),
       pitch: z.number().min(-90).max(90).optional().describe('Degrees above the horizon, 90 looking straight down. Overrides the view\'s.'),
@@ -630,6 +664,48 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     },
     annotations: { readOnlyHint: true },
   }, async (args) => call(() => agent.render(args)))
+
+  server.registerTool('kit', {
+    title: 'Kit pieces',
+    description: 'The building kits installed on this machine (the Maze Kit: 16-gibson rooms, plugs, doors, decor; the Landscape Kit: terrain tiles, walls, coast, ruins), read from local files: nothing is fetched or sent. With no arguments: what is installed. With text and filters: the pieces that fit, each with its size, openings or edge profiles, the bag height it needs and its tags. Build with a piece by placing it (place with kit); kit_piece gives one in full; check_layout checks a whole build before you place anything. Read the resource cyberspace://kits.md first: the rules and worked examples. Kits are never published, as a whole or one piece on its own. When no kits are installed it says so.',
+    inputSchema: {
+      text: z.string().optional().describe('Words to look for in ids, names, tags and descriptions: "corner door", "barrel", "cliff step".'),
+      kit: z.string().optional().describe('Only this kit: maze-kit or landscape-kit.'),
+      set: z.string().optional().describe('Only this set: forest, cistern, basilica, atrani, aerocarnival, shared, locks; plains.'),
+      group: z.string().optional().describe('Only this folder within a set, or below it: halls, plugs/wall, decor, tiles/hills, walls/steps, decor/ruins.'),
+      kind: z.string().optional().describe('tile, plug, reducer, recessed-plug, door, door-open, insert, cap, prop, decor, open, course; coast, wall, ruin.'),
+      tags: z.array(z.string()).optional().describe('Every one of these tags: corner, tee, cross, straight, dead-end, shaft, stairs, water, crawl, room; ground, coast, raised-edge, ramp, seam-wall, step-wall, ruins, solid.'),
+      opening: z.enum(['window', 'door', 'hallway', 'arch']).optional().describe('Pieces with an opening of this size (or a plug, reducer or door for it).'),
+      edge: z.string().optional().describe('Landscape tiles with an edge of this profile: L0, L10, S, V, B+, B-, K+, K-, R+, R-.'),
+      max_bytes: z.number().int().positive().optional(),
+      max_bag_height: z.number().int().min(0).max(16).optional().describe('Only pieces that fit a bag of this height.'),
+      limit: z.number().int().min(1).max(100).optional().describe('At most this many (default 20).'),
+    },
+    annotations: { readOnlyHint: true },
+  }, async (args) => call(() => agent.kit(args)))
+
+  server.registerTool('kit_piece', {
+    title: 'One kit piece',
+    description: 'One kit piece in full: what it is, where its origin is and how it is placed, its bounds, openings (and where they face once turned) or edge profiles, which ceiling hatches its floor seals, wall lines, notes, the bag height it needs, and its kit\'s standard (tile size, opening sizes, turn rule). sno: true adds its payload, turned and scaled as asked, which you rarely need: place it with place (kit) instead. Local; nothing is sent.',
+    inputSchema: {
+      piece: z.string().describe('The piece\'s id as kit lists it, or the end of it when that is unique (forest/halls/hall-straight).'),
+      sno: z.boolean().optional().describe('true to include its SNO payload.'),
+      turn: z.number().int().optional().describe('Quarter turns about Y in degrees (0, 90, 180, 270): the openings are given where they face, and the payload turned.'),
+      scale: z.number().int().min(0).optional().describe('Each step doubles the piece.'),
+    },
+    annotations: { readOnlyHint: true },
+  }, async (args) => call(() => agent.kitPiece(args)))
+
+  server.registerTool('check_layout', {
+    title: 'Check a build of kit pieces',
+    description: 'Check a planned build of kit pieces against the kits\' own rules before you place anything, and get plain errors with fixes. Each placement: piece, at [x, y, z] (whole gibsons from the layout origin), turn, scale. Maze Kit: tiles on the 16-gibson grid, one per cell; openings that meet are the same size (long hatches turned alike) or joined by a reducer; every other opening sealed by a plug, a door, the floor above or the recessed plug, or listed in open (a way in on purpose); no plug where there is no opening or where it z-fights; decor on a floor and inside the walls. Landscape Kit: edges meet only where profiles and heights match; a raised edge or ramp side needs a step wall or ramp bank on that seam, facing the low tile; region edges show the slab\'s skirt; decor stands on the ground. Both: nothing overlaps, and every piece fits its bag (give origin, where you will build, for the exact check; without it you get the height and where the origin may sit). Then look with render (layout) and place each piece with place (kit, turn, scale, coordinate from the origin, height). Local; nothing is sent.',
+    inputSchema: {
+      placements: z.array(placementSchema).min(1).max(400),
+      origin: coordinate.optional().describe('Where the layout\'s [0, 0, 0] will be: 64 hex, { x, y, z }, or { dx, dy, dz } from where you stand. For the exact clipping check.'),
+      height: z.number().int().min(0).max(MAX_KEY_HEIGHT).optional().describe('The bag height you will hide every piece at; default: the lowest that holds the build.'),
+    },
+    annotations: { readOnlyHint: true },
+  }, async (args) => call(() => agent.checkLayout(args)))
 
   server.registerTool('budget', {
     title: 'Budget',
@@ -736,6 +812,12 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     description: 'The guide for agents in cyberspace: what an agent is, the seven rules with no undo, one key one mover, how to meet a human (traverse: station, board, ride, meet at the stop), talking with your operator by private DM, the tools, the budget, the profile convention. The same text as docs/agents.md in the spec repository.',
     mimeType: 'text/markdown',
   }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: 'text/markdown', text: agentsMarkdown() }] }))
+
+  server.registerResource('kits.md', 'cyberspace://kits.md', {
+    title: 'kits.md',
+    description: 'Building with kits: the Maze Kit and Landscape Kit rules (tiles, openings, plugs, doors, step walls, sea level, bags), the craft notes, and worked examples (a four-room dungeon, a raised ruin on a coast, decorating). Read it before a kit build.',
+    mimeType: 'text/markdown',
+  }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: 'text/markdown', text: kitsMarkdown() }] }))
 
   // The meet prompt walks the line (station, board, ride): offered only when those tools are shown.
   if (MEET_TOOLS.every(isShown)) server.registerPrompt('meet', {

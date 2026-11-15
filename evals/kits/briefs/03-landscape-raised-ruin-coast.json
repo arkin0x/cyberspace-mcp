@@ -1,0 +1,41 @@
+{
+  "id": "landscape-raised-ruin-coast",
+  "title": "A 3 by 3 Landscape region: a raised ruin behind cliff walls, and a coastline",
+  "brief": "Build a 3 by 3 region of 64-gibson Plains tiles. The middle tile is raised 10 and holds a ruin; hide every raised edge behind step walls that face the low ground. One row is a coastline with the sea beyond it. Line the inland region edges with walls so no dirt skirt shows. The tiles are treeless: leave trees to tree seeds.",
+  "solution": {
+    "placements": [
+      { "piece": "landscape-kit/plains/coast/beach/beach", "at": [0, 0, 0], "label": "beach west" },
+      { "piece": "landscape-kit/plains/coast/beach/shore-meadow", "at": [64, 0, 0], "label": "shore meadow" },
+      { "piece": "landscape-kit/plains/coast/beach/beach", "at": [128, 0, 0], "label": "beach east" },
+      { "piece": "landscape-kit/plains/tiles/forest/forest-floor", "at": [0, 0, 64], "label": "forest floor" },
+      { "piece": "landscape-kit/plains/tiles/meadows/grassland", "at": [64, 10, 64], "label": "raised ruin" },
+      { "piece": "landscape-kit/plains/tiles/valleys/dell", "at": [128, 0, 64], "label": "dell" },
+      { "piece": "landscape-kit/plains/tiles/meadows/meadow", "at": [0, 0, 128], "label": "meadow" },
+      { "piece": "landscape-kit/plains/tiles/hills/rolling-hills", "at": [64, 0, 128], "label": "hills" },
+      { "piece": "landscape-kit/plains/tiles/hills/knoll", "at": [128, 0, 128], "label": "knoll" },
+      { "piece": "landscape-kit/plains/walls/steps/cliff/cliff-step-64", "at": [32, 0, 64], "turn": 90, "label": "west cliff" },
+      { "piece": "landscape-kit/plains/walls/steps/cliff/cliff-step-64", "at": [96, 0, 64], "turn": 270, "label": "east cliff" },
+      { "piece": "landscape-kit/plains/walls/steps/cliff/cliff-step-64", "at": [64, 0, 32], "label": "south cliff" },
+      { "piece": "landscape-kit/plains/walls/steps/cliff/cliff-step-64", "at": [64, 0, 96], "turn": 180, "label": "north cliff" },
+      { "piece": "landscape-kit/plains/walls/seam/rock-wall/rock-wall-64", "at": [0, 0, 160], "label": "north wall 1" },
+      { "piece": "landscape-kit/plains/walls/seam/rock-wall/rock-wall-64", "at": [64, 0, 160], "label": "north wall 2" },
+      { "piece": "landscape-kit/plains/walls/seam/rock-wall/rock-wall-64", "at": [128, 0, 160], "label": "north wall 3" },
+      { "piece": "landscape-kit/plains/walls/seam/rock-wall/rock-wall-64", "at": [-32, 0, 64], "turn": 90, "label": "west wall 1" },
+      { "piece": "landscape-kit/plains/walls/seam/rock-wall/rock-wall-64", "at": [-32, 0, 128], "turn": 90, "label": "west wall 2" },
+      { "piece": "landscape-kit/plains/walls/seam/rock-wall/rock-wall-64", "at": [160, 0, 64], "turn": 90, "label": "east wall 1" },
+      { "piece": "landscape-kit/plains/walls/seam/rock-wall/rock-wall-64", "at": [160, 0, 128], "turn": 90, "label": "east wall 2" },
+      { "piece": "landscape-kit/plains/decor/ruins/columns/toppled-column", "at": [56, 10, 58], "label": "toppled column" },
+      { "piece": "landscape-kit/plains/decor/ruins/walls/broken-arch", "at": [72, 10, 72], "label": "broken arch" },
+      { "piece": "landscape-kit/plains/decor/ruins/ground/foundation-outline", "at": [70, 10, 52], "label": "foundation" },
+      { "piece": "landscape-kit/plains/decor/shore/driftwood", "at": [40, -2, -2], "label": "driftwood" }
+    ]
+  },
+  "assert": {
+    "ok": true,
+    "atLeast": { "tile": 6, "coast": 3, "wall": 4, "ruin": 3 },
+    "noErrors": ["edge-mismatch", "step-facing"],
+    "noWarnings": ["decor-floating", "decor-sunk", "decor-outside", "wall-off-seam", "step-height"],
+    "regionEdgesOnlyOn": ["beach", "shore-meadow"],
+    "bagHeightAtMost": 8
+  }
+}

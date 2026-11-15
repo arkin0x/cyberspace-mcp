@@ -11,6 +11,7 @@
   "files": [
     "dist",
     "docs/agents.md",
+    "docs/kits-guide.md",
     "docs/examples",
     "README.md",
     "QUICKSTART.md",
@@ -25,7 +26,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run build:dist"
+    "prepublishOnly": "npm run build:dist",
+    "eval:kits": "vitest run test/kitsEval.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",
