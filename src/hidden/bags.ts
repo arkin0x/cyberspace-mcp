@@ -205,6 +205,10 @@ export interface ChestItem {
   senderPubkey: string
   requires: string
   payload: string
+  /** Its look tags (DECK-0004 §3.6): ["look", <payload>] and ["look", <payload>, "open"], as written. */
+  look?: string[][]
+  /** A door's height (DECK-0004 §3.7.1): present only on a door. */
+  door?: number
 }
 
 const HEX_64 = /^[0-9a-f]{64}$/
@@ -546,7 +550,8 @@ export function chestInnerTemplate(chest: ChestItem, at: Position, plane: Plane,
     kind: CHEST_KIND,
     created_at: createdAt,
     content: chest.payload,
-    tags: [['C', positionHex(at, plane)], ['title', chest.name.slice(0, MAX_ITEM_NAME)], ['lock', chest.lockPubkey, chest.senderPubkey], ['requires', chest.requires], [...PROTECTED_TAG]],
+    // Looks and the door tag in ONOSENDAI's order (lib/hidden.ts chestInnerTemplate): C, title, lock, requires, looks, door, -.
+    tags: [['C', positionHex(at, plane)], ['title', chest.name.slice(0, MAX_ITEM_NAME)], ['lock', chest.lockPubkey, chest.senderPubkey], ['requires', chest.requires], ...(chest.look ?? []).map((t) => [...t]), ...(chest.door !== undefined ? [['door', String(chest.door)]] : []), [...PROTECTED_TAG]],
   }
 }
 

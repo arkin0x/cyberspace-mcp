@@ -141,6 +141,14 @@ export interface PlacedHost {
   resolveReference: (ref: Reference) => Promise<NostrEvent | null>
   /** The key for a cube, priced against the caps and spent (Refusal above them). */
   keyFor: (at: Position, height: number) => { key: HeldKey; ms: number }
+  /** The room bag's key in place of a cube's, when the place is inside the room of one of the agent's doors at its height (DECK-0004 §3.7.4). */
+  roomKeyFor?: (at: Position, plane: Plane, height: number, key: HeldKey) => HeldKey
+  /** Whether a bag is the room bag of one of the agent's doors. */
+  isRoomBag?: (lookupId: string) => boolean
+  /** Before things are removed (one, or every thing of a bag): a refusal when they may not go (the last door of a room that still holds things). */
+  beforeRemove?: (ids: string[]) => void
+  /** After things are removed. */
+  afterRemove?: (ids: string[]) => void
   /** File an opened item, as find files it. */
   summarize: (h: Hidden, lookupId: string) => EntrySummary
   /** Where the agent stands, for a destination given as an offset from there. */
@@ -695,9 +703,11 @@ export class Placements {
       const hits = reading.bags.filter((b) => b.lookupId.startsWith(want) || b.bagId.startsWith(want))
       if (hits.length === 0) throw new Refusal(`None of your bags has a lookup id or bag id starting ${want}. placed lists them.`)
       if (hits.length > 1) throw new Refusal(`${hits.length} of your bags start ${want}; give more of the id.`)
+      this.host.beforeRemove?.(hits[0].rows.map((r) => r.id))
       return this.removeBag(hits[0], reading)
     }
     const row = this.resolve(reading, input.target, input.type)
+    this.host.beforeRemove?.(input.whole_bag ? row.bag.rows.map((r) => r.id) : [row.id])
     if (input.whole_bag) return this.removeBag(row.bag, reading)
     const key = this.keyOf(row.bag)
     return this.withBags([key.lookupId], async () => {
@@ -711,6 +721,7 @@ export class Placements {
         const { event, entry } = await this.publishBag(left, key, settings, { position: { x: BigInt(key.base.x), y: BigInt(key.base.y), z: BigInt(key.base.z) }, plane: row.plane }, current)
         await this.noteOpened(event, key, settings)
         const retract = entry.accepted.includes(this.canonical) ? await this.retractIfUnnamed(row, reading, new Set([`${row.bag.lookupId}/${row.key}`])) : ''
+        this.host.afterRemove?.([row.id])
         return {
           text: `Removed ${what}. The bag was rewritten without it (${event.id.slice(0, 8)}...), keeping the other ${left.length} thing(s): ${relayWords(entry)}.${retract}`,
           data: { removed: Placements.publicRow(row), bagId: event.id, lookupId: key.lookupId, left: left.length, deletedBag: false, accepted: entry.accepted, refused: entry.refused ?? {} },
@@ -718,6 +729,7 @@ export class Placements {
       }
       const { event, entry } = await this.deleteBag(key.lookupId, current.id, current.created_at, key)
       const retract = entry.accepted.includes(this.canonical) ? await this.retractIfUnnamed(row, reading, new Set([`${row.bag.lookupId}/${row.key}`])) : ''
+      this.host.afterRemove?.([row.id])
       return {
         text: `Removed ${what}. It was the last thing in the bag, so the bag itself was deleted (NIP-09 kind 5 ${event.id.slice(0, 8)}...): ${relayWords(entry)}.${retract}`,
         data: { removed: Placements.publicRow(row), deletionId: event.id, lookupId: key.lookupId, left: 0, deletedBag: true, accepted: entry.accepted, refused: entry.refused ?? {} },
@@ -742,6 +754,7 @@ export class Placements {
           if (n) notes.push(n.trim())
         }
       }
+      this.host.afterRemove?.(bag.rows.map((r) => r.id))
       const what = bag.keyHeld ? `your h${bag.height} bag at base ${bag.base ? words(bag.base) : '?'} and the ${bag.rows.length} thing(s) in it${bag.rows.length ? ` (${bag.rows.slice(0, 8).map((r) => `"${r.label}"`).join(', ')}${bag.rows.length > 8 ? ', ...' : ''})` : ''}` : `your bag ${bag.lookupId.slice(0, 12)}... (no key held, so what it held was not read)`
       return {
         text: `Deleted ${what} (NIP-09 kind 5 ${event.id.slice(0, 8)}... naming 33330:<you>:${bag.lookupId.slice(0, 12)}...): ${relayWords(entry)}.${notes.length ? ` ${notes.join(' ')}` : ''}`,
@@ -777,7 +790,10 @@ export class Placements {
     const height = input.height ?? oldKey.height
     if (!Number.isInteger(height) || height < this.host.minHeight || height > this.host.maxHeight) throw new Refusal(`height must be an integer from ${this.host.minHeight} to ${this.host.maxHeight}.`)
     if (dest.hex === from.hex && height === oldKey.height) throw new Refusal(`${row.type} "${row.label}" is already at ${words(row.at)} in your h${height} bag; nothing was changed.`)
-    const { key: newHeld, ms: keyMs } = this.host.keyFor(dest.position, height)
+    const { key: cubeKey, ms: keyMs } = this.host.keyFor(dest.position, height)
+    const newHeld = this.host.roomKeyFor?.(dest.position, dest.plane, height, cubeKey) ?? cubeKey
+    // A move out of a locked room would show the thing to anyone at the place (DECK-0004 §3.7.8): not done by a move.
+    if (this.host.isRoomBag?.(oldKey.lookupId) && !this.host.isRoomBag?.(newHeld.lookupId)) throw new Refusal(`${row.type} "${row.label}" is inside one of your locked rooms; moving it out would show it to anyone at the place. To have it outside, remove it with remove_placed and place it again there. Nothing was changed.`)
     const newKey = { lookupId: newHeld.lookupId, keyHex: newHeld.keyHex, height: newHeld.height, base: newHeld.base }
     const sameBag = newKey.lookupId === oldKey.lookupId
     const isRef = isReference(row.entry)
@@ -863,7 +879,9 @@ export class Placements {
       // To another bag: the destination's bag with it added, signed before anything goes out.
       const dst = await this.ownBag(newKey.lookupId, hexToBytes(newKey.keyHex))
       const entries = mergeEntries(dst.entries, [moved])
-      const settings0 = dst.current ? bagSettingsOf(dst.current, height) : { heightTag: true, hint: null, riddle: '', contents: false, money: false }
+      // A room bag carries no height, hint, sector or contents tag, the first time too (DECK-0004 §3.7.2).
+      const toRoom = this.host.isRoomBag?.(newKey.lookupId) ?? false
+      const settings0 = toRoom ? { heightTag: false, hint: null, riddle: '', contents: false, money: false } : dst.current ? bagSettingsOf(dst.current, height) : { heightTag: true, hint: null, riddle: '', contents: false, money: false }
       const settings: BagSettings = { ...settings0, hint: settings0.hint && hintFits(settings0.hint, height) ? settings0.hint : null }
       const newBag = await this.signBag(entries, newKey, settings, dest, dst.current)
       const canonical = this.canonical

@@ -290,6 +290,28 @@ describe('check_layout: a rooms kit', () => {
     expect(codes(checkLayout(lib, { placements: [P(B('rooms/room'), [0, 0, 0], 0, { open: ['-z', '+z'] }), P(B('doors/gate-door'), [5, -6, 6], 0)] }))).toEqual(['door-no-opening'])
   })
 
+  it('checks a locked door: one side at its room height, the room pieces in its cube, and the origin where both fit', () => {
+    const vault = [
+      P(B('rooms/room'), [0, 0, 0], 0, { open: ['-z'] }),
+      P(B('rooms/room'), [0, 0, 12], 0, { height: 4 }),
+      P(B('plugs/gate-plug'), [0, 0, 12], 180, { height: 4 }),
+      // The door in the outer room's +z doorway: the kit's door offset (0, -6, -6) turned 180 with it.
+      P(B('doors/gate-door'), [0, -6, 6], 180, { room_height: 4 }),
+    ]
+    const r = checkLayout(lib, { placements: vault })
+    expect(r.errors).toEqual([])
+    // Every room piece shares the door's height-4 cube at every offset check_layout gives.
+    const [[x0], [y0], [z0]] = r.bag.originOffsets as Array<[number, number]>
+    for (const p of vault.filter((q) => (q as { height?: number }).height === 4)) for (let a = 0; a < 3; a++) {
+      const o = [x0, y0, z0][a]
+      expect(Math.floor((o + (p.at as number[])[a]) / 16)).toBe(Math.floor((o + [0, -6, 6][a]) / 16))
+    }
+    expect(codes(checkLayout(lib, { placements: vault.map((p) => ({ ...p, height: undefined })).map((p, i) => (i === 3 ? { ...p, room_height: 4 } : p)) }))).toEqual(['door-locks-nothing'])
+    expect(checkLayout(lib, { placements: [vault[0], { ...vault[1], height: undefined, open: ['+z'] }, vault[3]] }).warnings.map((w) => w.code)).toContain('room-empty')
+    expect(codes(checkLayout(lib, { placements: vault, height: 3 }))).toContain('door-height')
+    expect(() => checkLayout(lib, { placements: [P(B('rooms/room'), [0, 0, 0], 0, { room_height: 4 })] })).toThrow(/room_height goes on a closed door/)
+  })
+
   it('warns when decor floats above the floor or stands outside every room', () => {
     const r = checkLayout(lib, { placements: [P(B('rooms/room'), [0, 0, 0], 0, { open: ['-z', '+z'] }), P(B('decor/lamp'), [0, -3, 0]), P(B('decor/lamp'), [40, 0, 0])] })
     expect(r.ok).toBe(true)
