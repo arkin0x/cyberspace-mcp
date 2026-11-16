@@ -26,7 +26,7 @@ export interface Settings {
   capSessionSeconds: number
   /** The most work of one UTC day, across restarts (D3, 2026-11-09). */
   capDailySeconds: number
-  /** Worker threads for rides and avatars (D3, 2026-11-09). */
+  /** Worker threads for rides (D3, 2026-11-09). */
   threads: number
   maxSidestepHeight: number
   allowRespawn: boolean
@@ -117,7 +117,7 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
   --cap-session-seconds <n>     The most compute the session may spend. Default ${DEFAULTS.capSessionSeconds}
   --cap-daily-seconds <n>       The most compute one UTC day may spend, counted across restarts in
                                 <state>/budget-daily.json. Default ${DEFAULTS.capDailySeconds}
-  --threads <n>                 Worker threads for rides and avatars. Default min(2, cores - 1): ${defaultThreads()} here
+  --threads <n>                 Worker threads for rides. Default min(2, cores - 1): ${defaultThreads()} here
   --max-sidestep-height <h>     Sidesteps above this height are refused. Default ${DEFAULTS.maxSidestepHeight}
   --allow-respawn               Let hop sign a new spawn on a dead or frozen chain.
   --hosaka-url <url>            The HOSAKA API rides are bought from (ride with prover "hosaka";

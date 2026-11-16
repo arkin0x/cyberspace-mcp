@@ -6,7 +6,7 @@
 // src/lib/avatar.ts avatarScale draws a kind 11333 shard at true scale,
 // shrunk to reach 4 cells at most); the spacing is both avatars' half-extents
 // and a gibson between, on some axis, at true scale (the 2^0 zoom). End to end over the fake relays: a person's
-// paid avatar is read in the background and widens their box, an avatar not
+// avatar is read in the background and widens their box, an avatar not
 // read (or never published) is the default, a bot is never protected, the
 // follow tool aims just outside the operator's box, and a ride's exit says
 // how far to step off. No real relay is touched; every key is generated here.
@@ -19,8 +19,7 @@ import { findLcaHeight } from 'cyberspace-core'
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { fromPayload } from 'sno-core/shards'
 import { Agent } from '../src/agent.js'
-import { avatarTemplate, avatarWork, nonceTagged } from '../src/avatar.js'
-import { mineChunk } from '../src/avatarMine.js'
+import { avatarTemplate } from '../src/avatar.js'
 import { AvatarSizes } from '../src/avatarSizes.js'
 import { hopTemplate, spawnTemplate } from '../src/chain/builder.js'
 import { bytesToHex, nowSeconds, signEvent, type NostrEvent } from '../src/nostr/event.js'
@@ -41,7 +40,7 @@ const cal: Calibration = { version: 1, at: Date.now(), fingerprint: 'test', cant
 
 /** XOR's avatar as he published it (2026-10-11): a stella octangula, unit 0, every vertex at a corner of the one-gibson cube. */
 const xorPayload = JSON.parse(readFileSync(new URL('./fixtures/xor-stella-octangula.json', import.meta.url), 'utf8')) as Record<string, unknown>
-/** The same shape a size up (unit 1): it reaches two gibsons on each axis, 18 bits of work. */
+/** The same shape a size up (unit 1): it reaches two gibsons on each axis. */
 const bigPayload = { ...xorPayload, name: 'Big star', unit: 1 }
 const BIG_RADIUS = 2
 
@@ -51,15 +50,11 @@ function shardOf(payload: unknown) {
   return v.shard
 }
 
-/** A paid kind 11333 for this key, mined here with the server's own chunk loop. */
-function paidAvatar(payload: unknown, sk: Uint8Array): NostrEvent {
+/** A kind 11333 for this key, signed as set_avatar signs it (no work is owed). */
+function signedAvatar(payload: unknown, sk: Uint8Array): NostrEvent {
   const shard = shardOf(payload)
   const t = avatarTemplate(shard, nowSeconds() - 60)
-  const pubkey = getPublicKey(sk)
-  const bits = avatarWork(JSON.parse(t.content))
-  let found = null
-  for (let from = 0; !found; from += 8192) found = mineChunk({ ...t, pubkey }, bits, from, 8192)
-  return signEvent(nonceTagged(t, found.nonce, bits), sk)
+  return signEvent(t, sk)
 }
 
 describe('how big ONOSENDAI draws an avatar', () => {
@@ -102,7 +97,7 @@ describe('avatar sizes are read in the background', () => {
   it('answers the default at once while the read is in flight, then the avatar read; one query per batch', async () => {
     const sk = generateSecretKey()
     const pk = getPublicKey(sk)
-    const ev = paidAvatar(bigPayload, sk)
+    const ev = signedAvatar(bigPayload, sk)
     let release!: () => void
     const gate = new Promise<void>((r) => { release = r })
     const queries: unknown[] = []
@@ -121,17 +116,19 @@ describe('avatar sizes are read in the background', () => {
     expect(queries).toHaveLength(1)
   })
 
-  it('a relay that fails leaves the default, and an unpaid shape is the default', async () => {
+  it('a relay that fails leaves the default, and a shape over the size limit is the default', async () => {
     const failing = new AvatarSizes({ query: async () => { throw new Error('down') } })
     failing.want(['cd'.repeat(32)])
     await failing.settled()
     expect(failing.radius('cd'.repeat(32))).toBe(DEFAULT_AVATAR_RADIUS)
     const sk = generateSecretKey()
-    const unpaid = signEvent(avatarTemplate(shardOf(bigPayload), nowSeconds()), sk)
-    const sizes = new AvatarSizes({ query: async () => [unpaid] })
-    sizes.want([unpaid.pubkey])
+    const t = avatarTemplate(shardOf(bigPayload), nowSeconds())
+    // The big star padded past 131072 bytes: a reader draws the default whatever it holds (spec 8.10).
+    const oversize = signEvent({ ...t, content: `${t.content.slice(0, -1)},"pad":"${'x'.repeat(131_072)}"}` }, sk)
+    const sizes = new AvatarSizes({ query: async () => [oversize] })
+    sizes.want([oversize.pubkey])
     await sizes.settled()
-    expect(sizes.radius(unpaid.pubkey)).toBe(DEFAULT_AVATAR_RADIUS)
+    expect(sizes.radius(oversize.pubkey)).toBe(DEFAULT_AVATAR_RADIUS)
   })
 })
 
@@ -237,9 +234,9 @@ describe('the agent near people, by their avatars', () => {
     a = await start(w, dirWithKey(agentSk))
     await a.identity({ name: 'xor' })
     await a.hop({ target: { dx: 5, dy: 0, dz: 0 } })
-    // A human with a large paid avatar, a human with none, and a bot with a large one.
+    // A human with a large avatar, a human with none, and a bot with a large one.
     w.mine.seed(profile(bigSk, { name: 'star' }), profile(plainSk, { name: 'plain' }), profile(botSk, { name: 'other-agent', bot: true }))
-    w.canonical.seed(paidAvatar(bigPayload, bigSk), paidAvatar(bigPayload, botSk))
+    w.canonical.seed(signedAvatar(bigPayload, bigSk), signedAvatar(bigPayload, botSk))
     for (const [walker, at] of [[big, bigAt], [plain, plainAt], [bot, botAt]] as const) {
       w.canonical.inject(walker.spawn)
       w.canonical.inject(walker.hop(at))
@@ -324,7 +321,7 @@ describe('following an operator with a large avatar', () => {
 
   it('aims just outside the operator\'s box, not beside their gibson', async () => {
     w.general.seed(finalizeEvent({ kind: 10050, created_at: nowSeconds(), tags: [['relay', INBOX]], content: '' }, opSk) as NostrEvent, finalizeEvent({ kind: 3, created_at: nowSeconds(), tags: [['p', me]], content: '' }, opSk) as NostrEvent)
-    w.canonical.seed(paidAvatar(bigPayload, opSk))
+    w.canonical.seed(signedAvatar(bigPayload, opSk))
     const a = await start(w, dirWithKey(agentSk), op)
     await a.identity({ name: 'xor' })
     await a.hop({ target: { dx: 5, dy: 0, dz: 0 } })

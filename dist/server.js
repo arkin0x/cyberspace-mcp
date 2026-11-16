@@ -584,14 +584,14 @@ export function createServer(agent, log = () => { }, hooks = {}, options = {}) {
     }, async (args) => call(() => agent.constrainPlaced(args)));
     server.registerTool('set_avatar', {
         title: 'Set your avatar',
-        description: 'Publish your avatar, the shape ONOSENDAI draws you as in place of the dodecahedron, as ONOSENDAI\'s workshop does: a replaceable kind 11333 whose content is an SNO payload, paid for in proof of work on the event itself (spec 8.10: 16 bits for a shape within one gibson of its build origin and 32 vertices plus faces, 2 more bits per doubling of reach, 3 per doubling of detail). Give exactly one of: object (an SNO payload; render it first), address (a public kind 33331, "33331:<pubkey>:<d>" or naddr, whose payload is copied in), or clear: true (back to the dodecahedron, no work). The work is quoted against your caps before it starts and refused above them, mined on threads of its own so every other tool keeps answering, and stopped at the per-call cap; it is luck, so a call that runs out may simply be repeated. Returns the event id and a picture of the avatar. At most 16384 bytes of payload.',
+        description: 'Publish your avatar, the shape ONOSENDAI draws you as in place of the dodecahedron, as ONOSENDAI\'s workshop does: a replaceable kind 11333 whose content is an SNO payload (spec 8.10). No proof of work is owed: it is signed and published at once. Give exactly one of: object (an SNO payload; render it first), address (a public kind 33331, "33331:<pubkey>:<d>" or naddr, whose payload is copied in), or clear: true (back to the dodecahedron). Returns the event id and a picture of the avatar. At most 131072 bytes of payload; a reader draws the dodecahedron for anything larger.',
         inputSchema: {
             object: z.unknown().optional().describe('An SNO payload (DECK-0003 section 1), as you would give place or render.'),
             address: z.string().optional().describe('A public kind 33331 object: "33331:<pubkey hex>:<d>" or its naddr.'),
             clear: z.boolean().optional().describe('true to go back to the dodecahedron.'),
         },
         annotations: { readOnlyHint: false, destructiveHint: false },
-    }, async (args, extra) => call(() => agent.setAvatar(args, extra.signal)));
+    }, async (args) => call(() => agent.setAvatar(args)));
     server.registerTool('publish_object', {
         title: 'Publish an object to the feed',
         description: 'Publish an SNO object to the feed as a public kind 33331 (DECK-0003 3.1), as ONOSENDAI\'s PUBLISH does, so it shows in the Shard Feed and anyone can copy it or place it by its address. This publishes the object to the feed; it does not place it in the world. Placing public shards (33332) waits for a price. Validated as place validates; render it first. Written with its WALK setting, "constrain" (DECK-0003 1.12): "opaque" unless the payload says "all" or "off"; the answer says which. Leave d out for a new object (a fresh id is chosen and returned); give the d it returned to replace that object with a new version. Returns the event id, the address "33331:<pubkey>:<d>" and its naddr: place hides it at a coordinate by that address, and your operator can open it from the address. At most 20 in any 24 hours by default (your human sets publishMaxPerDay); a refused or unanswered publish does not count.',
