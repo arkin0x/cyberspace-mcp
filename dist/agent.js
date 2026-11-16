@@ -30,7 +30,7 @@ import { ProofAborted, proveInThread } from './chain/proofWorker.js';
 import { ChainKeeper } from './chain/keeper.js';
 import { askChainEvents, parsePubkey } from './chain/resolve.js';
 import { causeWords, decideSelfCheck } from './chain/selfCheck.js';
-import { AVATAR_CONTENT_WARN, AVATAR_KIND, avatarContentBytes, avatarTemplate, avatarTooLarge, avatarTooLargeWords, paidShard, verifyAvatar } from './avatar.js';
+import { AVATAR_CONTENT_WARN, AVATAR_KIND, DEFAULT_AVATAR_PER_DAY, avatarContentBytes, avatarTemplate, avatarTooLarge, avatarTooLargeWords, paidShard, verifyAvatar } from './avatar.js';
 import { Chat } from './chat.js';
 import { CHAT_KIND, HIDDEN_KIND, MAX_ABOUT, MAX_ITEM_NAME, bagEntries, carriedTags, hintPlaneFor, namesNoPlane, planeOfEntry, sameHintBox, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference, audioLabel, itemLineage, keyInnerTemplate, messageInnerTemplate, messagePreview, objectTemplate, payloadBytes, referenceCount, referenceTo, rumorOf, shardInnerTemplate, unbag, wantsReference, entryKey, } from './hidden/bags.js';
 import { MAX_COMMENT_LENGTH, itemKind, sealedComment } from './hidden/comments.js';
@@ -74,6 +74,8 @@ export { Refusal } from './tool.js';
 /** Where publish_object counts what it published, so the daily limit survives a restart. */
 const PUBLISHED_FILE = 'published.json';
 const DAY_SECONDS = 24 * 60 * 60;
+/** When set_avatar published, for its limit per 24 hours: the times (Unix seconds) a relay took one. */
+const AVATARS_FILE = 'avatars-set.json';
 /** The highest cube a key is derived for on request (hide, find, look): a key at h16 is about a second. */
 export const MAX_KEY_HEIGHT = 16;
 /** How long a ride's arrival waits for the relays to say who stands at the stop. */
@@ -2548,6 +2550,13 @@ export class Agent {
      * than dating it ahead, so a burst of calls never signs into the future.
      */
     lastAvatarAt = 0;
+    /** Avatars signed and still being sent: counted against the limit until the relays answer, so a burst cannot slip past it. */
+    avatarsInFlight = 0;
+    /** The times (Unix seconds) of the avatars relays took in the last 24 hours, from <state>/avatars-set.json. */
+    recentAvatars(now) {
+        const log = this.dir.readJson(AVATARS_FILE, { posts: [] });
+        return (Array.isArray(log.posts) ? log.posts : []).filter((t) => typeof t === 'number' && t > now - DAY_SECONDS);
+    }
     /**
      * Publish the agent's avatar, a kind 11333, exactly as ONOSENDAI's workshop
      * does (arkinox, 2026-10-11: "tell XOR to set a shard as his avatar"): an
@@ -2556,7 +2565,9 @@ export class Agent {
      * clear for the dodecahedron. No work is owed (spec 8.10, ruled 2026-11):
      * the content is at most AVATAR_CONTENT_MAX bytes, refused above it, and
      * the signed event is checked with cyberspace-core's verifyAvatar before
-     * any relay sees it.
+     * any relay sees it. At most avatarMaxPerDay in any 24 hours (clearing
+     * included), counted on disk so a restart does not reset it; one no relay
+     * takes does not count.
      */
     async setAvatar(input) {
         const given = [input.object, input.address, input.clear ? true : undefined].filter((x) => x !== undefined).length;
@@ -2608,6 +2619,14 @@ export class Agent {
         // A later second than the last avatar signed here, by waiting (at most a second), never by dating it ahead.
         while (nowSeconds() <= this.lastAvatarAt)
             await new Promise((r) => setTimeout(r, 100));
+        // The limit, checked with nothing awaited between it and the signing, so calls in a burst each see the ones before.
+        const limit = this.config.avatarMaxPerDay ?? DEFAULT_AVATAR_PER_DAY;
+        const recent = this.recentAvatars(nowSeconds());
+        if (recent.length + this.avatarsInFlight >= limit) {
+            const next = recent.length ? Math.min(...recent) + DAY_SECONDS : nowSeconds() + 1;
+            const hours = Math.max(0, (next - nowSeconds()) / 3600);
+            throw new Refusal(`You have set your avatar ${recent.length + this.avatarsInFlight} times in the last 24 hours, the most your human allows (${limit} a day, avatarMaxPerDay). The next one can go after ${new Date(next * 1000).toISOString()}, in about ${hours.toFixed(1)} h. Nothing was published.`);
+        }
         const template = avatarTemplate(shard, nowSeconds());
         const contentBytes = avatarContentBytes(template.content);
         const event = this.sign(template);
@@ -2621,7 +2640,23 @@ export class Agent {
             throw new Refusal('internal: not an avatar event');
         this.lastAvatarAt = event.created_at;
         const entry = this.outbox.add(event);
-        const result = await this.outbox.send(entry);
+        this.avatarsInFlight++;
+        let result;
+        try {
+            result = await this.outbox.send(entry);
+        }
+        finally {
+            this.avatarsInFlight--;
+        }
+        // Counted once a relay takes it, as publish_object counts; one kept in the outbox for a retry does not.
+        let left = null;
+        if (entry.accepted.length) {
+            const now = nowSeconds();
+            const log = [...this.recentAvatars(now), now];
+            this.dir.writeJson(AVATARS_FILE, { posts: log });
+            left = Math.max(0, limit - log.length - this.avatarsInFlight);
+        }
+        const leftWords = left === null ? '' : ` ${left} more avatar change${left === 1 ? '' : 's'} in the next 24 hours.`;
         // The size the personal-space rule gives the agent's own avatar from now on (space/personalSpace.ts),
         // unless a newer avatar was signed while this one was sent: the newest one is the one relays keep.
         if (entry.accepted.length && event.created_at === this.lastAvatarAt)
@@ -2631,7 +2666,7 @@ export class Agent {
         const warnWords = contentBytes > AVATAR_CONTENT_WARN ? ` Over ${AVATAR_CONTENT_WARN} bytes: a client that signs through a remote signer (NIP-46) may be refused one this large; this server signs with its own key.` : '';
         const refusedWords = entry.refused ? ` Refused by ${Object.entries(entry.refused).map(([u, r]) => `${u}: ${r}`).join('; ')}.` : '';
         if (!shard) {
-            return { text: `Avatar cleared: you are drawn as the dodecahedron again (kind 11333 ${event.id.slice(0, 8)}..., empty content). ${relayWords}${refusedWords}`, data: { eventId: event.id, cleared: true, accepted: entry.accepted, refused: entry.refused ?? {} } };
+            return { text: `Avatar cleared: you are drawn as the dodecahedron again (kind 11333 ${event.id.slice(0, 8)}..., empty content). ${relayWords}${refusedWords}${leftWords}`, data: { eventId: event.id, cleared: true, accepted: entry.accepted, refused: entry.refused ?? {}, leftToday: left, maxPerDay: limit } };
         }
         let r;
         try {
@@ -2641,9 +2676,9 @@ export class Agent {
             throw new Refusal(`Published as ${event.id}, but the picture failed: ${err instanceof Error ? err.message : String(err)}`);
         }
         return {
-            text: `Avatar set: "${shard.name}" (${source}), kind 11333 ${event.id.slice(0, 8)}..., ${contentBytes} bytes of payload. ONOSENDAI draws it in place of your dodecahedron wherever you are seen. ${relayWords}${refusedWords}${warnWords} ${r.caption}`,
+            text: `Avatar set: "${shard.name}" (${source}), kind 11333 ${event.id.slice(0, 8)}..., ${contentBytes} bytes of payload. ONOSENDAI draws it in place of your dodecahedron wherever you are seen. ${relayWords}${refusedWords}${warnWords}${leftWords} ${r.caption}`,
             images: [{ data: r.png.toString('base64'), mimeType: 'image/png' }],
-            data: { eventId: event.id, name: shard.name, source, bytes: contentBytes, accepted: entry.accepted, refused: entry.refused ?? {}, vertices: r.vertices, faces: r.faces, pngBytes: r.png.length },
+            data: { eventId: event.id, name: shard.name, source, bytes: contentBytes, accepted: entry.accepted, refused: entry.refused ?? {}, vertices: r.vertices, faces: r.faces, pngBytes: r.png.length, leftToday: left, maxPerDay: limit },
         };
     }
     // ---- publish_object (publicObject.ts) -------------------------------------
