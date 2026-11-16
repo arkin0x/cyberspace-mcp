@@ -1,11 +1,10 @@
 // avatar.test.ts: set_avatar publishes the kind 11333 ONOSENDAI publishes
-// and draws (arkinox, 2026-10-11), with no proof of work (spec 8.10, ruled
-// 2026-11). The fixture in fixtures/onosendai.json was made with ONOSENDAI's
-// own code (26a8f31, origin/v2 17fa254 plus PR #305's chat mentions:
-// src/lib/avatar.ts, avatarMine.ts, client.ts) and test keys while avatars
-// still owed work: it carries a nonce tag and must still read. The reading
-// rules are ONOSENDAI's paidShard, ported in avatar.ts over cyberspace-core's
-// verifyAvatar. Fake relays only.
+// and draws (arkinox, 2026-10-11). The fixture in fixtures/onosendai.json was
+// made with ONOSENDAI's own code (26a8f31, origin/v2 17fa254 plus PR #305's
+// chat mentions, which leave the avatar code as it was: src/lib/avatar.ts,
+// avatarMine.ts, client.ts) and test keys; the reading rules are ONOSENDAI's
+// paidShard, ported in avatar.ts over the same pinned cyberspace-core
+// verifyAvatarWork ONOSENDAI draws with. Fake relays only.
 
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -14,8 +13,8 @@ import { afterAll, describe, expect, it } from 'vitest'
 import { nip19 } from 'nostr-tools'
 import { generateSecretKey } from 'nostr-tools/pure'
 import { Agent } from '../src/agent.js'
-import { toPayload } from 'sno-core/shards'
-import { AVATAR_CONTENT_MAX, AVATAR_CONTENT_WARN, AVATAR_KIND, avatarFromEvent, avatarTemplate, paidShard, verifyAvatar } from '../src/avatar.js'
+import { AVATAR_KIND, avatarFromEvent, avatarTemplate, nonceTagged, paidShard, verifyAvatarWork } from '../src/avatar.js'
+import { mineAvatar, mineChunk } from '../src/avatarMine.js'
 import { signEvent, type NostrEvent } from '../src/nostr/event.js'
 import { validateSnoPayload } from '../src/sno.js'
 import type { Calibration } from '../src/space/calibration.js'
@@ -33,43 +32,21 @@ afterAll(async () => { for (const a of agents) await a.stop() })
 async function start(extra: Partial<Parameters<typeof Agent.start>[0]> = {}): Promise<Agent> {
   const a = await Agent.start({
     stateDir: mkdtempSync(join(tmpdir(), 'cyberspace-mcp-avatar-')), relays: [CANONICAL], capCallSeconds: 30, capSessionSeconds: 120, maxSidestepHeight: 24, allowRespawn: false,
-    websocketImplementation: network.WebSocket, calibration: cal, relayMaxWaitMs: 1500, ...extra,
+    websocketImplementation: network.WebSocket, calibration: cal, relayMaxWaitMs: 1500, avatarThreads: 2, ...extra,
   })
   agents.push(a)
   return a
 }
 
-/** ONOSENDAI's test wedge (src/lib/__tests__/avatarMine.test.ts) as an SNO payload: one gibson of reach, 8 of detail. */
+/** ONOSENDAI's test wedge (src/lib/__tests__/avatarMine.test.ts) as an SNO payload: one gibson of reach, 8 of detail, 16 bits. */
 const wedge = { v: 1, name: 'Wedge', unit: 0, mode: 'solid', vertices: [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], colors: [[1, 0, 0], [1, 0, 0], [1, 0, 0], [1, 0, 0]], faces: [[0, 1, 2], [0, 2, 3], [0, 3, 1], [1, 3, 2]] }
-
-/** A points cloud within one gibson whose payload grows about 25 bytes a vertex: 3,000 is about 76 KB, 5,300 is over the limit. */
-const padded = (n: number) => ({
-  v: 1, name: 'Padded', unit: 0, mode: 'points', faces: [],
-  vertices: Array.from({ length: n }, () => [0, 0, 0]),
-  ticks: Array.from({ length: n }, (_, i) => [100 + (i % 19), 101 + (i % 17), 102 + (i % 13)]),
-  colors: Array.from({ length: n }, (_, i) => [((i * 37) % 255) / 255, ((i * 91) % 255) / 255, ((i * 13) % 255) / 255]),
-})
-
-/** A padded payload whose content as signed is exactly `bytes` long: the vertex count gets within 63, the name (up to 64 characters) the rest. */
-function exactly(bytes: number) {
-  const sizeOf = (n: number): number => { const v = validateSnoPayload({ ...padded(n), name: 'P' }); if (!v.ok) throw new Error(v.errors.join(' ')); return v.bytes }
-  // About 25.3 bytes a vertex: aim a little short with each step, a handful of validations in all.
-  let n = Math.floor(bytes / 26)
-  for (let step = 0; step < 20; step++) {
-    const base = sizeOf(n)
-    if (base > bytes) { n -= 3; continue }
-    if (bytes - base <= 63) return { ...padded(n), name: 'P'.repeat(1 + bytes - base) }
-    n += Math.max(1, Math.floor((bytes - base - 30) / 26))
-  }
-  throw new Error(`no payload of exactly ${bytes} bytes found`)
-}
 
 const avatarsOf = (pubkey: string): NostrEvent[] => canonical.published.filter((e) => e.kind === AVATAR_KIND && e.pubkey === pubkey)
 
 describe('ONOSENDAI\'s avatar, read here', () => {
-  it('the fixture ONOSENDAI mined while avatars owed work still reads as its shape, nonce tag and all', () => {
+  it('the fixture ONOSENDAI mined is paid and reads as its shape', () => {
     const ev = fixture.avatar.event
-    expect(verifyAvatar(ev)).toMatchObject({ ok: true, reason: 'ok' })
+    expect(verifyAvatarWork(ev)).toMatchObject({ ok: true, required: 16, committed: 16 })
     expect(paidShard(ev)?.name).toBe('Wedge')
     expect(ev.tags.map((t) => t[0])).toEqual(['name', 'client', 'nonce'])
   })
@@ -86,52 +63,64 @@ describe('ONOSENDAI\'s avatar, read here', () => {
     expect(avatarTemplate(null, 1)).toMatchObject({ content: '', tags: [['client', 'cyberspace-mcp']] })
   })
 
-  it('work is not read: without its nonce tag, or with an id of no zeros, the shape is the same', () => {
+  it('a shape that has not paid is the dodecahedron, as ONOSENDAI draws it', () => {
     const ev = fixture.avatar.event
-    expect(paidShard({ ...ev, tags: ev.tags.filter((t) => t[0] !== 'nonce') })?.name).toBe('Wedge')
-    expect(paidShard({ ...ev, id: 'f' + ev.id.slice(1) })?.name).toBe('Wedge')
+    expect(paidShard({ ...ev, tags: ev.tags.filter((t) => t[0] !== 'nonce') })).toBeNull()
+    expect(paidShard({ ...ev, id: 'f' + ev.id.slice(1) })).toBeNull()
     expect(avatarFromEvent({ ...ev, kind: 33331 })).toBeNull()
-  })
-
-  it('an avatar mined with the nonce as the last field of its content reads without it', () => {
-    const ev = fixture.avatar.event
-    const content = `${ev.content.slice(0, -1)},"nonce":"000000000000004211"}`
-    const shard = paidShard({ ...ev, content, tags: [['name', 'Wedge'], ['client', 'ONOSENDAI'], ['nonce', '0', '16']] })!
-    expect(shard.name).toBe('Wedge')
-    expect(shard.extra?.nonce).toBeUndefined()
-    expect(JSON.stringify(toPayload(shard))).toBe(ev.content)
-  })
-
-  it('over the limit, or not a shape, is the dodecahedron, as ONOSENDAI draws it', () => {
-    const ev = fixture.avatar.event
-    const oversize = { ...ev, content: `${ev.content.slice(0, -1)},"pad":"${'x'.repeat(AVATAR_CONTENT_MAX)}"}` }
-    expect(verifyAvatar(oversize)).toMatchObject({ ok: false, reason: 'too-large' })
-    expect(paidShard(oversize)).toBeNull()
-    expect(verifyAvatar({ ...ev, content: '{"vertices":"none"}' })).toMatchObject({ ok: false, reason: 'not-an-avatar' })
-    expect(paidShard({ ...ev, content: 'not json' })).toBeNull()
   })
 })
 
+describe('mining', () => {
+  it('the chunk loop and the threads find nonces the reader accepts', async () => {
+    const sk = generateSecretKey()
+    const v = validateSnoPayload(wedge)
+    if (!v.ok) throw new Error('invalid')
+    const t = avatarTemplate(v.shard, 1_800_000_000)
+    const pubkey = signEvent(t, sk).pubkey
+    let found = null
+    for (let from = 0; !found; from += 4096) found = mineChunk({ ...t, pubkey }, 16, from, 4096)
+    const ev = signEvent(nonceTagged(t, found.nonce, 16), sk)
+    expect(ev.id).toBe(found.id)
+    expect(verifyAvatarWork(ev).ok).toBe(true)
+    const threaded = await mineAvatar({ ...t, pubkey }, 16, { threads: 2, deadlineMs: 20_000 })
+    expect(threaded.found).toBe(true)
+    if (threaded.found) expect(verifyAvatarWork(signEvent(nonceTagged(t, threaded.nonce, 16), sk)).ok).toBe(true)
+  }, 30_000)
+
+  it('stops at the deadline and on the signal, with nothing found', async () => {
+    const t = { pubkey: 'ab'.repeat(32), created_at: 1, kind: AVATAR_KIND, tags: [['client', 'cyberspace-mcp']], content: '{}' }
+    const late = await mineAvatar(t, 60, { threads: 1, deadlineMs: 200 })
+    expect(late).toMatchObject({ found: false, why: 'deadline' })
+    const ac = new AbortController()
+    setTimeout(() => ac.abort(), 100)
+    expect(await mineAvatar(t, 60, { threads: 2, deadlineMs: 20_000, signal: ac.signal })).toMatchObject({ found: false, why: 'aborted' })
+  }, 30_000)
+})
+
 describe('set_avatar', () => {
-  it('publishes a kind 11333 ONOSENDAI draws at once, with no work and no charge, and returns its id and a picture', async () => {
+  it('publishes a paid kind 11333 ONOSENDAI draws, returns its id and a picture, and charges the work', async () => {
     const a = await start()
-    const r = await a.setAvatar({ object: wedge })
+    // Other tools answer while the avatar is mined on its threads.
+    const pending = a.setAvatar({ object: wedge })
+    const quick = a.budgetState()
+    expect(quick.text).toContain('Work:')
+    const r = await pending
     const ev = avatarsOf(a.pubkey).at(-1)!
     expect(ev.id).toBe(r.data.eventId)
-    expect(ev.tags).toEqual([['name', 'Wedge'], ['client', 'cyberspace-mcp']])
+    expect(ev.tags.map((t) => t[0])).toEqual(['name', 'client', 'nonce'])
     expect(ev.tags.some((t) => t[0] === 'd')).toBe(false)
-    // ONOSENDAI's reading rules: accepted, and the shape back.
-    expect(verifyAvatar(ev).ok).toBe(true)
+    expect(ev.tags.find((t) => t[0] === 'nonce')?.[2]).toBe('16')
+    // ONOSENDAI's reading rules: paid, and the shape back.
+    expect(verifyAvatarWork(ev).ok).toBe(true)
     const shard = paidShard(ev)!
     expect(shard.name).toBe('Wedge')
     expect(shard.vertices).toHaveLength(4)
     expect(shard.faces).toHaveLength(4)
     expect(ev.content).toBe(fixture.avatar.event.content)
     expect(r.images?.[0].mimeType).toBe('image/png')
-    expect(r.data.bits).toBeUndefined()
-    expect(r.data.bytes).toBe(new TextEncoder().encode(ev.content).length)
-    expect(r.text).not.toMatch(/bits|tries|remote signer/)
-    expect(a.budget.spentSeconds).toBe(0)
+    expect(r.data.bits).toBe(16)
+    expect(a.budget.spentSeconds).toBeGreaterThan(0)
   }, 60_000)
 
   it('copies a public object\'s payload by address, and clear puts the dodecahedron back', async () => {
@@ -148,57 +137,23 @@ describe('set_avatar', () => {
     const last = avatarsOf(a.pubkey).at(-1)!
     expect(last.id).toBe(cleared.data.eventId)
     expect(last.content).toBe('')
-    // Signed after the avatar it replaces, never in the same second: a tie would go to the lower id, by chance.
+    // Signed after the avatar it replaces, never in the same second: a tie would go to the mined id.
     expect(last.created_at).toBeGreaterThan(ev.created_at)
     expect(last.tags).toEqual([['client', 'cyberspace-mcp']])
     expect(paidShard(last)).toBeNull()
   }, 60_000)
 
-  it('refuses invalid, too big, or not exactly one source; a far-reaching shape owes nothing, even under a 1 s cap', async () => {
+  it('refuses before any work: over the caps, invalid, too big, or not exactly one source', async () => {
     const a = await start({ capCallSeconds: 1 })
     const huge = { ...wedge, unit: 30 }
-    const far = await a.setAvatar({ object: huge })
-    expect(avatarsOf(a.pubkey).at(-1)?.id).toBe(far.data.eventId)
+    await expect(a.setAvatar({ object: huge })).rejects.toThrow(/owes \d+ bits of work/)
     expect(a.budget.spentSeconds).toBe(0)
     await expect(a.setAvatar({ object: { v: 1 } })).rejects.toThrow(/not valid SNO/)
     await expect(a.setAvatar({})).rejects.toThrow(/exactly one of/)
     await expect(a.setAvatar({ object: wedge, clear: true })).rejects.toThrow(/exactly one of/)
-    const before = avatarsOf(a.pubkey).length
-    await expect(a.setAvatar({ object: padded(5300) })).rejects.toThrow(/the payload is 13\d{4} bytes, and an avatar is at most 131072 bytes/)
-    expect(avatarsOf(a.pubkey)).toHaveLength(before)
+    const many = 2000
+    const big = { ...wedge, vertices: Array.from({ length: many }, (_, i) => [i % 2, 0, 0]), colors: Array.from({ length: many }, () => [1, 1, 1]), faces: [] }
+    await expect(a.setAvatar({ object: big })).rejects.toThrow(/at most 16384/)
+    expect(avatarsOf(a.pubkey)).toHaveLength(0)
   }, 30_000)
-
-  it('the limit is exact: 131072 bytes of content are published, 131073 are refused', async () => {
-    const a = await start()
-    const at = exactly(AVATAR_CONTENT_MAX)
-    const r = await a.setAvatar({ object: at })
-    expect(r.data.bytes).toBe(AVATAR_CONTENT_MAX)
-    expect(new TextEncoder().encode(avatarsOf(a.pubkey).at(-1)!.content).length).toBe(AVATAR_CONTENT_MAX)
-    const before = avatarsOf(a.pubkey).length
-    await expect(a.setAvatar({ object: exactly(AVATAR_CONTENT_MAX + 1) })).rejects.toThrow(/the payload is 131073 bytes, and an avatar is at most 131072 bytes/)
-    expect(avatarsOf(a.pubkey)).toHaveLength(before)
-  }, 120_000)
-
-  it('a burst of calls signs each in a later second, never dated ahead of the clock', async () => {
-    const a = await start()
-    const results = await Promise.all([a.setAvatar({ object: wedge }), a.setAvatar({ object: { ...wedge, name: 'Second' } }), a.setAvatar({ clear: true })])
-    const events = results.map((r) => avatarsOf(a.pubkey).find((e) => e.id === r.data.eventId)!)
-    const times = events.map((e) => e.created_at)
-    expect(new Set(times).size).toBe(3)
-    expect(Math.max(...times)).toBeLessThanOrEqual(Math.floor(Date.now() / 1000))
-  }, 30_000)
-
-  it('a payload of about 76 KB is published as it is, with a short note that remote signers may refuse one that large', async () => {
-    const a = await start()
-    const r = await a.setAvatar({ object: padded(3000) })
-    const ev = avatarsOf(a.pubkey).at(-1)!
-    expect(ev.id).toBe(r.data.eventId)
-    const bytes = new TextEncoder().encode(ev.content).length
-    expect(bytes).toBeGreaterThan(AVATAR_CONTENT_WARN)
-    expect(bytes).toBeLessThanOrEqual(AVATAR_CONTENT_MAX)
-    expect(r.data.bytes).toBe(bytes)
-    expect(r.text).toContain('remote signer')
-    expect(verifyAvatar(ev).ok).toBe(true)
-    expect(paidShard(ev)?.vertices).toHaveLength(3000)
-  }, 60_000)
 })

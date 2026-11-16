@@ -1,27 +1,32 @@
 // avatar.ts: the shape others see the agent as, a kind 11333 (spec 8.10).
 //
-// Ported from ONOSENDAI src/lib/avatar.ts and src/store/useAvatars.ts at
-// origin/v2 17fa254 (arkinox, 2026-10-11: "tell XOR to set a shard as his
-// avatar"). The event is the one ONOSENDAI's workshop publishes: kind 11333,
-// replaceable, no `d`; the tags in ONOSENDAI's order, `name` then `client`;
-// the content a shard payload as sno-core's toPayload writes it. The client
-// tag names this server (cyberspace-mcp), where ONOSENDAI's names ONOSENDAI;
-// no reader looks at it.
+// Ported from ONOSENDAI src/lib/avatar.ts, src/lib/avatarMine.ts and
+// src/store/useAvatars.ts at origin/v2 17fa254 (arkinox, 2026-10-11: "tell
+// XOR to set a shard as his avatar"). The event is the one ONOSENDAI's
+// workshop publishes: kind 11333, replaceable, no `d`; the tags in ONOSENDAI's
+// order, `name` then `client` then `nonce`; the content a shard payload as
+// sno-core's toPayload writes it. The client tag is in the template before
+// mining, because the work is NIP-13 over the event's own id: a tag added at
+// signing would change the id and void the work. It names this server
+// (cyberspace-mcp), where ONOSENDAI's names ONOSENDAI; no reader looks at it.
 //
-// The reader's verdict is cyberspace-core's verifyAvatar, the check
-// ONOSENDAI draws with, so an event this file signs is one ONOSENDAI draws,
-// and one it would not draw is never published.
-//
-// An avatar owes no proof of work (spec 8.10, ruled 2026-11): its content is
-// bounded by size alone, at most AVATAR_CONTENT_MAX (131,072) bytes of
-// UTF-8, and a reader draws the dodecahedron for anything larger. An avatar
-// published while the rule asked for work carries a nonce tag and maybe a
-// trailing `nonce` field in its content; it reads as any other.
-import { AVATAR_CONTENT_MAX, AVATAR_CONTENT_WARN, AVATAR_KIND, avatarContentBytes, verifyAvatar } from 'cyberspace-core';
+// The work owed and the reader's verdict are cyberspace-core's avatarWork
+// and verifyAvatarWork, the same pinned commit ONOSENDAI draws with, so an
+// event this file mines is one ONOSENDAI draws, and one it would not draw is
+// never published.
+import { AVATAR_KIND, avatarWork, verifyAvatarWork } from 'cyberspace-core';
 import { fromPayload, toPayload } from 'sno-core/shards';
 import { CLIENT_NAME } from './nostr/event.js';
-export { AVATAR_CONTENT_MAX, AVATAR_CONTENT_WARN, AVATAR_KIND, avatarContentBytes, verifyAvatar };
-/** The event to sign: this shard as the avatar, or none for the dodecahedron. ONOSENDAI's avatarTemplate. */
+export { AVATAR_KIND, avatarWork, verifyAvatarWork };
+/**
+ * The largest payload an avatar may carry, in bytes. Every nonce hashes the
+ * whole event, so bytes are paid per try (spec 8.10, "bytes are charged
+ * already"); this is the threshold above which a bag carries a shard by
+ * reference (DECK-0003 3.2), the size the rest of the server already treats
+ * as large.
+ */
+export const MAX_AVATAR_BYTES = 16_384;
+/** The event to mine and sign: this shard as the avatar, or none for the dodecahedron. ONOSENDAI's avatarTemplate. */
 export function avatarTemplate(shard, createdAt) {
     return {
         kind: AVATAR_KIND,
@@ -30,41 +35,51 @@ export function avatarTemplate(shard, createdAt) {
         content: shard ? JSON.stringify(toPayload(shard)) : '',
     };
 }
-/** Whether content of this many UTF-8 bytes is over the limit (a reader draws the dodecahedron for it). */
-export function avatarTooLarge(bytes) {
-    return bytes > AVATAR_CONTENT_MAX;
+/** The template with its nonce tag set (replacing any earlier one), NIP-13 shape: ["nonce", n, target]. */
+export function nonceTagged(t, nonce, target) {
+    return { ...t, tags: [...t.tags.filter((tag) => tag[0] !== 'nonce'), ['nonce', nonce, String(target)]] };
 }
-/** The refusal's words for content over the limit. */
-export function avatarTooLargeWords(bytes) {
-    return `the payload is ${bytes} bytes, and an avatar is at most ${AVATAR_CONTENT_MAX} bytes (spec 8.10; a reader draws the dodecahedron for anything larger)`;
-}
-/**
- * The shard an avatar event carries, or null when it carries none or is not
- * one. ONOSENDAI's avatarFromEvent. A `nonce` field in the content (left by
- * a miner while avatars owed work) is not part of the shape and is dropped
- * before sno-core reads it, so it never rides along in the shard's `extra`.
- */
+/** The shard an avatar event carries, or null when it carries none or is not one. ONOSENDAI's avatarFromEvent. */
 export function avatarFromEvent(ev) {
     if (ev.kind !== AVATAR_KIND)
         return null;
     if (!ev.content)
         return null;
     try {
-        const payload = JSON.parse(ev.content);
-        if (payload && typeof payload === 'object' && !Array.isArray(payload))
-            delete payload.nonce;
-        return fromPayload(payload, `avatar:${ev.pubkey}`);
+        return fromPayload(JSON.parse(ev.content), `avatar:${ev.pubkey}`);
     }
     catch {
         return null;
     }
 }
-/** The shard ONOSENDAI draws for an event: none for empty content, none for one cyberspace-core's verifyAvatar refuses (too large, not an avatar). ONOSENDAI's paidShard. */
+/** The shard ONOSENDAI draws for an event: none for empty content, none for a shape that has not paid. ONOSENDAI's paidShard. */
 export function paidShard(ev) {
     if (!ev.content)
         return null;
-    if (!verifyAvatar(ev).ok)
+    if (!verifyAvatarWork(ev).ok)
         return null;
     return avatarFromEvent(ev);
+}
+/** SHA-256 blocks a serialized event of this many bytes takes, padding included. */
+export function blocksOf(bytes) {
+    return Math.ceil((bytes + 9) / 64);
+}
+/**
+ * Seconds of wall time the expected 2^bits tries take on this machine, from
+ * the calibration's hash rate: each try hashes the whole event, plus about a
+ * block's worth of per-try overhead, and each thread past the first adds
+ * about seven tenths (ONOSENDAI's triesPerSec, measured there).
+ */
+export function avatarSeconds(bits, eventBytes, sha256PerSec, threads) {
+    const perThread = sha256PerSec / (blocksOf(eventBytes) + 1);
+    const rate = perThread * (1 + 0.7 * Math.max(0, threads - 1));
+    return 2 ** bits / rate;
+}
+/** What a payload owes, for the price: the bits, and the bytes each try hashes. */
+export function avatarPrice(payload, template, pubkey) {
+    const bits = avatarWork(payload);
+    const mined = nonceTagged(template, '0'.repeat(10), bits);
+    const eventBytes = new TextEncoder().encode(JSON.stringify([0, pubkey, mined.created_at, mined.kind, mined.tags, mined.content])).length;
+    return { bits, eventBytes };
 }
 //# sourceMappingURL=avatar.js.map

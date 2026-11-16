@@ -31,7 +31,7 @@ Usage: cyberspace-mcp init [options]
   --cap-call-seconds <n>     The most compute one hop may spend. Default ${DEFAULT_CAP_CALL_SECONDS}
   --cap-session-seconds <n>  The most compute a session may spend. Default ${DEFAULT_CAP_SESSION_SECONDS}
   --cap-daily-seconds <n>    The most compute one UTC day may spend, across restarts. Default ${DEFAULT_CAP_DAILY_SECONDS}
-  --threads <n>              Worker threads for rides. Default min(2, cores - 1)
+  --threads <n>              Worker threads for rides and avatars. Default min(2, cores - 1)
   --relay <url>              A relay; repeatable; the first is canonical. Default ${DEFAULT_RELAY}, ONOSENDAI's relay, then ${SECOND_RELAY}.
   --client <name>            Who runs the agent's turns: claude (Claude Code), hermes, or none. Default: claude
                              when it is installed, else hermes when it is, else none.
