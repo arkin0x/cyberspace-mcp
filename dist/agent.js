@@ -52,6 +52,11 @@ import { ROAM_MAX_MINUTES, ROAM_MIN_MINUTES, Roam, roamCandidates, searchRoam } 
 import { profileTemplate, MAX_PICTURE_URL, pictureUrl, publishedFields } from './profile.js';
 import { objectHandle, renderShard } from './render.js';
 import { validateSnoPayload } from './sno.js';
+import { DoorStore, MAX_LOOK_BYTES, ROOM_BAG_SETTINGS, roomEntries, roomKey, roomLookupId } from './hidden/doors.js';
+import { turnModel } from './kits/transform.js';
+import { KitLibrary, kitsDirCandidates } from './kits/library.js';
+import { KIT_PUBLISH_REFUSAL, checkLayoutTool, clipWords, kitCall, kitPieceIn, kitPieceTool, kitShard, kitTool, renderLayout } from './kits/tools.js';
+import { kitObject } from './kits/transform.js';
 import { chosenConstrainOf, walkWords, withAuthoredConstrain } from './walkConstrain.js';
 import { DEFAULT_PUBLISH_PER_DAY, MAX_ALT_LENGTH, MAX_NAME_LENGTH, dProblem, newObjectId, objectPointers, publicObjectTemplate } from './publicObject.js';
 import { hopCeiling, loadOrMeasure, projectCantorMs } from './space/calibration.js';
@@ -117,6 +122,10 @@ export const STOPPED_WORDS = 'Stopped. I\'ll wait for your next message.';
 export class Agent {
     config;
     pubkey;
+    /** The kits on this machine (kit, kit_piece, check_layout, place and render with kit); read from disk, never published. */
+    kits;
+    /** The doors this server sealed, with their secrets (keys/doors.json in the state directory, never shown). */
+    doors;
     npub;
     relays;
     keeper;
@@ -176,6 +185,8 @@ export class Agent {
         this.pubkey = getPublicKey(sk);
         this.npub = nip19.npubEncode(this.pubkey);
         this.calibration = calibration;
+        this.kits = new KitLibrary(kitsDirCandidates(config.stateDir, config.kitsDir));
+        this.doors = new DoorStore(dir);
         this.name = config.name ?? null;
         const urls = config.relays.map((u) => normalizeRelay(u)).filter((u) => !!u);
         if (urls.length === 0)
@@ -297,6 +308,23 @@ export class Agent {
             summarize: (h, lookupId) => this.summarize(h, lookupId),
             here: () => this.keeper.place(),
             maxHeight: MAX_KEY_HEIGHT, minHeight: SCAN_MIN_HEIGHT, log: this.log,
+            // Locked rooms (DECK-0004 §3.7): a move into a room goes into its room bag; the last door of a room that holds things stays.
+            roomKeyFor: (at, plane, height, key) => this.roomHeld(at, plane, height, key)?.key ?? key,
+            isRoomBag: (lookupId) => this.doors.isRoomBag(lookupId),
+            beforeRemove: (ids) => {
+                const going = new Set(ids);
+                for (const id of ids) {
+                    const door = this.doors.byId(id);
+                    // Another door of the room that stays keeps the room reachable.
+                    if (!door || this.doors.siblings(door).some((d) => !going.has(d.doorId)))
+                        continue;
+                    const bag = door.roomLookupId ? this.keys.mine.get(door.roomLookupId) : undefined;
+                    if (bag && !bag.deletedAt)
+                        throw new Refusal(`"${door.name}" is the last door of its room, and the room still holds things. Removing it would leave a room bag no door names (DECK-0004 §3.7.8). First take the room's things out (remove_placed each, or remove_placed with whole_bag on one of them), then remove the door. Nothing was changed.`);
+                }
+            },
+            afterRemove: (ids) => { for (const id of ids)
+                this.doors.remove(id); },
         });
     }
     /**
@@ -1905,7 +1933,43 @@ export class Agent {
                 ...(objectWalks.length ? { walk: ` WALK for the object(s) sealed in it: ${objectWalks.join('; ')}.` } : {}),
             };
         }
-        throw new Refusal('contents must be one of: { message }, { object }, { key: { name } }, { chest: { name, lock, entries } }.');
+        if ('door' in contents) {
+            const d = contents.door;
+            const name = String(d.name ?? '').trim().slice(0, MAX_ITEM_NAME);
+            if (!name)
+                throw new Refusal('A door needs a name: what a finder sees before it opens.');
+            const h = Number(d.room_height);
+            if (!Number.isInteger(h) || h < 1 || h > where.height)
+                throw new Refusal(`room_height must be a whole number from 1 to the height of the bag that holds the door (${where.height}): a door may not lock a room larger than its own bag's region (DECK-0004 §3.7.1).`);
+            const lock = this.resolveLock(String(d.lock ?? ''));
+            const secret = this.doors.secretFor(at.position, at.plane, h);
+            let sealed;
+            try {
+                sealed = sealEntries(roomEntries(secret), lock.pubkey);
+            }
+            catch (err) {
+                throw new Refusal(err instanceof Error ? err.message : String(err));
+            }
+            const look = [];
+            for (const [which, li] of [['closed', d.look], ['open', d.open_look]]) {
+                if (!li)
+                    continue;
+                const shard = this.lookShard(li, which);
+                const payload = JSON.stringify(toPayload(shard));
+                const bytes = new TextEncoder().encode(payload).length;
+                if (bytes > MAX_LOOK_BYTES)
+                    throw new Refusal(`The ${which} look is ${bytes} bytes; a look is at most ${MAX_LOOK_BYTES} (DECK-0004 §3.6 Size).`);
+                look.push(which === 'open' ? ['look', payload, 'open'] : ['look', payload]);
+            }
+            const requires = (d.requires ?? (lock.item ? `the ${lock.item.name}` : lock.person ? 'being the one it was sealed for' : '')).trim().slice(0, MAX_ITEM_NAME);
+            const event = this.sign(chestInnerTemplate({ name, lockPubkey: lock.pubkey, senderPubkey: sealed.senderPubkey, requires, payload: sealed.payload, look, door: h }, at.position, at.plane, now));
+            return {
+                entries: [event],
+                what: `a locked door "${name}" (id ${handle(event.id)}) sealed to ${lock.words}, locking the h${h} room around it${look.length ? `, with ${look.length === 2 ? 'a closed and an open look' : `a ${d.look ? 'closed' : 'open'} look`}` : ''}. From now on what you place or seal inside that room at height ${h} goes into its room bag, which only someone who opens this door can read; its secret stays in your state directory`,
+                door: { doorId: event.id, name, lock: lock.pubkey, at: { x: at.position.x.toString(), y: at.position.y.toString(), z: at.position.z.toString() }, plane: at.plane, height: h, bagHeight: where.height, secret },
+            };
+        }
+        throw new Refusal('contents must be one of: { message }, { object }, { key: { name } }, { chest: { name, lock, entries } }, { door: { name, lock, room_height } }.');
     }
     /** The key for the cube of `height` at `at`, priced against the caps and spent. */
     regionAt(at, height) {
@@ -1920,7 +1984,22 @@ export class Agent {
     async hide(input) {
         const here = this.keeper.place();
         const at = this.target(input.coordinate, here);
-        const { key, keyMs, regionKey } = this.regionAt(at, input.height);
+        const placeKey = this.regionAt(at, input.height);
+        const { keyMs } = placeKey;
+        let { key, regionKey } = placeKey;
+        // Inside the room of one of this server's doors, at exactly its height, a placement goes into the room bag (DECK-0004 §3.7.4).
+        // A second door of that same room is not inside it: it stands in the ordinary bag like the first (§3.7.5).
+        const sameRoomDoor = 'door' in input.contents && Number(input.contents.door.room_height) === input.height;
+        const inRoomBag = sameRoomDoor ? null : this.roomHeld(at.position, at.plane, input.height, placeKey.key);
+        const room = inRoomBag?.door ?? null;
+        if (inRoomBag && room) {
+            if (input.hint_heights || input.riddle)
+                throw new Refusal(`This place is inside the room of your door "${room.name}" at height ${room.height}, so it goes into the room bag, which carries no hint or riddle (DECK-0004 §3.7.2). Leave them out, or hide it at another height.`);
+            if ('door' in input.contents && !(Number(input.contents.door.room_height) < room.height))
+                throw new Refusal(`A door inside the room of "${room.name}" must have a lower height than that room (${room.height}), DECK-0004 §3.7.6.`);
+            key = inRoomBag.key;
+            regionKey = inRoomBag.regionKey;
+        }
         // One bag per author per region: read before write, never replace; one change to a bag at a time (placed.ts).
         return this.placements.withBags([key.lookupId], async () => {
             const { current, entries: carried } = await this.placements.ownBag(key.lookupId, regionKey);
@@ -1931,15 +2010,18 @@ export class Agent {
             const hint = input.hint_heights ?? currentSettings?.hint ?? null;
             if (hint && !hintFits(hint, height))
                 throw new Refusal(`hint_heights ${hint.join(',')} cannot contain a height ${height} region: each must be from ${height} to 85.`);
-            const { entries, what, walk, objectEvent, item, chest } = await this.entriesFor(input.contents, at, regionKey, now, { lookupId: key.lookupId, height });
+            const { entries, what, walk, objectEvent, item, chest, door } = await this.entriesFor(input.contents, at, regionKey, now, { lookupId: key.lookupId, height });
             const have = new Set(carried.map(entryKey));
             const merged = [...carried, ...entries.filter((e) => !have.has(entryKey(e)))];
             const riddle = (input.riddle ?? currentSettings?.riddle ?? '').slice(0, MAX_RIDDLE_LENGTH);
             const createdAt = Math.max(now, (current?.created_at ?? 0) + 1, this.placements.floor(key.lookupId));
             // A hint the agent gives now names its plane; one carried forward keeps its own while the bag holds an entry there (spec 7.6 Planes, The hint).
             const hintPlane = input.hint_heights ? at.plane : hintPlaneFor(current, merged, at.plane);
-            const template = await bagTemplate(merged, regionKey, key.lookupId, height, createdAt, HIDDEN_KIND, { heightTag: currentSettings?.heightTag ?? true, hint, riddle, contents: currentSettings?.contents, money: currentSettings?.money }, { at: at.position, plane: hintPlane });
+            const template = await bagTemplate(merged, regionKey, key.lookupId, height, createdAt, HIDDEN_KIND, room ? ROOM_BAG_SETTINGS : { heightTag: currentSettings?.heightTag ?? true, hint, riddle, contents: currentSettings?.contents, money: currentSettings?.money }, { at: at.position, plane: hintPlane });
             const bag = this.sign(template);
+            // A door's secret is kept the moment its bag is signed, before it is sent: this device sealed it, and nothing else knows it.
+            if (door)
+                this.doors.add({ ...door, createdAt });
             // Recorded whole before it is sent, so no later rewrite builds on an older copy, whichever relays take it.
             this.keys.noteOwnBag(key, createdAt, { bagId: bag.id, event: bag });
             const entry = this.outbox.add(bag);
@@ -1956,17 +2038,31 @@ export class Agent {
             const accepted = entry.accepted;
             const refused = entry.refused ?? {};
             const text = [
-                `Hid ${what} in the h${height} cube at base x ${key.base.x} y ${key.base.y} z ${key.base.z} (lookup id ${key.lookupId.slice(0, 12)}...). The bag ${bag.id.slice(0, 8)}... now holds ${merged.length} entr${merged.length === 1 ? 'y' : 'ies'}${current ? ` (${carried.length} carried forward from ${current.id.slice(0, 8)}...)` : ''}. Key cost ${keyMs.toFixed(0)} ms.`,
+                `Hid ${what} in the h${height} cube at base x ${key.base.x} y ${key.base.y} z ${key.base.z}${room ? `, inside the room of your door "${room.name}": it went into the room bag, which only someone who opens that door can read` : ''} (lookup id ${key.lookupId.slice(0, 12)}...). The bag ${bag.id.slice(0, 8)}... now holds ${merged.length} entr${merged.length === 1 ? 'y' : 'ies'}${current ? ` (${carried.length} carried forward from ${current.id.slice(0, 8)}...)` : ''}. Key cost ${keyMs.toFixed(0)} ms.`,
                 accepted.length ? `Accepted by ${accepted.join(', ')}.` : `No relay accepted the bag${result.ok ? '' : `: ${result.reason}`}. It waits in the outbox.`,
                 Object.keys(refused).length ? `Refused by ${Object.entries(refused).map(([u, r]) => `${u}: ${r}`).join('; ')} (verbatim; a refusal is not retried).` : '',
                 hint ? `Hinted at heights ${hint.join(',')}${riddle ? `, riddle "${riddle}"` : ''}.` : 'No hint: only someone who derives this cube\'s key will find it.',
                 walk ? `${walk.trim()}${'object' in input.contents ? ' constrain_placed changes it where it stands.' : ''}` : '',
                 `Its id is ${handle(objectEvent ? objectEvent.id : !isReference(entries[0]) ? entries[0].id : objectHandle(`${key.lookupId}/${entryKey(entries[0])}`))}: placed lists it, remove_placed takes it down, move_placed moves it.`,
             ].filter(Boolean).join('\n');
-            return { text, data: { bagId: bag.id, lookupId: key.lookupId, cube: { height, base: key.base, plane: at.plane }, entries: merged.length, carried: carried.length, keyMs: Math.round(keyMs), accepted, refused, hint, riddle, objectEventId: objectEvent?.id ?? null, ...(item ? { item } : {}), ...(chest ? { chest } : {}) } };
+            return { text, data: { bagId: bag.id, lookupId: key.lookupId, cube: { height, base: key.base, plane: at.plane }, ...(room ? { room: { door: room.doorId, name: room.name, height: room.height } } : {}), ...(door ? { door: { id: door.doorId, name: door.name, roomHeight: door.height } } : {}), entries: merged.length, carried: carried.length, keyMs: Math.round(keyMs), accepted, refused, hint, riddle, objectEventId: objectEvent?.id ?? null, ...(item ? { item } : {}), ...(chest ? { chest } : {}) } };
         });
     }
     async place(input) {
+        // A kit piece, turned and scaled as asked, goes through the same hide as any payload: building with it, under the build's own name.
+        if (input.kit !== undefined) {
+            if (input.object !== undefined || input.address !== undefined || input.id !== undefined)
+                throw new Refusal('Give kit alone, or object, address or id: not both.');
+            const k = kitCall(() => kitObject(this.kits, String(input.kit), { turn: input.turn, scale: input.scale }));
+            const at = this.target(input.coordinate, this.keeper.place());
+            const clipped = kitCall(() => clipWords(k.entry, input.turn, input.scale, at.position, input.height));
+            if (clipped)
+                throw new Refusal(`Not placed: ${clipped}`);
+            const r = await this.hide({ contents: { object: k.payload }, coordinate: input.coordinate, height: input.height });
+            return { ...r, text: `Kit piece ${k.entry.id}${k.turn ? ` turned ${k.turn}` : ''}${k.scale ? ` at scale ${k.scale}` : ''}, as "${k.shard.name}": ${r.text}`, data: { ...r.data, kit: { piece: k.entry.id, turn: k.turn, scale: k.scale } } };
+        }
+        if (input.turn !== undefined || input.scale !== undefined)
+            throw new Refusal('turn and scale go with kit (a kit piece); a payload you give is placed as it is.');
         // An object find or open_chest listed, or one taken from a chest, by its id: its payload is placed as given.
         if (input.id !== undefined && input.object === undefined && input.address === undefined) {
             return this.hide({ contents: { object: toPayload(this.objectById(input.id).shard) }, coordinate: input.coordinate, height: input.height });
@@ -2016,13 +2112,18 @@ export class Agent {
     }
     /** Hide a reference entry in the agent's bag at a cube: the same read-before-write as hide. */
     async hideReference(ref, at, height, what) {
-        const { key, keyMs, regionKey } = this.regionAt(at, height);
+        const cube = this.regionAt(at, height);
+        // A reference placed inside one of this server's rooms, at its height, goes into the room bag as anything else does (DECK-0004 §3.7.4).
+        const inRoom = this.roomHeld(at.position, at.plane, height, cube.key);
+        const { keyMs } = cube;
+        const key = inRoom?.key ?? cube.key;
+        const regionKey = inRoom?.regionKey ?? cube.regionKey;
         return this.placements.withBags([key.lookupId], async () => {
             const { current, entries: carried } = await this.placements.ownBag(key.lookupId, regionKey);
             const now = nowSeconds();
             const have = new Set(carried.map(entryKey));
             const merged = have.has(entryKey(ref)) ? carried : [...carried, ref];
-            const settings = current ? bagSettingsOf(current, height) : { heightTag: true, hint: null, riddle: '' };
+            const settings = inRoom ? ROOM_BAG_SETTINGS : current ? bagSettingsOf(current, height) : { heightTag: true, hint: null, riddle: '' };
             const createdAt = Math.max(now, (current?.created_at ?? 0) + 1, this.placements.floor(key.lookupId));
             const bag = this.sign(await bagTemplate(merged, regionKey, key.lookupId, height, createdAt, HIDDEN_KIND, settings, { at: at.position, plane: hintPlaneFor(current, merged, at.plane) }));
             // Recorded whole before it is sent, so no later rewrite builds on an older copy, whichever relays take it.
@@ -2326,13 +2427,74 @@ export class Agent {
      * 33331 by its address. Drawn on this machine's CPU (render.ts); nothing is
      * signed or published, and only an address asks a relay anything.
      */
+    /** kit: the kits installed here, or the pieces that fit a search (kits/library.ts). Local; nothing is sent. */
+    kit(input) {
+        return kitTool(this.kits, input);
+    }
+    /** kit_piece: one kit piece in full, and its payload when asked. Local; nothing is sent. */
+    kitPiece(input) {
+        return kitPieceTool(this.kits, input);
+    }
+    /** check_layout: the kits' rules over a planned build (kits/layout.ts). origin, when given, is read like any coordinate (from where you stand for { dx, dy, dz }). */
+    checkLayout(input) {
+        const origin = input.origin !== undefined ? this.target(input.origin, this.keeper.place()).position : undefined;
+        return checkLayoutTool(this.kits, { placements: input.placements, origin, height: input.height });
+    }
+    /** A door look as a model: a kit piece (turned and scaled by the kit path) or a payload, turned as asked. */
+    lookShard(li, which) {
+        if ((li.kit === undefined) === (li.object === undefined))
+            throw new Refusal(`The ${which} look: give kit (a kit piece) or object (an SNO payload), one of them.`);
+        if (li.kit !== undefined)
+            return kitCall(() => kitObject(this.kits, String(li.kit), { turn: li.turn, scale: li.scale })).shard;
+        const v = validateSnoPayload(typeof li.object === 'string' ? (() => { try {
+            return JSON.parse(li.object);
+        }
+        catch {
+            return null;
+        } })() : li.object);
+        if (!v.ok)
+            throw new Refusal(`The ${which} look is not valid SNO: ${v.errors.join(' ')}`);
+        const q = (((Number(li.turn ?? 0) / 90) % 4) + 4) % 4;
+        if (!Number.isInteger(q))
+            throw new Refusal(`The ${which} look's turn must be a multiple of 90.`);
+        const unit = v.shard.unit + Math.max(0, Math.floor(Number(li.scale ?? 0)));
+        if (unit > 84)
+            throw new Refusal(`The ${which} look's scale would put its unit past 84.`);
+        return { ...turnModel(v.shard, q), unit };
+    }
+    /** The room bag's key, when a place at this height is inside the room of one of this server's doors (DECK-0004 §3.7.4); null otherwise. */
+    roomHeld(at, plane, height, key) {
+        const door = this.doors.roomAt(at, plane, height);
+        if (!door)
+            return null;
+        const rk = roomKey(hexToBytes(key.keyHex), hexToBytes(door.secret));
+        const lookupId = roomLookupId(rk);
+        this.doors.noteRoom(door, lookupId);
+        return { key: { ...key, lookupId, keyHex: bytesToHex(rk) }, regionKey: rk, door };
+    }
+    /** seal_door: a locked door (DECK-0004 §3.7) hidden like a chest; its room bag takes what is hidden in its room at its height from then on. */
+    async sealDoor(input) {
+        const { coordinate, height, hint_heights, riddle, ...door } = input;
+        return this.hide({ contents: { door }, coordinate: coordinate ?? { dx: 0, dy: 0, dz: 0 }, height, hint_heights, riddle });
+    }
     async render(input) {
-        const given = [input.object, input.id, input.address].filter((x) => x !== undefined).length;
+        const given = [input.object, input.id, input.address, input.kit, input.layout].filter((x) => x !== undefined).length;
         if (given !== 1)
-            throw new Refusal('Give exactly one of: object (an SNO payload), id (an object find or look listed), or address (a public kind 33331).');
+            throw new Refusal('Give exactly one of: object (an SNO payload), id (an object find or look listed), address (a public kind 33331), kit (a kit piece) or layout (a planned build of kit pieces).');
+        if (input.layout !== undefined)
+            return renderLayout(this.kits, { layout: input.layout, cut: input.cut, view: input.view, yaw: input.yaw, pitch: input.pitch, size: input.size });
+        if (input.cut !== undefined)
+            throw new Refusal('cut goes with layout.');
+        if ((input.turn !== undefined || input.scale !== undefined) && input.kit === undefined)
+            throw new Refusal('turn and scale go with kit.');
         let shard;
         let source;
-        if (input.object !== undefined) {
+        if (input.kit !== undefined) {
+            const k = kitShard(this.kits, { kit: input.kit, turn: input.turn, scale: input.scale });
+            shard = k.shard;
+            source = k.source;
+        }
+        else if (input.object !== undefined) {
             let raw = input.object;
             // A payload sent as a JSON string is read as the object it spells.
             if (typeof raw === 'string') {
@@ -2380,7 +2542,7 @@ export class Agent {
         }
         return {
             // An object found in cyberspace was named by someone else.
-            text: source === 'payload' ? r.caption : `${r.caption} Its name is the author's text (untrusted).`,
+            text: source === 'payload' ? r.caption : source.startsWith('kit piece') ? `${source}: ${r.caption}` : `${r.caption} Its name is the author's text (untrusted).`,
             images: [{ data: r.png.toString('base64'), mimeType: 'image/png' }],
             data: { source, name: shard.name, mode: shard.mode, unit: shard.unit, vertices: r.vertices, faces: r.faces, bounds: r.bounds, view: r.view, size: r.size, backFacing: r.backFacing, partsNotDrawn: r.partsNotDrawn, pngBytes: r.png.length, ms: Math.round(r.ms) },
         };
@@ -2438,6 +2600,9 @@ export class Agent {
             // v.bytes is the content as it is signed: sno-core's toPayload, as avatarTemplate writes it.
             if (avatarTooLarge(v.bytes))
                 throw new Refusal(`Not set: ${avatarTooLargeWords(v.bytes)}. Use fewer vertices and faces.`);
+            const kitHit = kitPieceIn(this.kits, v.shard);
+            if (kitHit)
+                throw new Refusal(`Not set: ${kitHit} ${KIT_PUBLISH_REFUSAL}`);
             shard = v.shard;
             source = 'payload';
         }
@@ -2536,6 +2701,9 @@ export class Agent {
         const v = validateSnoPayload(raw);
         if (!v.ok)
             throw new Refusal(`Not published: the payload is not valid SNO. ${v.errors.join(' ')}`);
+        const kitHit = kitPieceIn(this.kits, v.shard);
+        if (kitHit)
+            throw new Refusal(`Not published: ${kitHit} ${KIT_PUBLISH_REFUSAL}`);
         const replacing = input.d !== undefined;
         const d = replacing ? String(input.d) : newObjectId();
         const bad = dProblem(d);

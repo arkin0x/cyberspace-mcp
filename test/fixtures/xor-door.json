@@ -1,0 +1,118 @@
+{
+ "note": "A locked door written by cyberspace-mcp (scripts/gen-door-fixture.ts): throwaway keys, nothing published.",
+ "agent": "4b1f24dc34817d85d2c751af345e4b49d7b48c1b563cb7eaddd42724bf10c390",
+ "at": {
+  "x": "7215934434566369722392980",
+  "y": "35189266430119646401995604",
+  "z": "3675117907140443030568710"
+ },
+ "plane": 0,
+ "keyItem": {
+  "name": "Vault Key",
+  "itemPubkey": "6a78ea6e3c01932157d9ba4c426b4debfbb39497513b1a72db2d4dea79ba6c53",
+  "secretHex": "d4ecaf462084671edee45102e43f41e4415a8838bfe2dded4cbd80f4b2271ee5"
+ },
+ "bagHeight": 5,
+ "roomHeight": 4,
+ "outerLocationKey": "6afbc710e4c9356538edf724e22acf8b1610d74ec630a5205b4b738236ccb63a",
+ "roomLocationKey": "9f95204717d0bdd2edf1a9ac37829fd95f7ca8608dc15fc9085138f467899f96",
+ "outerBag": {
+  "id": "064bd54401193e01151b6b5d59344ab1ea3ab7f87de721a380afb424c61cb219",
+  "pubkey": "4b1f24dc34817d85d2c751af345e4b49d7b48c1b563cb7eaddd42724bf10c390",
+  "created_at": 1794804952,
+  "kind": 33330,
+  "tags": [
+   [
+    "d",
+    "f7216ecd3c80d1154399e537d30cd5ad1d1022605313e645fcd7f0d459cbbaa9"
+   ],
+   [
+    "encrypted",
+    "aes-256-gcm",
+    "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"
+   ],
+   [
+    "version",
+    "2"
+   ],
+   [
+    "H",
+    "5"
+   ],
+   [
+    "client",
+    "cyberspace-mcp"
+   ]
+  ],
+  "content": "",
+  "sig": "98731a13407f405d8a24640a3e4b058f468f5cee391c6a44eea00130756b3d7d083d9a70d1a8f94a16038e01b9c3461923564d6ec68922a36104d2f12bf3ac4c"
+ },
+ "bags": [
+  {
+   "id": "03b139398f3f5ce368b09951b64963f8cef0acb8f060a9a3a19e37a3a8f9d9e3",
+   "pubkey": "4b1f24dc34817d85d2c751af345e4b49d7b48c1b563cb7eaddd42724bf10c390",
+   "created_at": 1794804952,
+   "kind": 33330,
+   "tags": [
+    [
+     "d",
+     "a8a5fe0abb59fd5b6976274cc7d90cb6bc856ffc76867215df7bba61acce8f85"
+    ],
+    [
+     "encrypted",
+     "aes-256-gcm",
+     "AhI5h34BDuICjDyiymAfDyOFfd/fv/nRQ3MEGVIM3JG3UvfBO257iUOR5tWK05rd4Szi1kF4jA2Kzf7xdujNEtRwfKjSs7f94vVMuzTkMfLv4KmY16b/D82LQzT3idFWP3CJUzsLk7y6yBvY1GTepl5Kqwy/k2e7LLvwv1JNV865NlCRTb9ak2sn+fvXh+j0H1kQF3LBeQHLiNhU6u3OiixQvWVLyMRRc88m5rMNQxKjXfSNp6LSzeUyACC2I0hJpg+HwgKYRzo2zfg9ePkV7w+mx9oa4fu0J8qc9cLVbvhSlhTL9aVPwHM4HZqBtr8hjcDQQNzQnvJ7QsIIggKKKBntjAFl+/qcM6Uq9VphPD70uXnS9/U2r4Ihad4lKsX2Ptki7viWvKv/mRtILNIbmlFoBi7FEG7I3i/NToHX3oqANSq+Bdu/mv5PtcZE7Awy7hY2OOGJAv9elTML3k4yHt/icaBxLT8ohxMAJ4nnlUjo9qfcr/smRRZvzR3qIo1tTDiBV6HQxas7zaHimJq3/+f16MlCSdmFBFNB+7B7ySf7WbMDb624lKcOmf9ldRrHVpoSmsRwFyiL+KuxOhhS6GLOg1RfiuWN7JmA0VS6mpxLjWBz2+1+uFrv7oh8k3YISxzcjIyg9npiGizGACAqMwMrEgTkBOqbTeNoMKjI77rGVmwjpdzQuTv0GSgFs2/nJgb65PhXPkNhD29FCS/k4M2Kzq3JRrtqhuXS98Q7fdkt2QC4JdoEVTSlfKxhHIbsLQ+HAUjK9tXIkSIEt/uDFtH1Y/ytZEN9JNT89/X8mSJEsqJjQ26Ki+fh71JfalhyeIPNKN5aBydI2A3+jsQcbrlsZBVQEAOzAOoHf8as/YFXqh2VlIo0kv9hiPwkChmCTVZ/T1N99w8PV0KkTarWUZzEu6yLdIDJ1LfCAQl6EHp87+0YxX5nOOa5a0oQEqqL2zZ/KO+hhOqa3KV4kLFXY8X02Vus5M7O/ywSRSTAgGXVPWBWsyOUAyvFwdaRoooTC00il4c7k9txp3IiVBVksTd1fJILa+f8Hq53YPlOHIlSR1nCtTwOQbA9w8ONkQ=="
+    ],
+    [
+     "version",
+     "2"
+    ],
+    [
+     "client",
+     "cyberspace-mcp"
+    ]
+   ],
+   "content": "",
+   "sig": "8c564b07c8048d19f8c8ff9706b1fe01b97e02c3a81b10780b14a10f82895725e633f56cf4d77e1061e885aa34f6508be930bf2c751471909cef4244df2dfce7"
+  },
+  {
+   "id": "fe26adf56c8af33449b3a5872886f82c63e9b440a4cc70f84dca2a3b8a43c565",
+   "pubkey": "4b1f24dc34817d85d2c751af345e4b49d7b48c1b563cb7eaddd42724bf10c390",
+   "created_at": 1794804952,
+   "kind": 33330,
+   "tags": [
+    [
+     "d",
+     "e4b0f2e9d8b079973df39b296db6cb49f22b4fe8679dcddef8cbb0a92c4b694b"
+    ],
+    [
+     "encrypted",
+     "aes-256-gcm",
+     "SfPNDt7tTzZueJItez9njgup9Zyier2wS9f01a5+C5fUhABbaLSqTBBsGDPNPv7e9PVGmUqiOBReyNW5RdOV/sSeKRHydpDFeESw85fHVnX2C6EtU5uxHwRQe/vo7BqfaoDV6iAMzDY4A9HA5qrAhi/EoWe7vl7H+HTLphw3LF26qT+XwoDZwklAkITMAY+vFL8ioDS20DXxRIVgRCJxCOdNRFeXQphnYzbNIKrhlzzpri/tYVZtJvLtswKjaA14DptGFlLr3SEIXhcY44OnxOd4huaqZoe8zT6qHkliKLEi3uLHT3+5M8qwQKNxTNNZlooleTfXCqkyNaV13Nph75YakvVMGv+gj6Fe9jOCoORa83yrJbpC+cAfBGPSX3GevdMSIzZc5Lx4act5rIy9tLKtISKUiNMxdSEuNcnZjxoKwB41ZWKEAmD2jLJotAnKznpSA49qPgOESnsqtzY7h3cJ+RbGc7CLH0KS2Wx///qXkm9/YF5rACEluGGiD0OGZDHkINhN2N9vKCC+x306qfgaHzNKQ/ZJ0jyTKz5BkShFGHtUsDAYRuDC9El6mZVcpRvDUeomOWDooPLGHSmIPRA9dhim4O2qpmfHSf3Wnd9eP2T/IBhyviv24vGeukXHEE00j0BiIrNH71Jr9mmO02zPXPWe7vB6d4IrxXXKck7jeOdkSbuMhlPb4XQzD0LB7UdLL6jF5g5ACkNTsEraGY+/Nea6TNT7JtV1QPfQ4XQgJPf7xdRm8U0hQ/XjGIiwEOSkWp53pemZwA8GfgBIhoQ9Z5Dlct+wg1ii92y/pIrK5kjRxSjn4AyVETjj5u0ELC2C2N3mZ51xpahDMB64vHLxGexe3pDFx2YJSGRieWqtzecm535M9VuC7cVvlm2wsw=="
+    ],
+    [
+     "version",
+     "2"
+    ],
+    [
+     "H",
+     "5"
+    ],
+    [
+     "client",
+     "cyberspace-mcp"
+    ]
+   ],
+   "content": "",
+   "sig": "78c59a1a841fb8d6d1bec217c1018772cfdcada0c1f020c119954994e653014774820cd55737236ad94499201a62558a4dfcc9f0f25abe8a50b14077823821a3"
+  }
+ ],
+ "expect": {
+  "door": "Vault door",
+  "closedLook": "slab",
+  "openLook": "slab open",
+  "roomEntries": [
+   "statue"
+  ]
+ }
+}

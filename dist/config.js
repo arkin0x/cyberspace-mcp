@@ -34,6 +34,8 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
                                                 with its waker (serve --help).
        cyberspace-mcp doctor                    Check what is missing, and how to fix it.
        cyberspace-mcp wake pause|resume|status  Pause or resume the waker.
+       cyberspace-mcp kits add <zip>|list|remove <kit>
+                                                The building kits on this machine (kits --help).
        cyberspace-mcp [stdio] [--state <dir>] [options]
                                                 The stdio MCP server, for a client that starts it itself.
 
@@ -76,11 +78,14 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
                                 $CYBERSPACE_MCP_MACHINE_ID, else <state>.machine-id (made once,
                                 beside the state directory; never sync or copy it). An id given here
                                 or in the environment must be unique to this machine.
+  --kits-dir <dir>              Where the building kits are (one folder per kit, each with a
+                                catalog.json; docs/kits.md). Default <state>/kits, else
+                                <state>/../kits. Kits are local data and never published.
   --help                        This text.
 
 The same keys may live in <state>/config.json: relays, operator, name, about,
 capCallSeconds, capSessionSeconds, capDailySeconds, threads, maxSidestepHeight, allowRespawn, hosakaUrl,
-nwc, maxPaymentSats, maxDailySats, chatWakeMinutes, publishMaxPerDay, and travelLog: { "enabled": true,
+nwc, maxPaymentSats, maxDailySats, chatWakeMinutes, publishMaxPerDay, kitsDir, and travelLog: { "enabled": true,
 "maxPerDay": 6, "tagOperator": false }. The wallet string may also be the "nwc" key
 of <state>/wallet.json, which the server only reads.`;
 /** An http(s) URL without a trailing slash, or a thrown sentence. */
@@ -206,6 +211,12 @@ export function parseArgs(argv) {
             case '--tools':
                 out.tools = toolsSetting('--tools', next());
                 break;
+            case '--kits-dir':
+                out.kitsDir = next();
+                if (!out.kitsDir)
+                    throw new Error('--kits-dir needs a directory');
+                out.kitsDir = expandHome(out.kitsDir);
+                break;
             case '--help':
             case '-h':
                 out.help = true;
@@ -288,6 +299,7 @@ export function settingsFrom(args, file, walletFile = {}) {
         publishMaxPerDay: args.publishMaxPerDay ?? (posNum(file.publishMaxPerDay) !== undefined ? Math.max(1, Math.floor(posNum(file.publishMaxPerDay))) : DEFAULTS.publishMaxPerDay),
         ...(args.machineId ? { machineId: args.machineId } : {}),
         ...(tools !== undefined ? { tools } : {}),
+        ...((args.kitsDir ?? str(file.kitsDir)) ? { kitsDir: args.kitsDir ?? expandHome(str(file.kitsDir)) } : {}),
     };
 }
 /** "all", "starter", or tool names (a comma-separated string or, in config.json, a list); the names are checked against the tools when the server starts. */
