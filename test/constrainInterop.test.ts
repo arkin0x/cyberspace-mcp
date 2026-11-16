@@ -65,6 +65,27 @@ describe('what place, hide and publish_object write, against ONOSENDAI 88da640',
   })
 })
 
+describe('the eye (DECK-0003 1.17) through place, hide and publish_object', () => {
+  it('an inline item, a sealed object and a public object carry a valid eye as it was read, in the version 2 frame', async () => {
+    const key = hexToBytes(fx.keyHex)
+    const { shard } = shardOf({ ...fx.payloads.none, eye: [0, 159, -60] })
+    expect(JSON.parse(shardInnerTemplate(shard, at, 0, fx.T).content).eye).toEqual([0, 159, -60])
+    const sealed = await objectTemplate(shard, key, 'd'.repeat(32), fx.T)
+    expect(JSON.parse((await decryptForRegion(key, sealed.tags.find((t) => t[0] === 'encrypted')![2]))!).eye).toEqual([0, 159, -60])
+    expect(JSON.parse(publicObjectTemplate(shard, 'fixed-d', fx.T).content).eye).toEqual([0, 159, -60])
+    // A malformed one is never written.
+    expect(JSON.parse(shardInnerTemplate(shardOf({ ...fx.payloads.none, eye: [0, 159] }).shard, at, 0, fx.T).content)).not.toHaveProperty('eye')
+  })
+
+  it('an EDIT keeps a valid eye as found and leaves a malformed one out', () => {
+    const base = JSON.parse(fx.edited.before) as Record<string, unknown>
+    expect(JSON.parse(rewritePayload(JSON.stringify({ ...base, eye: [0, 159, 0] }), { constrain: 'all' })!).eye).toEqual([0, 159, 0])
+    for (const eye of [[0, 159], null, 'up', [0, 1.5, 0]]) {
+      expect(JSON.parse(rewritePayload(JSON.stringify({ ...base, eye }), { constrain: 'all' })!)).not.toHaveProperty('eye')
+    }
+  })
+})
+
 describe('what an EDIT of a placed shard writes, against ONOSENDAI 88da640', () => {
   it('each word, an opacity, and a move that leaves the setting alone (the default for one that chose none)', () => {
     const e = fx.edited

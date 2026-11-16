@@ -23,6 +23,8 @@ import { FakeNetwork } from './fakeRelay.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { createServer } from '../src/server.js'
+import { renderShard } from '../src/render.js'
+import { centroid, magentaRing } from './pngDecode.js'
 
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/onosendai.json', import.meta.url), 'utf8')) as { avatar: { event: NostrEvent; required: number } }
 
@@ -208,40 +210,57 @@ describe('set_avatar', () => {
 
 // The avatar's eye (DECK-0003 1.17, ruled 2026-11-16): where its own
 // first-person viewer looks from. set_avatar names it in its description,
-// refuses a malformed one (a publisher never writes one), says which eye goes
-// out, and marks it on the picture.
+// refuses a malformed one (a publisher never writes one; null is no choice),
+// says which eye goes out and what ONOSENDAI does to one past 4 gibsons, and
+// marks it on the picture; render, publish_object and validate_object see it too.
 describe('set_avatar and the eye', () => {
   const sent = () => canonical.published.length
+  const wedge2 = { ...wedge, v: 2, colors: [1, 1, 1, 1] }
 
-  it('the tool description says what the eye is, AUTO when absent, [0, 0, 0] the origin, ticks on the object\'s grid, not held to the shape', async () => {
+  it('the tool description says what the eye is, which side is behind, AUTO when absent, [0, 0, 0] the origin, ticks on the object\'s grid, the 4-gibson reach', async () => {
     const server = createServer({} as unknown as Agent)
     const [x, y] = InMemoryTransport.createLinkedPair()
     await server.connect(x)
     const client = new Client({ name: 'test', version: '0' })
     await client.connect(y)
-    const tool = (await client.listTools()).tools.find((t) => t.name === 'set_avatar')!
+    const tools = (await client.listTools()).tools
+    const tool = tools.find((t) => t.name === 'set_avatar')!
     expect(tool.description).toContain('"eye": [x, y, z]')
     expect(tool.description).toMatch(/first person/)
-    expect(tool.description).toMatch(/AUTO: one eighth of the avatar's height below its top/)
+    expect(tool.description).toContain('In ONOSENDAI you face -Z, so [0, 150, 400] is behind you and a little up')
+    expect(tool.description).toMatch(/Left out or null, the eye is AUTO: one eighth of the avatar's height below its top/)
     expect(tool.description).toContain('[0, 0, 0] is the origin')
     expect(tool.description).toMatch(/whole ticks \(120 a unit\) on the object's own grid/)
     expect(tool.description).toMatch(/not held to the shape/)
+    expect(tool.description).toMatch(/within 4 gibsons of its origin on each axis: it shrinks a larger avatar and its eye together/)
+    const render = tools.find((t) => t.name === 'render')!
+    expect(render.description).toMatch(/chosen "eye".*magenta ring; eye: true marks the AUTO eye/)
+    expect(render.inputSchema.properties).toHaveProperty('eye')
     await client.close()
   })
 
-  it('refuses a malformed eye with nothing signed or published: two or four elements, a fraction, out of range, a string, null', async () => {
+  it('refuses a malformed eye with nothing signed or published: two or four elements, a fraction, out of range, a string, a boolean', async () => {
     const a = await start()
     const sign = vi.spyOn(a as unknown as { sign: (t: unknown) => unknown }, 'sign')
     const before = sent()
     const pending = a.outbox.state().pending.length
-    for (const eye of [[0, 159], [0, 159, 0, 0], [0, 1.5, 0], [0, 7681, 0], [-7681, 0, 0], '0, 159, 0', null]) {
-      await expect(a.setAvatar({ object: { ...wedge, eye } })).rejects.toThrow(/Not set: "eye" must be three whole numbers of ticks \(120 a unit\), each from -7680 to 7680 \(DECK-0003 1\.17\); got .*Nothing was signed or published\./)
+    for (const eye of [[0, 159], [0, 159, 0, 0], [0, 1.5, 0], [0, 7681, 0], [-7681, 0, 0], '0, 159, 0', true]) {
+      await expect(a.setAvatar({ object: { ...wedge, eye } })).rejects.toThrow(/Not set: "eye" must be three whole numbers of ticks \(120 a unit\), each from -7680 to 7680 \(DECK-0003 1\.17\); got .*Leave eye out \(or null\) for the automatic eye\. Nothing was signed or published\./)
       // As a JSON string, too.
       await expect(a.setAvatar({ object: JSON.stringify({ ...wedge, eye }) })).rejects.toThrow(/Not set: "eye" must be/)
     }
     expect(sign).not.toHaveBeenCalled()
     expect(sent()).toBe(before)
     expect(a.outbox.state().pending).toHaveLength(pending)
+  }, 30_000)
+
+  it('reads eye: null as no eye chosen: AUTO, nothing written, and the caller\'s object left as it was', async () => {
+    const a = await start()
+    const object = { ...wedge, eye: null }
+    const r = await a.setAvatar({ object })
+    expect(r.text).toContain('eye AUTO 0, 105, 0 ticks (0, 0.875, 0 units)')
+    expect(JSON.parse(avatarsOf(a.pubkey).at(-1)!.content)).not.toHaveProperty('eye')
+    expect(object).toHaveProperty('eye', null)
   }, 30_000)
 
   it('reports AUTO when the payload chose none, writes none, and marks it on the picture', async () => {
@@ -251,10 +270,29 @@ describe('set_avatar and the eye', () => {
     expect(r.text).toContain('eye AUTO 0, 105, 0 ticks (0, 0.875, 0 units)')
     expect(r.data.eye).toEqual({ ticks: [0, 105, 0], chosen: false })
     expect(r.text).toContain('the magenta ring is the eye, AUTO, at 0, 0.875, 0 units')
+    expect(r.text).not.toMatch(/nearer/)
     expect(JSON.parse(avatarsOf(a.pubkey).at(-1)!.content)).not.toHaveProperty('eye')
+    expect(magentaRing(Buffer.from(r.images![0].data, 'base64')).n).toBeGreaterThan(30)
   }, 30_000)
 
-  it('reports CHOSEN and publishes it as given, in the version 2 frame; [0, 0, 0] and an eye far outside the shape are choices too', async () => {
+  it('puts the ring on its picture where a vertex at the eye\'s wire point is drawn: drawnEye / 120, end to end', async () => {
+    const a = await start()
+    // One point 1 unit right, 2 up and 3 toward the viewer, and the eye written at the same place.
+    const point = { v: 2, name: 'Point', unit: 0, mode: 'points', vertices: [[1, 2, 3]], colors: [7], faces: [] }
+    const r = await a.setAvatar({ object: { ...point, eye: [120, 240, 360] } })
+    expect(r.text).toContain('eye CHOSEN 120, 240, 360 ticks (1, 2, 3 units)')
+    const ring = magentaRing(Buffer.from(r.images![0].data, 'base64'))
+    // The same shape drawn with no eye: the frame is the same, since the eye is at the vertex.
+    const v = validateSnoPayload(point)
+    if (!v.ok) throw new Error(v.errors.join(' '))
+    const dot = centroid(renderShard(v.shard, {}).png, (c) => c[2] > 150 && c[1] > 150 && c[0] < 100)
+    expect(dot.n).toBeGreaterThan(5)
+    expect(ring.n).toBeGreaterThan(30)
+    expect(Math.abs(ring.x - dot.x)).toBeLessThan(3)
+    expect(Math.abs(ring.y - dot.y)).toBeLessThan(3)
+  }, 30_000)
+
+  it('reports CHOSEN and publishes it in the version 2 frame; [0, 0, 0] is a choice, and -0 is written as 0', async () => {
     const a = await start()
     // A version 1 payload's Z points the other way (DECK-0003 2): sno-core writes its eye out negated with the vertices.
     const r = await a.setAvatar({ object: { ...wedge, eye: [0, 159, 30] } })
@@ -264,11 +302,27 @@ describe('set_avatar and the eye', () => {
     const ev = avatarsOf(a.pubkey).at(-1)!
     expect(JSON.parse(ev.content).eye).toEqual([0, 159, -30])
     expect(paidShard(ev)?.extra?.eye).toEqual([0, 159, -30])
-    const origin = await a.setAvatar({ object: { ...wedge, v: 2, colors: [1, 1, 1, 1], eye: [0, 0, 0] } })
+    const origin = await a.setAvatar({ object: { ...wedge2, eye: [0, 0, 0] } })
     expect(origin.text).toContain('eye CHOSEN 0, 0, 0 ticks (0, 0, 0 units)')
     expect(JSON.parse(avatarsOf(a.pubkey).at(-1)!.content).eye).toEqual([0, 0, 0])
-    const behind = await a.setAvatar({ object: { ...wedge, v: 2, colors: [1, 1, 1, 1], eye: [0, 7680, 7680] } })
+    // JSON.parse keeps a -0; the content never carries one (DECK-0003 1.17: never -0).
+    await a.setAvatar({ object: JSON.stringify(wedge2).replace(/}$/, ',"eye":[-0,159,-0]}') })
+    const content = avatarsOf(a.pubkey).at(-1)!.content
+    expect(content).toContain('"eye":[0,159,0]')
+    expect(content).not.toContain('-0')
+  }, 30_000)
+
+  it('says when ONOSENDAI will draw the eye nearer: an eye past 4 gibsons, and a shape past 4 that shrinks with its eye', async () => {
+    const a = await start()
+    const behind = await a.setAvatar({ object: { ...wedge2, eye: [0, 7680, 7680] } })
     expect(behind.text).toContain('eye CHOSEN 0, 7680, 7680 ticks (0, 64, 64 units)')
+    expect(behind.text).toContain('ONOSENDAI will draw it nearer: it draws an avatar within 4 gibsons of its origin on each axis, so the eye reaches past 4 gibsons, so it is brought straight in toward your origin, to 0, 4, 4 gibsons from your origin.')
+    // Unit 3: the wedge reaches 8 gibsons, drawn at half scale, and the AUTO eye 7 gibsons up comes down to 3.5.
+    const big = await a.setAvatar({ object: { ...wedge2, unit: 3 } })
+    expect(big.text).toContain('ONOSENDAI will draw it nearer: it draws an avatar within 4 gibsons of its origin on each axis, so the shape reaches 8 gibsons, so it is drawn at 0.5 of true scale and the eye with it, to 0, 3.5, 0 gibsons from your origin.')
+    // Both: shrunk with the shape, and still past 4, then brought in.
+    const both = await a.setAvatar({ object: { ...wedge2, unit: 3, eye: [0, 0, 7680] } })
+    expect(both.text).toContain('the shape reaches 8 gibsons, so it is drawn at 0.5 of true scale and the eye with it, and the eye is then brought straight in toward your origin, to 0, 0, 4 gibsons from your origin.')
   }, 30_000)
 
   it('leaves out a malformed eye in an object copied by address, so the eye is AUTO', async () => {
@@ -282,15 +336,44 @@ describe('set_avatar and the eye', () => {
     expect(JSON.parse(avatarsOf(a.pubkey).at(-1)!.content)).not.toHaveProperty('eye')
   }, 30_000)
 
-  it('validate_object names an eye it finds in one line, and a malformed one as left out', async () => {
+  it('render marks a chosen eye always, and the AUTO eye only when asked; an object with no vertices has its AUTO eye at the origin', async () => {
     const a = await start()
-    const found = a.validateObject({ payload: { ...wedge, v: 2, colors: [1, 1, 1, 1], eye: [0, 159, 0] } })
+    const chosen = await a.render({ object: { ...wedge2, eye: [0, 159, 0] }, size: 128 })
+    expect(chosen.text).toContain('the magenta ring is the eye, CHOSEN, at 0, 1.325, 0 units')
+    expect(chosen.data.eye).toEqual({ ticks: [0, 159, 0], chosen: true })
+    expect(magentaRing(Buffer.from(chosen.images![0].data, 'base64')).n).toBeGreaterThan(10)
+    const plain = await a.render({ object: wedge2, size: 128 })
+    expect(plain.text).not.toMatch(/eye/)
+    expect(plain.data.eye).toBeUndefined()
+    expect(magentaRing(Buffer.from(plain.images![0].data, 'base64')).n).toBe(0)
+    const auto = await a.render({ object: wedge2, size: 128, eye: true })
+    expect(auto.text).toContain('the magenta ring is the eye, AUTO, at 0, 0.875, 0 units')
+    const empty = await a.render({ object: { v: 2, name: 'Nothing', unit: 0, mode: 'solid', vertices: [], colors: [], faces: [] }, size: 128, eye: true })
+    expect(empty.text).toContain('the magenta ring is the eye, AUTO, at 0, 0, 0 units')
+    expect(empty.data.eye).toEqual({ ticks: [0, 0, 0], chosen: false })
+    await expect(a.render({ layout: [{ piece: 'x', at: [0, 0, 0] }] as never, eye: true })).rejects.toThrow(/eye goes with one object/)
+  }, 30_000)
+
+  it('publish_object carries a valid eye to the feed and leaves a malformed one out, named', async () => {
+    const a = await start()
+    const r = await a.publishObject({ object: { ...wedge2, eye: [0, 159, -60] } })
+    const ev = canonical.published.find((e) => e.id === r.data.eventId)!
+    expect(JSON.parse(ev.content).eye).toEqual([0, 159, -60])
+    const bad = await a.publishObject({ object: { ...wedge2, eye: [0, 159] } })
+    expect(JSON.parse(canonical.published.find((e) => e.id === bad.data.eventId)!.content)).not.toHaveProperty('eye')
+    expect(bad.text).toContain('"eye" was not three whole numbers of ticks from -7680 to 7680, so it is left out')
+  }, 30_000)
+
+  it('validate_object names an eye it finds in one line, a malformed one as left out, and opacity 0 in one line', async () => {
+    const a = await start()
+    const found = a.validateObject({ payload: { ...wedge2, eye: [0, 159, 0] } })
     expect(found.text).toContain('Eye, read only when worn as an avatar (DECK-0003 1.17): CHOSEN 0, 159, 0 ticks (0, 1.325, 0 units).')
     expect(found.data.eye).toEqual([0, 159, 0])
     const bad = a.validateObject({ payload: { ...wedge, eye: [0, 159] } })
     expect(bad.data.valid).toBe(true)
     expect(bad.data.repaired).toEqual(['eye'])
     expect(bad.text).toContain('"eye" was not three whole numbers of ticks from -7680 to 7680, so it is left out')
-    expect(a.validateObject({ payload: wedge }).text).not.toMatch(/eye/i)
+    expect(a.validateObject({ payload: wedge }).text).not.toMatch(/eye|opacity/i)
+    expect(a.validateObject({ payload: { ...wedge, opacity: 0 } }).text).toContain('Opacity 0: a reader draws nothing of this object\'s own (DECK-0003 1.11; a glow still shows).')
   }, 30_000)
 })

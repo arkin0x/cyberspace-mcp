@@ -29,7 +29,7 @@
 import { createHash } from 'node:crypto'
 import { faceEdges } from 'sno-core/outline'
 import { formatCellSize } from 'sno-core/scale'
-import { expandFaceColors, flatten, type ShardModel } from 'sno-core/shards'
+import { expandFaceColors, flatten, readOpacity, type ShardModel } from 'sno-core/shards'
 import { encodePng } from './png.js'
 
 export const RENDER_DEFAULT_SIZE = 512
@@ -373,10 +373,20 @@ export function renderShard(shard: ShardModel, opts: RenderOptions = {}): Render
     `${JSON.stringify(shard.name)}: ${shard.vertices.length} vertices, ${shard.faces.length} faces, mode ${shard.mode}; ${box}; one unit is ${formatCellSize(shard.unit)} (2^${shard.unit} gibsons), one floor square is ${step} unit${step === 1 ? '' : 's'} at y ${gridY}; ${viewWords}, ${N}x${N}`,
     backFacing > 0 ? `; ${backFacing} face${backFacing === 1 ? ' shows its' : 's show their'} back (darker: wound clockwise from here; if that side is the outside, reverse the face's vertex order)` : '',
     partsNotDrawn > 0 ? `; ${partsNotDrawn} placed part${partsNotDrawn === 1 ? '' : 's'} not drawn` : '',
-    opts.eye ? `; the magenta ring is the eye, ${opts.eye.chosen ? 'CHOSEN' : 'AUTO'}, at ${opts.eye.at.map(fmt).join(', ')} units` : '',
+    opts.eye ? `; the magenta ring is the eye, ${opts.eye.chosen ? 'CHOSEN' : 'AUTO'}, at ${opts.eye.at.map(fmt).join(', ')} units${eyeOutside(opts.eye.at, bounds)}` : '',
+    readOpacity(shard.opacity) === 0 ? '; opacity 0: a reader draws nothing of this object\'s own (DECK-0003 1.11), drawn here as if opaque so you can see it' : '',
     `; drawn in ${Math.round(ms)} ms.`,
   ].join('')
   return { png, size: N, view: { name: view.name, yaw: view.yaw, pitch: view.pitch }, vertices: shard.vertices.length, faces: shard.faces.length, bounds, backFacing, partsNotDrawn, ...(opts.eye ? { eye: opts.eye } : {}), gridY, ms, caption }
+}
+
+/** Words for an eye outside the shape's box, how far in units on the farthest axis; empty inside it. */
+function eyeOutside(at: V3, bounds: Rendered['bounds']): string {
+  const min = bounds ? bounds.min : ([0, 0, 0] as V3)
+  const max = bounds ? bounds.max : ([0, 0, 0] as V3)
+  let far = 0
+  for (let k = 0; k < 3; k++) far = Math.max(far, min[k] - at[k], at[k] - max[k])
+  return far > 0 ? ` (outside the shape's box by ${fmt(far)} unit${fmt(far) === '1' ? '' : 's'}: it looks at the shape from outside, as an eye behind it does)` : ''
 }
 
 interface Buffers {

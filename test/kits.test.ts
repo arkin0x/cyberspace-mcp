@@ -26,7 +26,8 @@ import { installKit, listKits, removeKit } from '../src/kits/install.js'
 import { KitLibrary, kitsDirCandidates, searchKits } from '../src/kits/library.js'
 import { checkLayout } from '../src/kits/layout.js'
 import { kitPieceIn } from '../src/kits/tools.js'
-import { kitObject, turnY } from '../src/kits/transform.js'
+import { kitObject, turnModel, turnY } from '../src/kits/transform.js'
+import { toPayload } from 'sno-core/shards'
 import { createServer } from '../src/server.js'
 import { validateSnoPayload } from '../src/sno.js'
 
@@ -221,6 +222,29 @@ describe('kits: the library', () => {
     expect(turnY([1, 0, 0], 1)).toEqual([0, 0, -1])
     expect(() => kitObject(lib, B('decor/lamp'), { turn: 45 })).toThrow(/multiple of 90/)
     expect(() => kitObject(lib, B('decor/lamp'), { scale: -1 })).toThrow(/whole number, 0 or more/)
+  })
+
+  it('turns a chosen eye (DECK-0003 1.17) with the vertices, in the payload frame, and writes no eye for an AUTO one', () => {
+    // One vertex one unit along +X and an eye 30 ticks above it: after each quarter turn the eye is still above the vertex.
+    const v = validateSnoPayload({ v: 2, name: 'pointer', unit: 0, mode: 'points', vertices: [[1, 0, 0]], colors: [7], faces: [], eye: [120, 30, 0] })
+    if (!v.ok) throw new Error(v.errors.join(' '))
+    const expected: Record<number, { vertex: number[]; eye: number[] }> = {
+      1: { vertex: [0, 0, 1], eye: [0, 30, 120] },
+      2: { vertex: [-1, 0, 0], eye: [-120, 30, 0] },
+      3: { vertex: [0, 0, -1], eye: [0, 30, -120] },
+    }
+    for (const q of [1, 2, 3]) {
+      const out = toPayload(turnModel(v.shard, q)) as unknown as { vertices: number[][]; eye: number[] }
+      expect(out.vertices[0], `q ${q}`).toEqual(expected[q].vertex)
+      expect(out.eye, `q ${q}`).toEqual(expected[q].eye)
+      // Never a -0 (DECK-0003 1.17).
+      expect(JSON.stringify(out.eye)).not.toContain('-0')
+    }
+    expect(turnModel(v.shard, 0)).toBe(v.shard)
+    // AUTO: nothing to turn and nothing written; it follows the turned shape by itself.
+    const auto = validateSnoPayload({ v: 2, name: 'pointer', unit: 0, mode: 'points', vertices: [[1, 0, 0]], colors: [7], faces: [] })
+    if (!auto.ok) throw new Error(auto.errors.join(' '))
+    expect(toPayload(turnModel(auto.shard, 1))).not.toHaveProperty('eye')
   })
 
   it('knows a kit piece when an agent tries to publish one on its own, whatever it is called', () => {

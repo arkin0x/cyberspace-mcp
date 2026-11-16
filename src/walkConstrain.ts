@@ -22,6 +22,7 @@
 // placed by reference (its author's), never an avatar (section 3.3).
 
 import { fromPayload, readOpacity, type ShardModel } from 'sno-core/shards'
+import { EYE_FIELD, readEye } from 'sno-core/eye'
 
 /** What a shard asks of a walker. */
 export type Constrain = 'off' | 'all' | 'opaque'
@@ -131,7 +132,9 @@ export function walkWords(s: Pick<ShardModel, 'mode' | 'opacity' | 'extra'>): st
  * left out keeps the author's word, or writes the default when nobody chose
  * (a move, ONOSENDAI #476); `opacity` left out keeps a valid one, and 100 is
  * written as no field. The two go last, opacity first, where sno-core's
- * toPayload puts them. Null when the payload does not read as SNO.
+ * toPayload puts them. A malformed `eye` (DECK-0003 1.17) is left out, since a
+ * publisher never writes one; a well formed one stays as found. Null when the
+ * payload does not read as SNO.
  */
 export function rewritePayload(json: string, change: { constrain?: Constrain; opacity?: number } = {}): string | null {
   let raw: unknown
@@ -141,6 +144,6 @@ export function rewritePayload(json: string, change: { constrain?: Constrain; op
   const opacity = readOpacity(change.opacity !== undefined ? change.opacity : p.opacity)
   const constrain = change.constrain ?? authoredConstrain(p[CONSTRAIN_FIELD])
   // Built from entries, so a `__proto__` key in the payload stays data.
-  const kept = Object.entries(p).filter(([k]) => k !== 'opacity' && k !== CONSTRAIN_FIELD)
+  const kept = Object.entries(p).filter(([k, v]) => k !== 'opacity' && k !== CONSTRAIN_FIELD && !(k === EYE_FIELD && readEye(v) === undefined))
   return JSON.stringify(Object.fromEntries([...kept, ...(opacity !== undefined ? [['opacity', opacity]] : []), [CONSTRAIN_FIELD, constrain]]))
 }
