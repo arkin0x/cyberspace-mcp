@@ -32,8 +32,7 @@ import { ProofAborted, proveInThread, type ProofJob, type ProofResult } from './
 import { ChainKeeper } from './chain/keeper.js'
 import { askChainEvents, parsePubkey } from './chain/resolve.js'
 import { causeWords, decideSelfCheck } from './chain/selfCheck.js'
-import { AVATAR_KIND, MAX_AVATAR_BYTES, avatarPrice, avatarSeconds, avatarTemplate, nonceTagged, paidShard, verifyAvatarWork } from './avatar.js'
-import { avatarThreads, mineAvatar } from './avatarMine.js'
+import { AVATAR_CONTENT_WARN, AVATAR_KIND, avatarContentBytes, avatarTemplate, avatarTooLarge, avatarTooLargeWords, paidShard, verifyAvatar } from './avatar.js'
 import { Chat, type ChatLine } from './chat.js'
 import {
   CHAT_KIND, HIDDEN_KIND, MAX_ABOUT, MAX_ITEM_NAME, bagEntries, carriedTags, hintPlaneFor, namesNoPlane, planeOfEntry, sameHintBox, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
@@ -108,7 +107,7 @@ export interface AgentConfig {
   manifestUrl?: string
   /** The most work of one UTC day, counted across restarts in the state directory (D3). Default 1800 s. */
   capDailySeconds?: number
-  /** Worker threads for rides and avatars (--threads). Default min(2, cores - 1). */
+  /** Worker threads for rides (--threads). Default min(2, cores - 1). */
   threads?: number
   /** Tests: the daily cap's clock (unix ms), to cross a UTC midnight. */
   budgetClock?: () => number
@@ -142,8 +141,6 @@ export interface AgentConfig {
   travelLog?: TravelLogSettings
   /** Least minutes between two wakes for strangers' chat lines that address the agent, in total and per speaker (arkinox, 2026-10-11). */
   chatWakeMinutes?: number
-  /** Tests: threads an avatar is mined on. */
-  avatarThreads?: number
   /** The most public objects publish_object may publish in any 24 hours (default 20). */
   publishMaxPerDay?: number
   /** How often the server checks for new operator orders on its own, in ms (default 15 s; 0 turns the poll off, for tests). */
@@ -2550,15 +2547,14 @@ export class Agent {
     }
   }
 
-  // ---- set_avatar (avatar.ts, avatarMine.ts) -------------------------------
+  // ---- set_avatar (avatar.ts) ----------------------------------------------
 
-  /** The avatar being mined, so a second set_avatar waits its turn instead of mining twice. */
-  private avatarBusy = false
   /**
    * The created_at of the last avatar this server signed. A replaceable tie
-   * on created_at goes to the lower id (NIP-01), and a mined id starts with
-   * zeros, so a clear signed in the same second as a mined avatar would lose
-   * to it: each avatar is signed at least a second after the last.
+   * on created_at goes to the lower id (NIP-01), so a second avatar signed in
+   * the same second as the first could lose to it by chance: each avatar is
+   * signed in a later second than the last, waiting for the clock rather
+   * than dating it ahead, so a burst of calls never signs into the future.
    */
   private lastAvatarAt = 0
 
@@ -2567,15 +2563,14 @@ export class Agent {
    * does (arkinox, 2026-10-11: "tell XOR to set a shard as his avatar"): an
    * SNO payload, or a public kind 33331 object whose payload is copied in
    * (spec 8.10 has no reference form: the content is the payload), or
-   * clear for the dodecahedron. The work is priced against the caps first,
-   * then mined on threads of its own so every other tool keeps answering,
-   * stopped at the per-call cap, verified with cyberspace-core's own check
-   * before anything is signed, and charged to the session.
+   * clear for the dodecahedron. No work is owed (spec 8.10, ruled 2026-11):
+   * the content is at most AVATAR_CONTENT_MAX bytes, refused above it, and
+   * the signed event is checked with cyberspace-core's verifyAvatar before
+   * any relay sees it.
    */
-  async setAvatar(input: { object?: unknown; address?: string; clear?: boolean }, signal?: AbortSignal): Promise<ToolResult> {
+  async setAvatar(input: { object?: unknown; address?: string; clear?: boolean }): Promise<ToolResult> {
     const given = [input.object, input.address, input.clear ? true : undefined].filter((x) => x !== undefined).length
     if (given !== 1) throw new Refusal('Give exactly one of: object (an SNO payload), address (a public kind 33331 object), or clear: true (the default dodecahedron).')
-    if (this.avatarBusy) throw new Refusal('An avatar is being mined already; wait for that call to answer.')
     let shard: ShardModel | null = null
     let source = 'clear'
     if (input.object !== undefined) {
@@ -2585,7 +2580,8 @@ export class Agent {
       }
       const v = validateSnoPayload(raw)
       if (!v.ok) throw new Refusal(`Not set: the payload is not valid SNO. ${v.errors.join(' ')}`)
-      if (v.bytes > MAX_AVATAR_BYTES) throw new Refusal(`Not set: the payload is ${v.bytes} bytes, and an avatar is at most ${MAX_AVATAR_BYTES} (every try of the work hashes the whole event). Use fewer vertices.`)
+      // v.bytes is the content as it is signed: sno-core's toPayload, as avatarTemplate writes it.
+      if (avatarTooLarge(v.bytes)) throw new Refusal(`Not set: ${avatarTooLargeWords(v.bytes)}. Use fewer vertices and faces.`)
       const kitHit = kitPieceIn(this.kits, v.shard)
       if (kitHit) throw new Refusal(`Not set: ${kitHit} ${KIT_PUBLISH_REFUSAL}`)
       shard = v.shard
@@ -2597,54 +2593,33 @@ export class Agent {
       try { raw = JSON.parse(object.content || 'null') } catch { raw = null }
       const v = validateSnoPayload(raw)
       if (!v.ok) throw new Refusal(`The object at ${address} is not valid SNO: ${v.errors.join(' ')}`)
-      if (v.bytes > MAX_AVATAR_BYTES) throw new Refusal(`The object at ${address} is ${v.bytes} bytes; an avatar is at most ${MAX_AVATAR_BYTES}.`)
+      if (avatarTooLarge(v.bytes)) throw new Refusal(`Not set: the object at ${address} is too large for an avatar: ${avatarTooLargeWords(v.bytes)}.`)
       shard = v.shard
       source = `address ${address} (payload copied: an avatar carries its shape, not a reference)`
     }
-    const createdAt = Math.max(nowSeconds(), this.lastAvatarAt + 1)
-    let template: EventTemplate = avatarTemplate(shard, createdAt)
-    let mined: { bits: number; tries: number; seconds: number; estimate: number } | null = null
-    if (shard) {
-      const payload = JSON.parse(template.content)
-      const { bits, eventBytes } = avatarPrice(payload, template, this.pubkey)
-      const threads = this.config.avatarThreads ?? avatarThreads(this.config.threads)
-      const estimate = avatarSeconds(bits, eventBytes, this.calibration.sha256PerSec, threads)
-      const over = this.budget.refusal(estimate)
-      if (over) throw new Refusal(`This avatar owes ${bits} bits of work (spec 8.10: reach and detail), about ${estimate.toFixed(1)} s expected on ${threads} thread(s). ${over} A smaller shape (nearer the build origin, fewer vertices and faces) costs less.`)
-      const limit = Math.min(this.budget.capCallSeconds, this.budget.remainingSeconds())
-      this.avatarBusy = true
-      let outcome
-      try {
-        outcome = await mineAvatar({ ...template, pubkey: this.pubkey }, bits, { threads, deadlineMs: Math.max(1, limit) * 1000, signal })
-      } finally {
-        this.avatarBusy = false
-      }
-      const seconds = outcome.elapsedMs / 1000
-      this.budget.spendWork(seconds)
-      if (!outcome.found) {
-        throw new Refusal(outcome.why === 'aborted'
-          ? `Mining stopped by the caller after ${seconds.toFixed(1)} s and ${outcome.tries} tries; nothing was published.`
-          : `No nonce within the ${limit.toFixed(0)} s this call may spend (${outcome.tries} tries; ${bits} bits expects about ${(2 ** bits).toLocaleString('en-US')}, about ${estimate.toFixed(1)} s). The work is luck: call set_avatar again to try afresh. ${seconds.toFixed(1)} s were charged.`)
-      }
-      template = nonceTagged(template, outcome.nonce, bits)
-      mined = { bits, tries: outcome.tries, seconds, estimate }
-    }
+    // A later second than the last avatar signed here, by waiting (at most a second), never by dating it ahead.
+    while (nowSeconds() <= this.lastAvatarAt) await new Promise((r) => setTimeout(r, 100))
+    const template: EventTemplate = avatarTemplate(shard, nowSeconds())
+    const contentBytes = avatarContentBytes(template.content)
     const event = this.sign(template)
     // The reader's check before any relay sees it: what ONOSENDAI would not draw is never published.
     if (shard) {
-      const verdict = verifyAvatarWork(event)
+      const verdict = verifyAvatar(event)
       if (!verdict.ok || !paidShard(event)) throw new Refusal(`The signed avatar did not verify (${verdict.reason}); nothing was published. This is a bug in the server.`)
     }
     if (event.kind !== AVATAR_KIND) throw new Refusal('internal: not an avatar event')
     this.lastAvatarAt = event.created_at
     const entry = this.outbox.add(event)
     const result = await this.outbox.send(entry)
-    // The size the personal-space rule gives the agent's own avatar from now on (space/personalSpace.ts).
-    if (entry.accepted.length) this.avatars.set(this.pubkey, shard)
+    // The size the personal-space rule gives the agent's own avatar from now on (space/personalSpace.ts),
+    // unless a newer avatar was signed while this one was sent: the newest one is the one relays keep.
+    if (entry.accepted.length && event.created_at === this.lastAvatarAt) this.avatars.set(this.pubkey, shard)
     const relayWords = entry.accepted.length ? `Accepted by ${entry.accepted.join(', ')}.` : `No relay accepted it${result.ok ? '' : `: ${result.reason}`}.`
+    // Spec 8.10, non-normative: some remote signers (NIP-46) refuse an event this large. This server signs with its own key.
+    const warnWords = contentBytes > AVATAR_CONTENT_WARN ? ` Over ${AVATAR_CONTENT_WARN} bytes: a client that signs through a remote signer (NIP-46) may be refused one this large; this server signs with its own key.` : ''
     const refusedWords = entry.refused ? ` Refused by ${Object.entries(entry.refused).map(([u, r]) => `${u}: ${r}`).join('; ')}.` : ''
     if (!shard) {
-      return { text: `Avatar cleared: you are drawn as the dodecahedron again (kind 11333 ${event.id.slice(0, 8)}..., empty content, no work owed). ${relayWords}${refusedWords}`, data: { eventId: event.id, cleared: true, accepted: entry.accepted, refused: entry.refused ?? {} } }
+      return { text: `Avatar cleared: you are drawn as the dodecahedron again (kind 11333 ${event.id.slice(0, 8)}..., empty content). ${relayWords}${refusedWords}`, data: { eventId: event.id, cleared: true, accepted: entry.accepted, refused: entry.refused ?? {} } }
     }
     let r
     try {
@@ -2653,9 +2628,9 @@ export class Agent {
       throw new Refusal(`Published as ${event.id}, but the picture failed: ${err instanceof Error ? err.message : String(err)}`)
     }
     return {
-      text: `Avatar set: "${shard.name}" (${source}), kind 11333 ${event.id.slice(0, 8)}..., ${mined!.bits} bits of work in ${mined!.seconds.toFixed(1)} s (${mined!.tries} tries; about ${mined!.estimate.toFixed(1)} s was expected). ONOSENDAI draws it in place of your dodecahedron wherever you are seen. ${relayWords}${refusedWords} ${r.caption}`,
+      text: `Avatar set: "${shard.name}" (${source}), kind 11333 ${event.id.slice(0, 8)}..., ${contentBytes} bytes of payload. ONOSENDAI draws it in place of your dodecahedron wherever you are seen. ${relayWords}${refusedWords}${warnWords} ${r.caption}`,
       images: [{ data: r.png.toString('base64'), mimeType: 'image/png' }],
-      data: { eventId: event.id, name: shard.name, source, bits: mined!.bits, tries: mined!.tries, seconds: mined!.seconds, estimateSeconds: mined!.estimate, accepted: entry.accepted, refused: entry.refused ?? {}, vertices: r.vertices, faces: r.faces, pngBytes: r.png.length },
+      data: { eventId: event.id, name: shard.name, source, bytes: contentBytes, accepted: entry.accepted, refused: entry.refused ?? {}, vertices: r.vertices, faces: r.faces, pngBytes: r.png.length },
     }
   }
 

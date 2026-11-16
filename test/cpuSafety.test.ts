@@ -12,7 +12,6 @@ import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { generateSecretKey } from 'nostr-tools/pure'
 import { Agent } from '../src/agent.js'
-import { avatarThreads } from '../src/avatarMine.js'
 import { Budget, DAILY_BUDGET_FILE, defaultThreads, type DailyRecord, type DailyStore } from '../src/budget.js'
 import { parseArgs, settingsFrom } from '../src/config.js'
 import { bytesToHex } from '../src/nostr/event.js'
@@ -36,8 +35,6 @@ describe('the defaults', () => {
     expect(s.capDailySeconds).toBe(1800)
     expect(s.threads).toBe(defaultThreads())
     expect([1, 2, 3, 4, 8, 64].map((c) => defaultThreads(c))).toEqual([1, 1, 2, 2, 2, 2])
-    expect(avatarThreads()).toBe(defaultThreads())
-    expect(avatarThreads(5)).toBe(5)
   })
 
   it('the flags and config.json still raise them, and --threads sets the threads', () => {
