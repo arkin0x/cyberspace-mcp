@@ -22,7 +22,8 @@
 // placed by reference (its author's), never an avatar (section 3.3).
 import { fromPayload, readOpacity } from 'sno-core/shards';
 import { EYE_FIELD, readEye } from 'sno-core/eye';
-import { DEFAULT_FACE, FACE_FIELD, readFace } from 'sno-core/face';
+import { DEFAULT_FACE, FACE_FIELD } from 'sno-core/face';
+import { faceNameShaped } from './faceName.js';
 /** What a shard whose author has not chosen is written as (DECK-0003 1.12). */
 export const CONSTRAIN_DEFAULT = 'opaque';
 /** The three settings. */
@@ -118,9 +119,10 @@ export function walkWords(s) {
  * written as no field. The two go last, opacity first, where sno-core's
  * toPayload puts them. A malformed `eye` (DECK-0003 1.17) is left out, since a
  * publisher never writes one; a well formed one stays as found. So is a
- * `face` (DECK-0003 1.18) that is not "upright": "path" is the default a
- * publisher leaves out, and anything else is malformed. Null when the
- * payload does not read as SNO.
+ * `face` (DECK-0003 1.18) of "path", the default a publisher leaves out, or
+ * of a shape no mode's name has ("Upright", "", a number); "upright", and a
+ * name of the right shape this version does not know, stay as found, so a
+ * later mode survives the edit. Null when the payload does not read as SNO.
  */
 export function rewritePayload(json, change = {}) {
     let raw;
@@ -136,7 +138,7 @@ export function rewritePayload(json, change = {}) {
     const opacity = readOpacity(change.opacity !== undefined ? change.opacity : p.opacity);
     const constrain = change.constrain ?? authoredConstrain(p[CONSTRAIN_FIELD]);
     // Built from entries, so a `__proto__` key in the payload stays data.
-    const kept = Object.entries(p).filter(([k, v]) => k !== 'opacity' && k !== CONSTRAIN_FIELD && !(k === EYE_FIELD && readEye(v) === undefined) && !(k === FACE_FIELD && (readFace(v) ?? DEFAULT_FACE) === DEFAULT_FACE));
+    const kept = Object.entries(p).filter(([k, v]) => k !== 'opacity' && k !== CONSTRAIN_FIELD && !(k === EYE_FIELD && readEye(v) === undefined) && !(k === FACE_FIELD && (v === DEFAULT_FACE || !faceNameShaped(v))));
     return JSON.stringify(Object.fromEntries([...kept, ...(opacity !== undefined ? [['opacity', opacity]] : []), [CONSTRAIN_FIELD, constrain]]));
 }
 //# sourceMappingURL=walkConstrain.js.map

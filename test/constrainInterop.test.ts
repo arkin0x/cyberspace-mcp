@@ -87,10 +87,13 @@ describe('the eye (DECK-0003 1.17) through place, hide and publish_object', () =
 })
 
 describe('the facing (DECK-0003 1.18) through an EDIT', () => {
-  it('keeps "upright" as found, and leaves out "path" (the default) and a malformed one', () => {
+  it('keeps "upright" and a name of the right shape this version does not know as found, and leaves out "path" (the default) and a malformed one', () => {
     const base = JSON.parse(fx.edited.before) as Record<string, unknown>
     expect(JSON.parse(rewritePayload(JSON.stringify({ ...base, face: 'upright' }), { constrain: 'all' })!).face).toBe('upright')
-    for (const face of ['path', 'Upright', null, 1]) {
+    // A mode a later revision may add survives an older editor (DECK-0003 1.18).
+    expect(JSON.parse(rewritePayload(JSON.stringify({ ...base, face: 'lean' }), { constrain: 'all' })!).face).toBe('lean')
+    expect(JSON.parse(rewritePayload(JSON.stringify({ ...base, face: 'a'.repeat(32) }), { constrain: 'all' })!).face).toBe('a'.repeat(32))
+    for (const face of ['path', 'Upright', '', '9up', 'a'.repeat(33), 'up_right', null, 1]) {
       expect(JSON.parse(rewritePayload(JSON.stringify({ ...base, face }), { constrain: 'all' })!)).not.toHaveProperty('face')
     }
   })

@@ -519,6 +519,12 @@ describe('set_avatar and the facing', () => {
     expect(object.face).toBe('upright')
     await a.setAvatar({ object: wedge2, face: 'upright' })
     expect(lastContent(a).face).toBe('upright')
+    // The input replaces even a payload face that would be refused on its own.
+    for (const face of ['Upright', 'lean', 7]) {
+      const r2 = await a.setAvatar({ object: { ...wedge2, face }, face: 'upright' })
+      expect(r2.data.face).toBe('upright')
+      expect(lastContent(a).face).toBe('upright')
+    }
   }, 30_000)
 
   it('refuses a malformed face, as the input or in the payload, with nothing signed or published', async () => {
@@ -526,7 +532,7 @@ describe('set_avatar and the facing', () => {
     const sign = vi.spyOn(a as unknown as { sign: (t: unknown) => unknown }, 'sign')
     const before = sent()
     const pending = a.outbox.state().pending.length
-    for (const face of ['Upright', 'PATH', 'up', '', 'upright ', 1, true, ['upright'], { mode: 'upright' }, null]) {
+    for (const face of ['Upright', 'PATH', 'up', 'lean', '', 'upright ', 1, true, ['upright'], { mode: 'upright' }, null]) {
       await expect(a.setAvatar({ object: wedge2, face })).rejects.toThrow(/Not set: face must be "path" or "upright", in lower case \(DECK-0003 1\.18\); got .*Leave it out for "path"\. Nothing was signed or published\./)
       if (face === null) continue
       await expect(a.setAvatar({ object: { ...wedge2, face } })).rejects.toThrow(/Not set: "face" in the payload must be "path" or "upright", in lower case \(DECK-0003 1\.18\); got .*Leave face out \(or null\) for "path"\. Nothing was signed or published\./)
@@ -538,14 +544,22 @@ describe('set_avatar and the facing', () => {
     expect(a.outbox.state().pending).toHaveLength(pending)
   }, 30_000)
 
-  it('copied by address: an "upright" face is kept, a malformed one is left out (path), and face replaces either', async () => {
+  it('copied by address: an "upright" face is kept, a name this version does not know is carried (read as path), a malformed one is left out (path), and face replaces any', async () => {
     const a = await start()
     const author = generateSecretKey()
     const at = Math.floor(Date.now() / 1000)
     const upright = signEvent({ kind: 33331, created_at: at, tags: [['d', 'wedge-up']], content: JSON.stringify({ ...wedge2, face: 'upright' }) }, author)
     const bad = signEvent({ kind: 33331, created_at: at, tags: [['d', 'wedge-bad']], content: JSON.stringify({ ...wedge2, face: 'Upright' }) }, author)
+    const lean = signEvent({ kind: 33331, created_at: at, tags: [['d', 'wedge-lean']], content: JSON.stringify({ ...wedge2, face: 'lean' }) }, author)
     canonical.seed(upright)
     canonical.seed(bad)
+    canonical.seed(lean)
+    const carried = await a.setAvatar({ address: `33331:${lean.pubkey}:wedge-lean` })
+    expect(String(carried.data.source)).toContain('its face "lean" is a facing this version does not know, carried as found and read as path')
+    expect(String(carried.data.source)).not.toContain('malformed face')
+    expect(carried.data.face).toBe('path')
+    expect(carried.text).toContain('facing path')
+    expect(lastContent(a).face).toBe('lean')
     const kept = await a.setAvatar({ address: `33331:${upright.pubkey}:wedge-up` })
     expect(kept.data.face).toBe('upright')
     expect(lastContent(a).face).toBe('upright')
@@ -569,6 +583,11 @@ describe('set_avatar and the facing', () => {
     expect(bad.data.repaired).toEqual(['face'])
     expect(bad.data.face).toBe('path')
     expect(bad.text).toContain('"face" was not "path" or "upright", so it is left out: worn as an avatar, it faces along its path (DECK-0003 1.18).')
+    const lean = a.validateObject({ payload: { ...wedge2, face: 'lean' } })
+    expect(lean.data.repaired).toEqual([])
+    expect(lean.data.face).toBe('path')
+    expect(lean.data.unknownFace).toBe('lean')
+    expect(lean.text).toContain('"face" "lean" is a facing this version does not know: it is carried as found, since a later revision may define it, and read as "path" (DECK-0003 1.18).')
     const path = a.validateObject({ payload: { ...wedge2, face: 'path' } })
     expect(path.text).not.toMatch(/facing|"face"/i)
     expect(path.data.face).toBe('path')
