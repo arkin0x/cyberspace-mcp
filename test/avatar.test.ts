@@ -7,7 +7,7 @@
 // rules are ONOSENDAI's paidShard, ported in avatar.ts over cyberspace-core's
 // verifyAvatar. Fake relays only.
 
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it, vi } from 'vitest'
@@ -15,10 +15,11 @@ import { nip19 } from 'nostr-tools'
 import { generateSecretKey } from 'nostr-tools/pure'
 import { Agent } from '../src/agent.js'
 import { toPayload } from 'sno-core/shards'
-import { AVATAR_CONTENT_MAX, AVATAR_CONTENT_WARN, AVATAR_KIND, avatarFromEvent, avatarTemplate, paidShard, verifyAvatar } from '../src/avatar.js'
+import { AVATAR_CONTENT_MAX, AVATAR_CONTENT_WARN, AVATAR_KIND, DEFAULT_AVATAR_PER_DAY, avatarFromEvent, avatarTemplate, paidShard, verifyAvatar } from '../src/avatar.js'
 import { signEvent, type NostrEvent } from '../src/nostr/event.js'
 import { validateSnoPayload } from '../src/sno.js'
 import type { Calibration } from '../src/space/calibration.js'
+import { parseArgs, settingsFrom } from '../src/config.js'
 import { FakeNetwork } from './fakeRelay.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -30,8 +31,10 @@ const fixture = JSON.parse(readFileSync(new URL('./fixtures/onosendai.json', imp
 
 const CANONICAL = 'wss://canonical.example'
 const cal: Calibration = { version: 1, at: Date.now(), fingerprint: 'test', cantorMsByHeight: { 12: 10, 14: 60, 16: 400 }, sha256PerSec: 2_000_000 }
+const REFUSING = 'wss://refusing.example'
 const network = new FakeNetwork()
 const canonical = network.add(CANONICAL)
+network.add(REFUSING, { refuse: (ev) => (ev.kind === AVATAR_KIND ? 'rate-limited: slow down' : null) })
 const agents: Agent[] = []
 afterAll(async () => { for (const a of agents) await a.stop() })
 
@@ -206,6 +209,75 @@ describe('set_avatar', () => {
     expect(verifyAvatar(ev).ok).toBe(true)
     expect(paidShard(ev)?.vertices).toHaveLength(3000)
   }, 60_000)
+
+  it('stops at the daily limit, clearing included; the refusal says when the next may go, and the count survives a restart', async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), 'cyberspace-mcp-avatar-cap-'))
+    const a = await start({ stateDir, avatarMaxPerDay: 2 })
+    const first = await a.setAvatar({ object: wedge })
+    expect(first.data).toMatchObject({ leftToday: 1, maxPerDay: 2 })
+    expect(first.text).toContain('1 more avatar change in the next 24 hours')
+    const second = await a.setAvatar({ clear: true })
+    expect(second.data).toMatchObject({ leftToday: 0, maxPerDay: 2 })
+    const before = avatarsOf(a.pubkey).length
+    const at = Math.floor(Date.now() / 1000)
+    const refusal = await a.setAvatar({ object: wedge }).then(() => '', (e: Error) => e.message)
+    expect(refusal).toMatch(/^You have set your avatar 2 times in the last 24 hours, the most your human allows \(2 a day, avatarMaxPerDay\)\. The next one can go after (\S+), in about 2[34]\.\d h\. Nothing was published\.$/)
+    // The next may go 24 hours after the oldest of the two: within a few seconds of now plus a day.
+    const next = Date.parse(refusal.match(/after (\S+),/)![1]) / 1000
+    expect(next).toBeGreaterThanOrEqual(at - 5 + 86_400)
+    expect(next).toBeLessThanOrEqual(at + 5 + 86_400)
+    expect(avatarsOf(a.pubkey)).toHaveLength(before)
+    await a.stop()
+    const b = await start({ stateDir, avatarMaxPerDay: 2 })
+    await expect(b.setAvatar({ clear: true })).rejects.toThrow(/Nothing was published/)
+    expect(avatarsOf(a.pubkey)).toHaveLength(before)
+    await b.stop()
+    // The human raises it: the same state directory, a higher limit, and the next goes.
+    const c = await start({ stateDir, avatarMaxPerDay: 3 })
+    const third = await c.setAvatar({ object: wedge })
+    expect(third.data).toMatchObject({ leftToday: 0, maxPerDay: 3 })
+  }, 60_000)
+
+  it('counts only the last 24 hours: avatars set more than a day ago do not count', async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), 'cyberspace-mcp-avatar-old-'))
+    const now = Math.floor(Date.now() / 1000)
+    writeFileSync(join(stateDir, 'avatars-set.json'), JSON.stringify({ posts: [now - 86_400 - 60, now - 86_400 - 30, now - 3600] }))
+    const a = await start({ stateDir, avatarMaxPerDay: 2 })
+    const r = await a.setAvatar({ object: wedge })
+    expect(r.data).toMatchObject({ leftToday: 0, maxPerDay: 2 })
+    await expect(a.setAvatar({ clear: true })).rejects.toThrow(/2 times in the last 24 hours/)
+  }, 30_000)
+
+  it('a burst cannot slip past the limit: calls in flight count', async () => {
+    const a = await start({ avatarMaxPerDay: 2 })
+    const results = await Promise.allSettled([a.setAvatar({ object: wedge }), a.setAvatar({ object: { ...wedge, name: 'Second' } }), a.setAvatar({ clear: true })])
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(2)
+    const refused = results.find((r) => r.status === 'rejected') as PromiseRejectedResult
+    expect(String(refused.reason.message)).toMatch(/Nothing was published/)
+    expect(avatarsOf(a.pubkey)).toHaveLength(2)
+  }, 30_000)
+
+  it('an avatar no relay accepts does not count against the day', async () => {
+    const a = await start({ relays: [REFUSING], avatarMaxPerDay: 1 })
+    const r = await a.setAvatar({ object: wedge })
+    expect(r.data.accepted).toEqual([])
+    expect(r.text).toContain('rate-limited: slow down')
+    expect(r.data.leftToday).toBeNull()
+    const again = await a.setAvatar({ clear: true })
+    expect(again.data.accepted).toEqual([])
+  }, 30_000)
+
+  it('defaults to 12 a day, and the human sets another with --avatar-max-per-day or avatarMaxPerDay in config.json', async () => {
+    expect(DEFAULT_AVATAR_PER_DAY).toBe(12)
+    expect(settingsFrom(parseArgs(['--state', '/tmp/x']), {}).avatarMaxPerDay).toBe(12)
+    expect(settingsFrom(parseArgs(['--state', '/tmp/x']), { avatarMaxPerDay: 4 }).avatarMaxPerDay).toBe(4)
+    expect(settingsFrom(parseArgs(['--state', '/tmp/x', '--avatar-max-per-day', '30']), { avatarMaxPerDay: 4 }).avatarMaxPerDay).toBe(30)
+    expect(settingsFrom(parseArgs(['--state', '/tmp/x']), { avatarMaxPerDay: 'many' }).avatarMaxPerDay).toBe(12)
+    expect(settingsFrom(parseArgs(['--state', '/tmp/x']), { avatarMaxPerDay: 2.7 }).avatarMaxPerDay).toBe(2)
+    const a = await start()
+    const r = await a.setAvatar({ object: wedge })
+    expect(r.data).toMatchObject({ leftToday: 11, maxPerDay: 12 })
+  }, 30_000)
 })
 
 // The avatar's eye (DECK-0003 1.17, ruled 2026-11-16): where its own

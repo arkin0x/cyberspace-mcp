@@ -24,6 +24,14 @@ import { CLIENT_NAME, type EventTemplate } from './nostr/event.js'
 
 export { AVATAR_CONTENT_MAX, AVATAR_CONTENT_WARN, AVATAR_KIND, avatarContentBytes, verifyAvatar }
 
+/**
+ * The most avatars set_avatar may publish in any 24 hours, unless the human
+ * sets another (avatarMaxPerDay). Mining used to be what slowed a loop down;
+ * with no work owed, this does. Below the canonical relay's own limit (12
+ * kind 11333 an hour per key, a burst of 6) and generous for honest use.
+ */
+export const DEFAULT_AVATAR_PER_DAY = 12
+
 /** The event to sign: this shard as the avatar, or none for the dodecahedron. ONOSENDAI's avatarTemplate. */
 export function avatarTemplate(shard: ShardModel | null, createdAt: number): EventTemplate {
   return {
