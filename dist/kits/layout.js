@@ -86,7 +86,13 @@ export function resolvePlacements(lib, input) {
         if (p.height !== undefined && (!Number.isInteger(p.height) || p.height < 0 || p.height > 16))
             throw new KitError(`placement ${i}: height must be a whole number from 0 to 16.`);
         const label = p.label ? `${p.label} (${shortId(entry)})` : shortId(entry);
-        return { i, entry, at, q, s, k, label, open, height: p.height, lo, hi };
+        if (p.room_height !== undefined) {
+            if (entry.kind !== 'door')
+                throw new KitError(`placement ${i}: room_height goes on a closed door (a piece of kind door), which seal_door seals as a locked door.`);
+            if (!Number.isInteger(p.room_height) || p.room_height < 1 || p.room_height > 16)
+                throw new KitError(`placement ${i}: room_height must be a whole number from 1 to 16.`);
+        }
+        return { i, entry, at, q, s, k, label, open, height: p.height, lo, hi, ...(p.room_height !== undefined ? { roomHeight: p.room_height } : {}) };
     });
 }
 const shortId = (e) => e.id.split('/').pop();
@@ -328,6 +334,15 @@ function checkRooms(lib, kitPieces, rules, err, warn) {
             }
             o.door = p;
             const back = openings.get(`${key(add(o.cell, NORMAL[o.face]))}|${OPP[o.face]}`);
+            // A locked door locks the room on one side of its doorway: one of the two tiles must be hidden at its room height, and not both.
+            if (p.roomHeight !== undefined) {
+                const sides = [o.p, ...(back ? [back.p] : [])];
+                const locked = sides.filter((t) => t.height === p.roomHeight);
+                if (!locked.length)
+                    err('door-locks-nothing', [p, ...sides], `${where(p)} is a locked door of room height ${p.roomHeight}, but no tile beside it is hidden at height ${p.roomHeight}, so its room holds nothing behind it.`, `give the tile it locks (and that tile's plugs and contents) height ${p.roomHeight}`);
+                else if (locked.length === sides.length && sides.length > 1)
+                    warn('door-locks-both', [p, ...sides], `${where(p)} has the tiles on both sides of it at its room height ${p.roomHeight}: both are locked, so the door opens from nowhere.`, 'hide the outer room at another height');
+            }
             if (back)
                 back.door = p;
         }
@@ -681,6 +696,16 @@ function checkBags(placed, input, err, warn) {
     }
     const height = input.height;
     const bag = { box: { min: lo.map(r1), max: hi.map(r1) }, fitsOneBagAt: need >= 0 ? need : null };
+    // Locked doors: each one's room holds the placements at its room height; they must stand in the same aligned cube as the door.
+    const doors = placed.filter((p) => p.roomHeight !== undefined);
+    const rooms = (d) => placed.filter((p) => p !== d && p.height === d.roomHeight);
+    for (const d of doors) {
+        if (!rooms(d).length)
+            warn('room-empty', [d], `${where(d)} locks a room of height ${d.roomHeight}, but nothing in the layout is hidden at height ${d.roomHeight}.`, `give the vault's pieces height ${d.roomHeight}`);
+        const doorBag = d.height ?? height;
+        if (doorBag !== undefined && doorBag < d.roomHeight)
+            err('door-height', [d], `${where(d)} has room height ${d.roomHeight}, higher than the bag that holds it (${doorBag}); a door may not lock more than its bag's region (DECK-0004 3.7.1).`, `hide the door at height ${d.roomHeight} or more`);
+    }
     // Inline bytes per bag: pieces at or under 16,384 bytes travel inside the bag, larger ones by reference.
     const inline = placed.filter((p) => p.entry.bytes <= 16_384).reduce((n, p) => n + p.entry.bytes, 0);
     const estimate = Math.round(inline * 1.4 + placed.length * 450 + 600);
@@ -707,11 +732,12 @@ function checkBags(placed, input, err, warn) {
             for (let a = 0; a < 3; a++) {
                 let found = null;
                 for (let off = 0; off < big && !found; off++) {
+                    const cubeOf = (o, at, hgt) => Math.floor((o + at) / 2 ** hgt);
                     const ok = (o) => placed.every((p) => {
                         const hs = 2 ** (p.height ?? h);
                         const rel = (((o + p.at[a]) % hs) + hs) % hs;
                         return rel + (p.lo[a] - p.at[a]) >= -1e-9 && rel + (p.hi[a] - p.at[a]) <= hs + 1e-9;
-                    });
+                    }) && doors.every((d) => rooms(d).every((p) => cubeOf(o, p.at[a], d.roomHeight) === cubeOf(o, d.at[a], d.roomHeight)));
                     if (ok(off)) {
                         let end = off;
                         while (end + 1 < big && ok(end + 1))
@@ -752,6 +778,13 @@ function checkBags(placed, input, err, warn) {
     if (height === undefined)
         while (auto < 16 && placed.some((p) => p.height === undefined && fits(p, auto).length))
             auto++;
+    for (const d of doors) {
+        const rh = BigInt(d.roomHeight);
+        const cube = (p) => [o.x + BigInt(p.at[0]), o.y + BigInt(p.at[1]), o.z + BigInt(p.at[2])].map((v) => v >> rh).join(',');
+        for (const p of rooms(d))
+            if (cube(p) !== cube(d))
+                warn('outside-room', [p, d], `${where(p)} is hidden at the room height ${d.roomHeight} of ${where(d)} but stands outside its room, so it goes into an ordinary bag and is not locked.`, 'move it into the room, or check_layout without origin for where the origin may sit');
+    }
     const cubes = new Map();
     const clipped = [];
     for (const p of placed) {

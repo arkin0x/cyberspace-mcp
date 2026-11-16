@@ -44,7 +44,7 @@ interface Brief {
   id: string
   title: string
   brief: string
-  solution: { placements: Array<{ piece: string; at: [number, number, number]; turn?: number; label?: string; open?: string[] }> }
+  solution: { placements: Array<{ piece: string; at: [number, number, number]; turn?: number; label?: string; open?: string[]; height?: number; room_height?: number }> }
   assert: {
     ok?: boolean
     atLeast?: Record<string, number>
@@ -60,15 +60,15 @@ const briefs: Brief[] = briefDirs().flatMap((d) => readdirSync(d).filter((f) => 
 
 type Result = { content: Array<{ type: string; text?: string; data?: string }>; structuredContent?: Record<string, unknown>; isError?: boolean }
 
-async function connect(lib: KitLibrary, stand: Place, hidden: Array<{ object: unknown; coordinate: CoordinateInput; height: number }>) {
+async function connect(lib: KitLibrary, stand: Place, hidden: Array<{ object?: unknown; door?: Record<string, unknown>; coordinate: CoordinateInput; height: number }>) {
   // The agent as far as the kit tools reach: the kits, where it stands, and a hide that records instead of publishing.
   const stub = Object.create(Agent.prototype) as Agent & Record<string, unknown>
   Object.assign(stub, {
     kits: lib,
     keeper: { place: () => stand },
     target: (c: CoordinateInput, from: Place) => parseCoordinate(c, from),
-    hide: async (input: { contents: { object: unknown }; coordinate: CoordinateInput; height: number }) => {
-      hidden.push({ object: input.contents.object, coordinate: input.coordinate, height: input.height })
+    hide: async (input: { contents: { object?: unknown; door?: Record<string, unknown> }; coordinate: CoordinateInput; height: number }) => {
+      hidden.push({ object: input.contents.object, door: input.contents.door, coordinate: input.coordinate, height: input.height })
       return { text: 'recorded (dry run: nothing published).', data: { dryRun: true } }
     },
   })
@@ -162,7 +162,7 @@ describe.skipIf(!DIR)('kit build briefs, dry run against the installed kits', ()
   for (const brief of briefs) {
     it(`${brief.id}: ${brief.title}`, async () => {
       const lib = new KitLibrary([DIR!])
-      const hidden: Array<{ object: unknown; coordinate: CoordinateInput; height: number }> = []
+      const hidden: Array<{ object?: unknown; door?: Record<string, unknown>; coordinate: CoordinateInput; height: number }> = []
       // First where it would stand: anywhere; check_layout says where the origin must sit for one bag.
       let tools = await connect(lib, placeOf({ x: 1n << 40n, y: 1n << 40n, z: 1n << 40n }, 1), hidden)
       const placements = brief.solution.placements
@@ -203,12 +203,22 @@ describe.skipIf(!DIR)('kit build briefs, dry run against the installed kits', ()
         pictures.push(file)
       }
       // Place every piece the way an agent would: kit, turn, the offset from where it stands, the layout's height.
-      for (const p of placements) {
-        const r = await tools.call('place', { kit: p.piece, turn: p.turn ?? 0, coordinate: { dx: p.at[0], dy: p.at[1], dz: p.at[2] }, height: h })
+      // A locked door is sealed with seal_door (its looks the closed and open door of its kit), before the room's pieces.
+      const ordered = [...placements].sort((a, b) => Number(b.room_height !== undefined) - Number(a.room_height !== undefined))
+      for (const p of ordered) {
+        const coordinate = { dx: p.at[0], dy: p.at[1], dz: p.at[2] }
+        if (p.room_height !== undefined) {
+          const open = lib.byRole(`door-open:${lib.get(p.piece).closes}`, lib.get(p.piece).kit)
+          const r = await tools.call('seal_door', { name: p.label ?? 'door', lock: 'the key', room_height: p.room_height, height: p.height ?? h, coordinate, look: { kit: p.piece, turn: p.turn ?? 0 }, ...(open ? { open_look: { kit: open.id, turn: p.turn ?? 0 } } : {}) })
+          expect(r.isError, `${p.piece}: ${textOf(r)}`).toBeFalsy()
+          continue
+        }
+        const r = await tools.call('place', { kit: p.piece, turn: p.turn ?? 0, coordinate, height: p.height ?? h })
         expect(r.isError, `${p.piece}: ${textOf(r)}`).toBeFalsy()
       }
       expect(hidden).toHaveLength(placements.length)
       for (const x of hidden) {
+        if (x.door) { expect(x.door.room_height).toBeGreaterThan(0); continue }
         const v = validateSnoPayload(x.object)
         expect(v.ok).toBe(true)
         expect((x.object as { name: string }).name).not.toMatch(/kit\s*:/i)

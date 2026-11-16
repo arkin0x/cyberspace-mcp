@@ -1,0 +1,58 @@
+{
+ "note": "What ONOSENDAI's own reader read from test/fixtures/xor-door.json (scripts/check-door-in-onosendai.ts).",
+ "onosendai": "4db7253e",
+ "fixtureSha256": "813c71081c8e73bed920c7c19e91eb9aad83479214d4a02ffae806b58aebcec0",
+ "ok": true,
+ "checks": [
+  {
+   "check": "ONOSENDAI finds a door in the outer bag",
+   "ok": true
+  },
+  {
+   "check": "its door height",
+   "ok": true,
+   "detail": "4"
+  },
+  {
+   "check": "ONOSENDAI keeps it (doorRefusal is null)",
+   "ok": true
+  },
+  {
+   "check": "its closed look",
+   "ok": true,
+   "detail": "slab"
+  },
+  {
+   "check": "its open look",
+   "ok": true,
+   "detail": "slab open"
+  },
+  {
+   "check": "its title",
+   "ok": true,
+   "detail": "Vault door"
+  },
+  {
+   "check": "the key item opens it and gives a door secret",
+   "ok": true
+  },
+  {
+   "check": "the room bag is there, by its d and the door's author",
+   "ok": true
+  },
+  {
+   "check": "the room bag opens with the room key and holds what was hidden there",
+   "ok": true,
+   "detail": "[\"statue\"]"
+  }
+ ],
+ "read": {
+  "doorHeight": 4,
+  "closedLook": "slab",
+  "openLook": "slab open",
+  "roomLookupId": "a8a5fe0abb59fd5b6976274cc7d90cb6bc856ffc76867215df7bba61acce8f85",
+  "roomEntries": [
+   "statue"
+  ]
+ }
+}
