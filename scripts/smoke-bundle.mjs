@@ -10,7 +10,7 @@
 //   - `node dist/bin.js --help` exits 0;
 //   - the stdio server answers an MCP initialize and lists its tools;
 //   - two worker_threads entries load with every import they need
-//     (chain/proofWorker.js exits cleanly with no work; rideWorker.js starts and waits).
+//     (avatarMine.js exits cleanly with no work; rideWorker.js starts and waits).
 // Exit 0 when all hold, 1 otherwise. Nothing is removed afterwards.
 
 import { execFileSync, spawn } from 'node:child_process'
@@ -103,13 +103,13 @@ function runWorker(file, options, settle) {
     settle(w, res, rej)
   })
 }
-await runWorker(join('chain', 'proofWorker.js'), {}, (w, res, rej) => {
-  w.on('exit', (code) => (code === 0 ? res() : rej(new Error(`chain/proofWorker.js exited ${code}`))))
+await runWorker('avatarMine.js', {}, (w, res, rej) => {
+  w.on('exit', (code) => (code === 0 ? res() : rej(new Error(`avatarMine.js exited ${code}`))))
 }).catch((e) => fail(`worker: ${e.message}`))
 await runWorker(join('hyperspace', 'rideWorker.js'), { workerData: { stop: new SharedArrayBuffer(4) } }, (w, res, rej) => {
   w.on('exit', (code) => rej(new Error(`rideWorker.js exited ${code} on its own`)))
   w.on('online', () => setTimeout(() => { w.removeAllListeners('exit'); w.terminate().then(res) }, 1500))
 }).catch((e) => fail(`worker: ${e.message}`))
-ok('worker entries load (chain/proofWorker.js, hyperspace/rideWorker.js)')
+ok('worker entries load (avatarMine.js, hyperspace/rideWorker.js)')
 
 console.error(`smoke-bundle: all checks passed for ${basename(tarball)} (${dirname(root)})`)

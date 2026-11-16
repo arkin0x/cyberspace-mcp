@@ -32,7 +32,8 @@ import { ProofAborted, proveInThread, type ProofJob, type ProofResult } from './
 import { ChainKeeper } from './chain/keeper.js'
 import { askChainEvents, parsePubkey } from './chain/resolve.js'
 import { causeWords, decideSelfCheck } from './chain/selfCheck.js'
-import { AVATAR_CONTENT_WARN, AVATAR_KIND, avatarContentBytes, avatarTemplate, avatarTooLarge, avatarTooLargeWords, paidShard, verifyAvatar } from './avatar.js'
+import { AVATAR_KIND, MAX_AVATAR_BYTES, avatarPrice, avatarSeconds, avatarTemplate, nonceTagged, paidShard, verifyAvatarWork } from './avatar.js'
+import { avatarThreads, mineAvatar } from './avatarMine.js'
 import { Chat, type ChatLine } from './chat.js'
 import {
   CHAT_KIND, HIDDEN_KIND, MAX_ABOUT, MAX_ITEM_NAME, bagEntries, carriedTags, hintPlaneFor, namesNoPlane, planeOfEntry, sameHintBox, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
@@ -57,6 +58,10 @@ import { ROAM_MAX_MINUTES, ROAM_MIN_MINUTES, Roam, roamCandidates, searchRoam } 
 import { profileTemplate, type ProfileFields, MAX_PICTURE_URL, pictureUrl, publishedFields } from './profile.js'
 import { objectHandle, renderShard, type NamedView } from './render.js'
 import { validateSnoPayload } from './sno.js'
+import { KitLibrary, kitsDirCandidates, type KitQuery } from './kits/library.js'
+import type { PlacementInput } from './kits/layout.js'
+import { KIT_PUBLISH_REFUSAL, checkLayoutTool, clipWords, kitCall, kitPieceIn, kitPieceTool, kitShard, kitTool, renderLayout } from './kits/tools.js'
+import { kitObject } from './kits/transform.js'
 import { chosenConstrainOf, walkWords, withAuthoredConstrain } from './walkConstrain.js'
 import { DEFAULT_PUBLISH_PER_DAY, MAX_ALT_LENGTH, MAX_NAME_LENGTH, dProblem, newObjectId, objectPointers, publicObjectTemplate } from './publicObject.js'
 import { hopCeiling, loadOrMeasure, projectCantorMs, type Calibration } from './space/calibration.js'
@@ -78,6 +83,8 @@ export { Refusal, type ToolResult } from './tool.js'
 
 export interface AgentConfig {
   stateDir: string
+  /** Where the kits are (kitsDir in config.json, --kits-dir); default the first of <state>/kits and <state>/../kits that holds one (kits/library.ts). */
+  kitsDir?: string
   /** The relays, the canonical one first. */
   relays: string[]
   /** The operator's pubkey, npub or hex. */
@@ -99,7 +106,7 @@ export interface AgentConfig {
   manifestUrl?: string
   /** The most work of one UTC day, counted across restarts in the state directory (D3). Default 1800 s. */
   capDailySeconds?: number
-  /** Worker threads for rides (--threads). Default min(2, cores - 1). */
+  /** Worker threads for rides and avatars (--threads). Default min(2, cores - 1). */
   threads?: number
   /** Tests: the daily cap's clock (unix ms), to cross a UTC midnight. */
   budgetClock?: () => number
@@ -133,6 +140,8 @@ export interface AgentConfig {
   travelLog?: TravelLogSettings
   /** Least minutes between two wakes for strangers' chat lines that address the agent, in total and per speaker (arkinox, 2026-10-11). */
   chatWakeMinutes?: number
+  /** Tests: threads an avatar is mined on. */
+  avatarThreads?: number
   /** The most public objects publish_object may publish in any 24 hours (default 20). */
   publishMaxPerDay?: number
   /** How often the server checks for new operator orders on its own, in ms (default 15 s; 0 turns the poll off, for tests). */
@@ -226,6 +235,8 @@ export const STOPPED_WORDS = 'Stopped. I\'ll wait for your next message.'
 
 export class Agent {
   readonly pubkey: string
+  /** The kits on this machine (kit, kit_piece, check_layout, place and render with kit); read from disk, never published. */
+  readonly kits: KitLibrary
   readonly npub: string
   readonly relays: Relays
   readonly keeper: ChainKeeper
@@ -285,6 +296,7 @@ export class Agent {
     this.pubkey = getPublicKey(sk)
     this.npub = nip19.npubEncode(this.pubkey)
     this.calibration = calibration
+    this.kits = new KitLibrary(kitsDirCandidates(config.stateDir, config.kitsDir))
     this.name = config.name ?? null
     const urls = config.relays.map((u) => normalizeRelay(u)).filter((u): u is string => !!u)
     if (urls.length === 0) throw new Error('no usable relay URL was given')
@@ -2019,7 +2031,18 @@ export class Agent {
     })
   }
 
-  async place(input: { object?: unknown; address?: string; id?: string; coordinate: CoordinateInput; height: number }): Promise<ToolResult> {
+  async place(input: { object?: unknown; address?: string; id?: string; kit?: string; turn?: number; scale?: number; coordinate: CoordinateInput; height: number }): Promise<ToolResult> {
+    // A kit piece, turned and scaled as asked, goes through the same hide as any payload: building with it, under the build's own name.
+    if (input.kit !== undefined) {
+      if (input.object !== undefined || input.address !== undefined || input.id !== undefined) throw new Refusal('Give kit alone, or object, address or id: not both.')
+      const k = kitCall(() => kitObject(this.kits, String(input.kit), { turn: input.turn, scale: input.scale }))
+      const at = this.target(input.coordinate, this.keeper.place())
+      const clipped = kitCall(() => clipWords(k.entry, input.turn, input.scale, at.position, input.height))
+      if (clipped) throw new Refusal(`Not placed: ${clipped}`)
+      const r = await this.hide({ contents: { object: k.payload }, coordinate: input.coordinate, height: input.height })
+      return { ...r, text: `Kit piece ${k.entry.id}${k.turn ? ` turned ${k.turn}` : ''}${k.scale ? ` at scale ${k.scale}` : ''}, as "${k.shard.name}": ${r.text}`, data: { ...r.data, kit: { piece: k.entry.id, turn: k.turn, scale: k.scale } } }
+    }
+    if (input.turn !== undefined || input.scale !== undefined) throw new Refusal('turn and scale go with kit (a kit piece); a payload you give is placed as it is.')
     // An object find or open_chest listed, or one taken from a chest, by its id: its payload is placed as given.
     if (input.id !== undefined && input.object === undefined && input.address === undefined) {
       return this.hide({ contents: { object: toPayload(this.objectById(input.id).shard) }, coordinate: input.coordinate, height: input.height })
@@ -2359,12 +2382,35 @@ export class Agent {
    * 33331 by its address. Drawn on this machine's CPU (render.ts); nothing is
    * signed or published, and only an address asks a relay anything.
    */
-  async render(input: { object?: unknown; id?: string; address?: string; view?: NamedView; yaw?: number; pitch?: number; size?: number }): Promise<ToolResult> {
-    const given = [input.object, input.id, input.address].filter((x) => x !== undefined).length
-    if (given !== 1) throw new Refusal('Give exactly one of: object (an SNO payload), id (an object find or look listed), or address (a public kind 33331).')
+  /** kit: the kits installed here, or the pieces that fit a search (kits/library.ts). Local; nothing is sent. */
+  kit(input: KitQuery): ToolResult {
+    return kitTool(this.kits, input)
+  }
+
+  /** kit_piece: one kit piece in full, and its payload when asked. Local; nothing is sent. */
+  kitPiece(input: { piece: string; sno?: boolean; turn?: number; scale?: number }): ToolResult {
+    return kitPieceTool(this.kits, input)
+  }
+
+  /** check_layout: the kits' rules over a planned build (kits/layout.ts). origin, when given, is read like any coordinate (from where you stand for { dx, dy, dz }). */
+  checkLayout(input: { placements: PlacementInput[]; origin?: CoordinateInput; height?: number }): ToolResult {
+    const origin = input.origin !== undefined ? this.target(input.origin, this.keeper.place()).position : undefined
+    return checkLayoutTool(this.kits, { placements: input.placements, origin, height: input.height })
+  }
+
+  async render(input: { object?: unknown; id?: string; address?: string; kit?: string; turn?: number; scale?: number; layout?: PlacementInput[]; cut?: number; view?: NamedView; yaw?: number; pitch?: number; size?: number }): Promise<ToolResult> {
+    const given = [input.object, input.id, input.address, input.kit, input.layout].filter((x) => x !== undefined).length
+    if (given !== 1) throw new Refusal('Give exactly one of: object (an SNO payload), id (an object find or look listed), address (a public kind 33331), kit (a kit piece) or layout (a planned build of kit pieces).')
+    if (input.layout !== undefined) return renderLayout(this.kits, { layout: input.layout, cut: input.cut, view: input.view, yaw: input.yaw, pitch: input.pitch, size: input.size })
+    if (input.cut !== undefined) throw new Refusal('cut goes with layout.')
+    if ((input.turn !== undefined || input.scale !== undefined) && input.kit === undefined) throw new Refusal('turn and scale go with kit.')
     let shard: ShardModel
     let source: string
-    if (input.object !== undefined) {
+    if (input.kit !== undefined) {
+      const k = kitShard(this.kits, { kit: input.kit, turn: input.turn, scale: input.scale })
+      shard = k.shard
+      source = k.source
+    } else if (input.object !== undefined) {
       let raw = input.object
       // A payload sent as a JSON string is read as the object it spells.
       if (typeof raw === 'string') {
@@ -2396,20 +2442,21 @@ export class Agent {
     }
     return {
       // An object found in cyberspace was named by someone else.
-      text: source === 'payload' ? r.caption : `${r.caption} Its name is the author's text (untrusted).`,
+      text: source === 'payload' ? r.caption : source.startsWith('kit piece') ? `${source}: ${r.caption}` : `${r.caption} Its name is the author's text (untrusted).`,
       images: [{ data: r.png.toString('base64'), mimeType: 'image/png' }],
       data: { source, name: shard.name, mode: shard.mode, unit: shard.unit, vertices: r.vertices, faces: r.faces, bounds: r.bounds, view: r.view, size: r.size, backFacing: r.backFacing, partsNotDrawn: r.partsNotDrawn, pngBytes: r.png.length, ms: Math.round(r.ms) },
     }
   }
 
-  // ---- set_avatar (avatar.ts) ----------------------------------------------
+  // ---- set_avatar (avatar.ts, avatarMine.ts) -------------------------------
 
+  /** The avatar being mined, so a second set_avatar waits its turn instead of mining twice. */
+  private avatarBusy = false
   /**
    * The created_at of the last avatar this server signed. A replaceable tie
-   * on created_at goes to the lower id (NIP-01), so a second avatar signed in
-   * the same second as the first could lose to it by chance: each avatar is
-   * signed in a later second than the last, waiting for the clock rather
-   * than dating it ahead, so a burst of calls never signs into the future.
+   * on created_at goes to the lower id (NIP-01), and a mined id starts with
+   * zeros, so a clear signed in the same second as a mined avatar would lose
+   * to it: each avatar is signed at least a second after the last.
    */
   private lastAvatarAt = 0
 
@@ -2418,14 +2465,15 @@ export class Agent {
    * does (arkinox, 2026-10-11: "tell XOR to set a shard as his avatar"): an
    * SNO payload, or a public kind 33331 object whose payload is copied in
    * (spec 8.10 has no reference form: the content is the payload), or
-   * clear for the dodecahedron. No work is owed (spec 8.10, ruled 2026-11):
-   * the content is at most AVATAR_CONTENT_MAX bytes, refused above it, and
-   * the signed event is checked with cyberspace-core's verifyAvatar before
-   * any relay sees it.
+   * clear for the dodecahedron. The work is priced against the caps first,
+   * then mined on threads of its own so every other tool keeps answering,
+   * stopped at the per-call cap, verified with cyberspace-core's own check
+   * before anything is signed, and charged to the session.
    */
-  async setAvatar(input: { object?: unknown; address?: string; clear?: boolean }): Promise<ToolResult> {
+  async setAvatar(input: { object?: unknown; address?: string; clear?: boolean }, signal?: AbortSignal): Promise<ToolResult> {
     const given = [input.object, input.address, input.clear ? true : undefined].filter((x) => x !== undefined).length
     if (given !== 1) throw new Refusal('Give exactly one of: object (an SNO payload), address (a public kind 33331 object), or clear: true (the default dodecahedron).')
+    if (this.avatarBusy) throw new Refusal('An avatar is being mined already; wait for that call to answer.')
     let shard: ShardModel | null = null
     let source = 'clear'
     if (input.object !== undefined) {
@@ -2435,8 +2483,9 @@ export class Agent {
       }
       const v = validateSnoPayload(raw)
       if (!v.ok) throw new Refusal(`Not set: the payload is not valid SNO. ${v.errors.join(' ')}`)
-      // v.bytes is the content as it is signed: sno-core's toPayload, as avatarTemplate writes it.
-      if (avatarTooLarge(v.bytes)) throw new Refusal(`Not set: ${avatarTooLargeWords(v.bytes)}. Use fewer vertices and faces.`)
+      if (v.bytes > MAX_AVATAR_BYTES) throw new Refusal(`Not set: the payload is ${v.bytes} bytes, and an avatar is at most ${MAX_AVATAR_BYTES} (every try of the work hashes the whole event). Use fewer vertices.`)
+      const kitHit = kitPieceIn(this.kits, v.shard)
+      if (kitHit) throw new Refusal(`Not set: ${kitHit} ${KIT_PUBLISH_REFUSAL}`)
       shard = v.shard
       source = 'payload'
     } else if (input.address !== undefined) {
@@ -2446,33 +2495,54 @@ export class Agent {
       try { raw = JSON.parse(object.content || 'null') } catch { raw = null }
       const v = validateSnoPayload(raw)
       if (!v.ok) throw new Refusal(`The object at ${address} is not valid SNO: ${v.errors.join(' ')}`)
-      if (avatarTooLarge(v.bytes)) throw new Refusal(`Not set: the object at ${address} is too large for an avatar: ${avatarTooLargeWords(v.bytes)}.`)
+      if (v.bytes > MAX_AVATAR_BYTES) throw new Refusal(`The object at ${address} is ${v.bytes} bytes; an avatar is at most ${MAX_AVATAR_BYTES}.`)
       shard = v.shard
       source = `address ${address} (payload copied: an avatar carries its shape, not a reference)`
     }
-    // A later second than the last avatar signed here, by waiting (at most a second), never by dating it ahead.
-    while (nowSeconds() <= this.lastAvatarAt) await new Promise((r) => setTimeout(r, 100))
-    const template: EventTemplate = avatarTemplate(shard, nowSeconds())
-    const contentBytes = avatarContentBytes(template.content)
+    const createdAt = Math.max(nowSeconds(), this.lastAvatarAt + 1)
+    let template: EventTemplate = avatarTemplate(shard, createdAt)
+    let mined: { bits: number; tries: number; seconds: number; estimate: number } | null = null
+    if (shard) {
+      const payload = JSON.parse(template.content)
+      const { bits, eventBytes } = avatarPrice(payload, template, this.pubkey)
+      const threads = this.config.avatarThreads ?? avatarThreads(this.config.threads)
+      const estimate = avatarSeconds(bits, eventBytes, this.calibration.sha256PerSec, threads)
+      const over = this.budget.refusal(estimate)
+      if (over) throw new Refusal(`This avatar owes ${bits} bits of work (spec 8.10: reach and detail), about ${estimate.toFixed(1)} s expected on ${threads} thread(s). ${over} A smaller shape (nearer the build origin, fewer vertices and faces) costs less.`)
+      const limit = Math.min(this.budget.capCallSeconds, this.budget.remainingSeconds())
+      this.avatarBusy = true
+      let outcome
+      try {
+        outcome = await mineAvatar({ ...template, pubkey: this.pubkey }, bits, { threads, deadlineMs: Math.max(1, limit) * 1000, signal })
+      } finally {
+        this.avatarBusy = false
+      }
+      const seconds = outcome.elapsedMs / 1000
+      this.budget.spendWork(seconds)
+      if (!outcome.found) {
+        throw new Refusal(outcome.why === 'aborted'
+          ? `Mining stopped by the caller after ${seconds.toFixed(1)} s and ${outcome.tries} tries; nothing was published.`
+          : `No nonce within the ${limit.toFixed(0)} s this call may spend (${outcome.tries} tries; ${bits} bits expects about ${(2 ** bits).toLocaleString('en-US')}, about ${estimate.toFixed(1)} s). The work is luck: call set_avatar again to try afresh. ${seconds.toFixed(1)} s were charged.`)
+      }
+      template = nonceTagged(template, outcome.nonce, bits)
+      mined = { bits, tries: outcome.tries, seconds, estimate }
+    }
     const event = this.sign(template)
     // The reader's check before any relay sees it: what ONOSENDAI would not draw is never published.
     if (shard) {
-      const verdict = verifyAvatar(event)
+      const verdict = verifyAvatarWork(event)
       if (!verdict.ok || !paidShard(event)) throw new Refusal(`The signed avatar did not verify (${verdict.reason}); nothing was published. This is a bug in the server.`)
     }
     if (event.kind !== AVATAR_KIND) throw new Refusal('internal: not an avatar event')
     this.lastAvatarAt = event.created_at
     const entry = this.outbox.add(event)
     const result = await this.outbox.send(entry)
-    // The size the personal-space rule gives the agent's own avatar from now on (space/personalSpace.ts),
-    // unless a newer avatar was signed while this one was sent: the newest one is the one relays keep.
-    if (entry.accepted.length && event.created_at === this.lastAvatarAt) this.avatars.set(this.pubkey, shard)
+    // The size the personal-space rule gives the agent's own avatar from now on (space/personalSpace.ts).
+    if (entry.accepted.length) this.avatars.set(this.pubkey, shard)
     const relayWords = entry.accepted.length ? `Accepted by ${entry.accepted.join(', ')}.` : `No relay accepted it${result.ok ? '' : `: ${result.reason}`}.`
-    // Spec 8.10, non-normative: some remote signers (NIP-46) refuse an event this large. This server signs with its own key.
-    const warnWords = contentBytes > AVATAR_CONTENT_WARN ? ` Over ${AVATAR_CONTENT_WARN} bytes: a client that signs through a remote signer (NIP-46) may be refused one this large; this server signs with its own key.` : ''
     const refusedWords = entry.refused ? ` Refused by ${Object.entries(entry.refused).map(([u, r]) => `${u}: ${r}`).join('; ')}.` : ''
     if (!shard) {
-      return { text: `Avatar cleared: you are drawn as the dodecahedron again (kind 11333 ${event.id.slice(0, 8)}..., empty content). ${relayWords}${refusedWords}`, data: { eventId: event.id, cleared: true, accepted: entry.accepted, refused: entry.refused ?? {} } }
+      return { text: `Avatar cleared: you are drawn as the dodecahedron again (kind 11333 ${event.id.slice(0, 8)}..., empty content, no work owed). ${relayWords}${refusedWords}`, data: { eventId: event.id, cleared: true, accepted: entry.accepted, refused: entry.refused ?? {} } }
     }
     let r
     try {
@@ -2481,9 +2551,9 @@ export class Agent {
       throw new Refusal(`Published as ${event.id}, but the picture failed: ${err instanceof Error ? err.message : String(err)}`)
     }
     return {
-      text: `Avatar set: "${shard.name}" (${source}), kind 11333 ${event.id.slice(0, 8)}..., ${contentBytes} bytes of payload. ONOSENDAI draws it in place of your dodecahedron wherever you are seen. ${relayWords}${refusedWords}${warnWords} ${r.caption}`,
+      text: `Avatar set: "${shard.name}" (${source}), kind 11333 ${event.id.slice(0, 8)}..., ${mined!.bits} bits of work in ${mined!.seconds.toFixed(1)} s (${mined!.tries} tries; about ${mined!.estimate.toFixed(1)} s was expected). ONOSENDAI draws it in place of your dodecahedron wherever you are seen. ${relayWords}${refusedWords} ${r.caption}`,
       images: [{ data: r.png.toString('base64'), mimeType: 'image/png' }],
-      data: { eventId: event.id, name: shard.name, source, bytes: contentBytes, accepted: entry.accepted, refused: entry.refused ?? {}, vertices: r.vertices, faces: r.faces, pngBytes: r.png.length },
+      data: { eventId: event.id, name: shard.name, source, bits: mined!.bits, tries: mined!.tries, seconds: mined!.seconds, estimateSeconds: mined!.estimate, accepted: entry.accepted, refused: entry.refused ?? {}, vertices: r.vertices, faces: r.faces, pngBytes: r.png.length },
     }
   }
 
@@ -2512,6 +2582,8 @@ export class Agent {
     }
     const v = validateSnoPayload(raw)
     if (!v.ok) throw new Refusal(`Not published: the payload is not valid SNO. ${v.errors.join(' ')}`)
+    const kitHit = kitPieceIn(this.kits, v.shard)
+    if (kitHit) throw new Refusal(`Not published: ${kitHit} ${KIT_PUBLISH_REFUSAL}`)
     const replacing = input.d !== undefined
     const d = replacing ? String(input.d) : newObjectId()
     const bad = dProblem(d)
