@@ -18,7 +18,7 @@ export const DEFAULT_CAP_DAILY_SECONDS = 1800
 /** The file in the state directory that counts today's work. */
 export const DAILY_BUDGET_FILE = 'budget-daily.json'
 
-/** Worker threads for rides and avatars when the human chose none: two at most, and one core always left free. */
+/** Worker threads for rides when the human chose none: two at most, and one core always left free. */
 export function defaultThreads(cores: number = availableParallelism()): number {
   return Math.max(1, Math.min(2, cores - 1))
 }

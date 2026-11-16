@@ -29,7 +29,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",
-    "cyberspace-core": "git+https://github.com/arkin0x/cyberspace-core.git#5573aafb44ef26cb551d24167161de4fb4858b4a",
+    "cyberspace-core": "git+https://github.com/arkin0x/cyberspace-core.git#4e40bf63abba104d88e74feae94cf9656dbbab01",
     "decimal.js": "^10.6.0",
     "nostr-tools": "^2.24.1",
     "sno-core": "git+https://github.com/arkin0x/sno-core.git#v0.1.26",

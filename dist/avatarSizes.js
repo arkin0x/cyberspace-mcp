@@ -3,8 +3,8 @@
 // arkinox, 2026-10-11: "avatar overlap feels wrong").
 //
 // A person's avatar is their newest kind 11333 (spec 8.10), drawn only when
-// it has paid its work (paidShard, as ONOSENDAI's useAvatars draws it), else
-// the default. Nothing here ever makes a tool wait: radius() answers from
+// cyberspace-core's verifyAvatar accepts it, within the size limit
+// (paidShard, as ONOSENDAI's useAvatars draws it), else the default. Nothing here ever makes a tool wait: radius() answers from
 // memory, the default for anyone not read yet, and asks the relays in the
 // background, a batch at a time; an answer is kept five minutes, as
 // ONOSENDAI's useAvatars refreshes.
