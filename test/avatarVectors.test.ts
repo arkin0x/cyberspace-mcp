@@ -1,7 +1,7 @@
 // avatarVectors.test.ts: the price set_avatar quotes is the spec's (spec
 // 8.10 since 2026-11). fixtures/avatar-vectors.json is the spec's golden
-// file, copied unchanged from arkin0x/cyberspace at 9caa0c4 (written by
-// avatar-reference.py; sha256 8ba48522...0b955). Every `price` row is a
+// file, copied unchanged from arkin0x/cyberspace at 7dd2ce1 (written by
+// avatar-reference.py; sha256 37d17649...3fcbd5). Every `price` row is a
 // payload this server prices through avatarPrice, as set_avatar does; every
 // `bits` and `corpus` row is a reach and a detail through avatarBits, the
 // function avatarWork rounds with; a corpus row's `refused` is this server's
