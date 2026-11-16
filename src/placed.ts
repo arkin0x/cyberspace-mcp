@@ -1023,7 +1023,8 @@ export class Placements {
   /**
    * constrain_placed: set the WALK setting (DECK-0003 1.12) and, if asked,
    * the opacity (1.11) of shards placed, in place, as ONOSENDAI's EDIT writes
-   * them (#461, #476). Each bag is read fresh and changed by one call at a
+   * them (#461, #476). Opacity is 0 to 100: at 0 nothing of the shard is
+   * drawn, and its constrain still holds walkers as written (DECK-0003 1.11, 1.12). Each bag is read fresh and changed by one call at a
    * time; an inline shard is signed again with its lineage (d = its first
    * id) and its bag rewritten in one step, keeping every other entry exactly
    * as found; a shard hidden by reference has its own sealed object sealed
@@ -1034,8 +1035,8 @@ export class Placements {
   async constrain(input: { target?: string | string[]; type?: string; match?: string; bag?: string; all?: boolean; constrain?: string; opacity?: number }): Promise<ToolResult> {
     const constrain = input.constrain === undefined ? undefined : chosenConstrain(input.constrain)
     if (input.constrain !== undefined && !constrain) throw new Refusal('constrain is one of three words, lowercase: "opaque" (WALK cannot cross it while it is solid and fully opaque; the default), "all" (WALK cannot cross any face) or "off" (WALK passes through). Nothing was changed.')
-    if (input.opacity !== undefined && (!Number.isInteger(input.opacity) || input.opacity < 1 || input.opacity > 100)) throw new Refusal('opacity is a whole percent from 1 to 100: 100 is fully opaque. Nothing was changed.')
-    if (constrain === undefined && input.opacity === undefined) throw new Refusal('Say what to set: constrain ("opaque", "all" or "off"), opacity (1 to 100), or both. Nothing was changed.')
+    if (input.opacity !== undefined && (!Number.isInteger(input.opacity) || input.opacity < 0 || input.opacity > 100)) throw new Refusal('opacity is a whole percent from 0 to 100: 100 is fully opaque, 0 draws nothing of the shard (DECK-0003 1.11). Nothing was changed.')
+    if (constrain === undefined && input.opacity === undefined) throw new Refusal('Say what to set: constrain ("opaque", "all" or "off"), opacity (0 to 100), or both. Nothing was changed.')
     const selectors = [input.target !== undefined, input.match !== undefined, input.bag !== undefined, input.all === true].filter(Boolean).length
     if (selectors !== 1) throw new Refusal('Say which shards with exactly one of: target ("last", an exact name or an id, or a list of them), match (every shard whose name contains these words), bag (every shard in one bag, by its lookup id or bag id from placed), or all: true (every shard you placed). Nothing was changed.')
     if (input.type !== undefined && TYPE_WORDS[String(input.type).trim().toLowerCase()] !== 'shard') throw new Refusal('Only a shard has a WALK setting: type, when given, is "shard". Nothing was changed.')
@@ -1158,6 +1159,8 @@ export class Placements {
           ? `Nothing to change: every shard named already has ${asked}.`
           : `Nothing to change: no shard named can take ${asked}.`)
     for (const c of changed) out.push(`  ${name(c.row)}: now ${setting(c.row)}; new id ${c.id.slice(0, 12)}, ${c.how}.`)
+    // Opacity 0 (DECK-0003 1.11, no floor since 2026-11-15): nothing of the shard is drawn, and its constrain still holds as written (1.12).
+    if (input.opacity === 0 && changed.length) out.push('At opacity 0 a reader draws nothing of these shards\' own (a glow still shows), and they still hold walkers as their constrain says: "all" holds a walker at an invisible wall; "opaque" never holds one at opacity 0, since the shard is not opaque (DECK-0003 1.11, 1.12).')
     out.push(...bagNotes)
     if (already.length) out.push(`Already set, left as they are: ${already.map((r) => `"${r.label}" (id ${r.id.slice(0, 12)})`).join(', ')}.`)
     for (const f of failed) out.push(`Not changed: ${name(f.row)} (id ${f.row.id.slice(0, 12)}): ${f.why}`)

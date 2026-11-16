@@ -513,6 +513,36 @@ describe('constrain_placed and move_placed, the smaller points of the review of 
     expect(r.text).toContain('see-through')
   }, 60_000)
 
+  it('opacity 0 is written as 0 and an invisible shard set to "all" still holds walkers (DECK-0003 1.11, 1.12, no floor since 2026-11-15)', async () => {
+    const k = key(BASE, 8)
+    await seedBag(s, 8, async (now) => [signEvent({ kind: SHARD_KIND, created_at: now, content: JSON.stringify(named('glass floor')), tags: [['C', positionHex({ x: BASE, y: BASE, z: BASE + 1n }, 0)], ['-']] }, s.sk)])
+    const r = await s.call('constrain_placed', { target: 'glass floor', constrain: 'all', opacity: 0 })
+    expect(r.isError).toBe(false)
+    expect(r.text).toContain('Set constrain "all"')
+    expect(r.text).toContain('opacity 0')
+    expect(r.text).toContain('"all" holds a walker at an invisible wall')
+    const edited = (await entriesOf(bagOn(s.canonical, s.a.pubkey, k.lookupId)!, k.key)).find((e) => (e as NostrEvent).kind === SHARD_KIND) as NostrEvent
+    // 0 is written as 0, never left out (that would mean 100).
+    expect(payloadOf(edited)).toMatchObject({ opacity: 0, constrain: 'all' })
+    const row = rowsOf(await s.call('placed')).find((x) => x.label === 'glass floor')!
+    expect(row.walk).toEqual({ constrain: 'all', opacity: 0 })
+    expect((r.data.changed as Row[])[0].walk).toEqual({ constrain: 'all', opacity: 0 })
+    // Already at 0: nothing to change.
+    const published = s.canonical.published.length
+    const same = await s.call('constrain_placed', { target: 'glass floor', opacity: 0 })
+    expect(same.isError).toBe(false)
+    expect(same.text).toContain('Nothing to change')
+    // "opaque" at 0 holds nothing, and says so.
+    const opaque = await s.call('constrain_placed', { target: 'glass floor', constrain: 'opaque' })
+    expect(opaque.isError).toBe(false)
+    expect(opaque.text).toContain('see-through (opacity 0)')
+    expect(s.canonical.published.length).toBeGreaterThan(published)
+    // Outside 0 to 100, or not whole, is still refused, and nothing is written.
+    const before = s.canonical.published.length
+    for (const opacity of [-1, 101, 0.5]) expect((await s.call('constrain_placed', { target: 'glass floor', opacity })).isError, String(opacity)).toBe(true)
+    expect(s.canonical.published.length).toBe(before)
+  }, 60_000)
+
   it('move_placed says the setting it writes, and reseals a sealed shard moved inside its bag when it had none (L1, L2)', async () => {
     let object!: NostrEvent
     await seedBag(s, 3, async (now, k) => {
