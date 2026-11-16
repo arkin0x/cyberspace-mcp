@@ -14,7 +14,7 @@
 // and measuring every payload itself: its bytes, its counts, its bounds and
 // the bag height it needs are never taken on trust. It writes the new folder
 // beside the old one and swaps it in, so a running server never reads half a
-// kit, and it only ever replaces a folder it wrote. Local only: nothing is
+// kit, and it only ever replaces a folder holding a catalog in its own format. Local only: nothing is
 // fetched, published or sent.
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
@@ -145,8 +145,11 @@ export function installKit(zipFile, kitsDir, now = new Date()) {
     const root = resolve(kitsDir);
     mkdirSync(root, { recursive: true });
     const finalDir = join(root, m.kit);
+    // Leftovers of an earlier add of this kit that stopped half way (only the names this function makes).
+    for (const n of readdirSync(root))
+        if (n.startsWith(`.${m.kit}.tmp-`) || n.startsWith(`.${m.kit}.old-`))
+            rmSync(join(root, n), { recursive: true, force: true });
     const tmp = join(root, `.${m.kit}.tmp-${process.pid}`);
-    rmSync(tmp, { recursive: true, force: true });
     for (const [name, data] of files) {
         const f = join(tmp, 'pieces', name);
         if (!resolve(f).startsWith(resolve(tmp) + sep))

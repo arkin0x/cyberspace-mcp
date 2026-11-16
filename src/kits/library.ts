@@ -268,9 +268,9 @@ export interface KitQuery {
   group?: string
   kind?: string
   tags?: string[]
-  /** Any opening of this size (window, door, hallway, arch). */
+  /** Any opening of this size name, as the kit names its sizes. */
   opening?: string
-  /** Any edge carrying this profile (L0, L10, S, V, B+, K-, R+...). */
+  /** Any edge carrying this profile, as the kit names its profiles. */
   edge?: string
   max_bytes?: number
   /** Only pieces that fit a bag of this height or lower. */

@@ -612,7 +612,7 @@ export function createServer(agent, log = () => { }, hooks = {}, options = {}) {
             kit: z.string().optional().describe('Only this kit (its name, as kit lists them).'),
             set: z.string().optional().describe('Only this set of a kit (the first folder below the kit).'),
             group: z.string().optional().describe('Only this folder within a set, or below it.'),
-            kind: z.string().optional().describe('What the piece is, as its kit says: tile, plug, reducer, recessed-plug, door, door-open, insert, cap, prop, decor, open, coast, wall, ruin, or the kit\'s own word.'),
+            kind: z.string().optional().describe('What the piece is, as its kit says (kit and kit_piece show each piece\'s kind).'),
             tags: z.array(z.string()).optional().describe('Every one of these tags (kit lists each piece\'s).'),
             opening: z.string().optional().describe('Pieces with an opening of this size name (or a plug, reducer or door for it), as the kit names its sizes.'),
             edge: z.string().optional().describe('Tiles with an edge of this profile, as the kit names its profiles.'),
