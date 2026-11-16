@@ -21,6 +21,7 @@ import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure
 import { normalizeURL } from 'nostr-tools/utils';
 import { TICKS_PER_UNIT, readOpacity, ticksOf, toPayload } from 'sno-core/shards';
 import { EYE_FIELD, EYE_REACH, drawnEye, eyeChosen, readEye } from 'sno-core/eye';
+import { FACE_FIELD, FACE_MODES, drawnFace, readFace } from 'sno-core/face';
 import { Budget, DAILY_BUDGET_FILE, DEFAULT_CAP_DAILY_SECONDS } from './budget.js';
 import { ACTION_KIND, chainTemplateProblem, hopTemplate, sidestepTemplate, spawnTemplate } from './chain/builder.js';
 import { findDivergence } from './chain/divergence.js';
@@ -90,14 +91,16 @@ const OBJECTS_REMEMBERED = 64;
  * The fields of an agent's payload that were left out because this tool does
  * not know them (sno.ts `ignored`), in words; empty when there were none.
  */
-function ignoredNote(ignored, repaired = []) {
+function ignoredNote(ignored, repaired = [], unknownFace) {
     const left = ignored.length ? ` Left out, not fields this tool knows (DECK-0003 section 1.1): ${ignored.map((k) => JSON.stringify(k)).join(', ')}.` : '';
     const fixed = repaired.map((k) => (k === 'opacity'
         ? ' "opacity" was not a whole percent from 0 to 100, so it is left out and the object is drawn fully opaque (DECK-0003 1.11).'
         : k === EYE_FIELD
             ? ` "eye" was not three whole numbers of ticks from ${-EYE_REACH} to ${EYE_REACH}, so it is left out: worn as an avatar, it looks from the automatic eye (DECK-0003 1.17).`
-            : ' "constrain" was not one of "off", "all" or "opaque", so it is not a choice: the default "opaque" is written (DECK-0003 1.12).')).join('');
-    return left + fixed;
+            : k === FACE_FIELD
+                ? ` "face" was not ${faceNames()}, so it is left out: worn as an avatar, it faces along its path (DECK-0003 1.18).`
+                : ' "constrain" was not one of "off", "all" or "opaque", so it is not a choice: the default "opaque" is written (DECK-0003 1.12).')).join('');
+    return left + fixed + unknownFaceNote(unknownFace);
 }
 /** One line for an object at opacity 0 (DECK-0003 1.11, since sno-core 0.1.30): nothing of it is drawn. */
 function opacityNote(shard) {
@@ -135,6 +138,19 @@ function nearerWords(shard, eye) {
     ].filter(Boolean);
     return ` ONOSENDAI will draw it nearer: it draws an avatar within ${MAX_AVATAR_REACH} gibsons of its origin on each axis, so ${parts.join(', and ')}, to ${at.map(gib).join(', ')} gibsons from your origin.`;
 }
+/** One line for a `face` shaped like a mode's name that this version does not know (DECK-0003 1.18): carried, and read as "path"; empty when there is none. */
+function unknownFaceNote(unknownFace) {
+    return unknownFace === undefined ? '' : ` "face" ${JSON.stringify(unknownFace)} is a facing this version does not know: it is carried as found, since a later revision may define it, and read as "path" (DECK-0003 1.18).`;
+}
+/** The facing names DECK-0003 1.18 gives, in words: "path" or "upright". */
+function faceNames() {
+    return FACE_MODES.map((m) => JSON.stringify(m)).join(' or ');
+}
+/** What each facing (DECK-0003 1.18) does to a worn avatar as it moves, in words. */
+const FACE_WORDS = {
+    path: 'path (the default: your front, the payload\'s -Z, points along your last move and tilts with it)',
+    upright: 'upright (you turn only about the viewer\'s up and never tilt; a move straight up or down keeps your heading)',
+};
 /** An avatar's eye (DECK-0003 1.17) in words: "AUTO 0, 159, 0 ticks (0, 1.325, 0 units)", or CHOSEN for one its author wrote. */
 function eyeWords(eye, chosen) {
     const units = eye.map((t) => String(Math.round((t / TICKS_PER_UNIT) * 1000) / 1000));
@@ -2626,11 +2642,36 @@ export class Agent {
      * in an object copied by address is left out (AUTO, as every reader reads
      * it). The answer says which eye goes out and what ONOSENDAI does to one
      * past its 4-gibson reach, and the picture marks it.
+     *
+     * The avatar's facing, `face` (DECK-0003 1.18, ruled 2026-11-16), how it
+     * turns as it moves: "path" (the default) or "upright". Given as the
+     * `face` input it replaces the payload's, from object or from address.
+     * "path" writes nothing, as a publisher leaves the default out; "upright"
+     * is written into the payload. Any other face, as the input or in
+     * `object` when no input is given, is refused, a name this version does
+     * not know included, since an agent should write a mode it can name
+     * (`face: null` in `object` is no choice, "path", as `eye: null` is). In an
+     * object copied by address, a malformed face is left out, so it faces
+     * along its path, and a name of the right shape this version does not
+     * know is carried as found and read as "path", as an editor carries it.
+     * The answer says which facing goes out.
      */
     async setAvatar(input) {
         const given = [input.object, input.address, input.clear ? true : undefined].filter((x) => x !== undefined).length;
         if (given !== 1)
             throw new Refusal('Give exactly one of: object (an SNO payload), address (a public kind 33331 object), or clear: true (the default dodecahedron).');
+        const faceWanted = input.face === undefined ? undefined : readFace(input.face);
+        if (input.face !== undefined && faceWanted === undefined)
+            throw new Refusal(`Not set: face must be ${faceNames()}, in lower case (DECK-0003 1.18); got ${String(JSON.stringify(input.face)).slice(0, 80)}. Leave it out for "path". Nothing was signed or published.`);
+        if (faceWanted !== undefined && input.clear)
+            throw new Refusal('face goes with an avatar (object or address), not with clear: the dodecahedron has no facing. Nothing was signed or published.');
+        /** The payload with the input face in place of its own: "path" removes the field, so nothing is written. A copy, so the caller's object is not changed. */
+        const withWanted = (raw) => {
+            if (faceWanted === undefined || !raw || typeof raw !== 'object' || Array.isArray(raw))
+                return raw;
+            const { [FACE_FIELD]: _old, ...bare } = raw;
+            return faceWanted === 'path' ? bare : { ...bare, [FACE_FIELD]: faceWanted };
+        };
         let shard = null;
         let source = 'clear';
         if (input.object !== undefined) {
@@ -2653,7 +2694,18 @@ export class Agent {
                 else if (readEye(eyeGiven) === undefined)
                     throw new Refusal(`Not set: "eye" must be three whole numbers of ticks (120 a unit), each from ${-EYE_REACH} to ${EYE_REACH} (DECK-0003 1.17); got ${String(JSON.stringify(eyeGiven)).slice(0, 80)}. Leave eye out (or null) for the automatic eye. Nothing was signed or published.`);
             }
-            const v = validateSnoPayload(raw);
+            // The face input replaces the payload's, so the payload's is checked only when there is none.
+            if (faceWanted === undefined && raw && typeof raw === 'object' && !Array.isArray(raw) && Object.hasOwn(raw, FACE_FIELD)) {
+                const faceGiven = raw[FACE_FIELD];
+                // Null is no facing chosen: "path", and nothing written, as for the eye. A copy, so the caller's object is not changed.
+                if (faceGiven === null) {
+                    const { [FACE_FIELD]: _none, ...bare } = raw;
+                    raw = bare;
+                }
+                else if (readFace(faceGiven) === undefined)
+                    throw new Refusal(`Not set: "face" in the payload must be ${faceNames()}, in lower case (DECK-0003 1.18); got ${String(JSON.stringify(faceGiven)).slice(0, 80)}. Leave face out (or null) for "path". Nothing was signed or published.`);
+            }
+            const v = validateSnoPayload(withWanted(raw));
             if (!v.ok)
                 throw new Refusal(`Not set: the payload is not valid SNO. ${v.errors.join(' ')}`);
             // v.bytes is the content as it is signed: sno-core's toPayload, as avatarTemplate writes it.
@@ -2676,13 +2728,13 @@ export class Agent {
             catch {
                 raw = null;
             }
-            const v = validateSnoPayload(raw);
+            const v = validateSnoPayload(withWanted(raw));
             if (!v.ok)
                 throw new Refusal(`The object at ${address} is not valid SNO: ${v.errors.join(' ')}`);
             if (avatarTooLarge(v.bytes))
                 throw new Refusal(`Not set: the object at ${address} is too large for an avatar: ${avatarTooLargeWords(v.bytes)}.`);
             shard = v.shard;
-            source = `address ${address} (payload copied: an avatar carries its shape, not a reference${v.repaired.includes(EYE_FIELD) ? '; its malformed eye is left out, so the eye is AUTO' : ''})`;
+            source = `address ${address} (payload copied: an avatar carries its shape, not a reference${v.repaired.includes(EYE_FIELD) ? '; its malformed eye is left out, so the eye is AUTO' : ''}${v.repaired.includes(FACE_FIELD) ? '; its malformed face is left out, so it faces along its path' : ''}${v.unknownFace !== undefined ? `; its face ${JSON.stringify(v.unknownFace)} is a facing this version does not know, carried as found and read as path` : ''})`;
         }
         // A later second than the last avatar signed here, by waiting (at most a second), never by dating it ahead.
         while (nowSeconds() <= this.lastAvatarAt)
@@ -2738,6 +2790,7 @@ export class Agent {
         }
         const eye = drawnEye(shard);
         const chosen = eyeChosen(shard);
+        const face = drawnFace(shard);
         let r;
         try {
             r = renderShard(shard, { eye: { at: eye.map((t) => t / TICKS_PER_UNIT), chosen } });
@@ -2746,9 +2799,9 @@ export class Agent {
             throw new Refusal(`Published as ${event.id}, but the picture failed: ${err instanceof Error ? err.message : String(err)}`);
         }
         return {
-            text: `Avatar set: "${shard.name}" (${source}), kind 11333 ${event.id.slice(0, 8)}..., ${contentBytes} bytes of payload, eye ${eyeWords(eye, chosen)}.${nearerWords(shard, eye)} ONOSENDAI draws it in place of your dodecahedron wherever you are seen. ${relayWords}${refusedWords}${warnWords}${leftWords} ${r.caption}`,
+            text: `Avatar set: "${shard.name}" (${source}), kind 11333 ${event.id.slice(0, 8)}..., ${contentBytes} bytes of payload, eye ${eyeWords(eye, chosen)}, facing ${FACE_WORDS[face]}.${nearerWords(shard, eye)} ONOSENDAI draws it in place of your dodecahedron wherever you are seen. ${relayWords}${refusedWords}${warnWords}${leftWords} ${r.caption}`,
             images: [{ data: r.png.toString('base64'), mimeType: 'image/png' }],
-            data: { eventId: event.id, name: shard.name, source, bytes: contentBytes, eye: { ticks: eye, chosen }, accepted: entry.accepted, refused: entry.refused ?? {}, vertices: r.vertices, faces: r.faces, pngBytes: r.png.length, leftToday: left, maxPerDay: limit },
+            data: { eventId: event.id, name: shard.name, source, bytes: contentBytes, eye: { ticks: eye, chosen }, face, accepted: entry.accepted, refused: entry.refused ?? {}, vertices: r.vertices, faces: r.faces, pngBytes: r.png.length, leftToday: left, maxPerDay: limit },
         };
     }
     // ---- publish_object (publicObject.ts) -------------------------------------
@@ -2826,7 +2879,7 @@ export class Agent {
         this.dir.writeJson(PUBLISHED_FILE, { posts: [...recent, now] });
         const left = Math.max(0, limit - recent.length - 1);
         return {
-            text: `Published "${v.shard.name}" to the feed${replacing ? ` under d "${d}" (it replaces any earlier version there)` : ''}: kind 33331 ${event.id.slice(0, 8)}..., ${v.vertices} vertices, ${v.faces} faces, ${payloadBytes(v.shard)} bytes.${walkNote(v.shard)}${opacityNote(v.shard)} Accepted by ${entry.accepted.join(', ')}.${refusedWords} Address ${address} (naddr ${naddr}). This publishes the object; it does not place it in the world. To hide it at a place, call place with this address. To change it later, publish again with d "${d}". ${left} more today.${ignoredNote(v.ignored, v.repaired)}`,
+            text: `Published "${v.shard.name}" to the feed${replacing ? ` under d "${d}" (it replaces any earlier version there)` : ''}: kind 33331 ${event.id.slice(0, 8)}..., ${v.vertices} vertices, ${v.faces} faces, ${payloadBytes(v.shard)} bytes.${walkNote(v.shard)}${opacityNote(v.shard)} Accepted by ${entry.accepted.join(', ')}.${refusedWords} Address ${address} (naddr ${naddr}). This publishes the object; it does not place it in the world. To hide it at a place, call place with this address. To change it later, publish again with d "${d}". ${left} more today.${ignoredNote(v.ignored, v.repaired, v.unknownFace)}`,
             data: { eventId: event.id, address, naddr, d, name: v.shard.name, replaced: replacing, accepted: entry.accepted, refused: entry.refused ?? {}, publishedToday: recent.length + 1, maxPerDay: limit, ignored: v.ignored, repaired: v.repaired, constrain: chosenConstrainOf(withAuthoredConstrain(v.shard)) },
         };
     }
@@ -2841,8 +2894,8 @@ export class Agent {
         const bytes = payloadBytes(v.shard);
         const byReference = wantsReference(v.shard);
         return {
-            text: `Valid SNO: "${v.shard.name}", ${v.vertices} vertices, ${v.faces} faces, mode ${v.shard.mode}, unit 2^${v.shard.unit} gibsons, ${bytes} bytes on the wire${byReference ? ' (large: it would be hidden by reference)' : ' (small: it would be carried inline)'}.${walkNote(v.shard)}${opacityNote(v.shard)}${eyeChosen(v.shard) ? ` Eye, read only when worn as an avatar (DECK-0003 1.17): ${eyeWords(drawnEye(v.shard), true)}.` : ''}${ignoredNote(v.ignored, v.repaired)}`,
-            data: { valid: true, name: v.shard.name, vertices: v.vertices, faces: v.faces, mode: v.shard.mode, unit: v.shard.unit, bytes, byReference, ignored: v.ignored, repaired: v.repaired, constrain: chosenConstrainOf(withAuthoredConstrain(v.shard)), ...(eyeChosen(v.shard) ? { eye: drawnEye(v.shard) } : {}) },
+            text: `Valid SNO: "${v.shard.name}", ${v.vertices} vertices, ${v.faces} faces, mode ${v.shard.mode}, unit 2^${v.shard.unit} gibsons, ${bytes} bytes on the wire${byReference ? ' (large: it would be hidden by reference)' : ' (small: it would be carried inline)'}.${walkNote(v.shard)}${opacityNote(v.shard)}${eyeChosen(v.shard) ? ` Eye, read only when worn as an avatar (DECK-0003 1.17): ${eyeWords(drawnEye(v.shard), true)}.` : ''}${drawnFace(v.shard) !== 'path' ? ` Facing, read only when worn as an avatar (DECK-0003 1.18): ${FACE_WORDS[drawnFace(v.shard)]}.` : ''}${ignoredNote(v.ignored, v.repaired, v.unknownFace)}`,
+            data: { valid: true, name: v.shard.name, vertices: v.vertices, faces: v.faces, mode: v.shard.mode, unit: v.shard.unit, bytes, byReference, ignored: v.ignored, repaired: v.repaired, constrain: chosenConstrainOf(withAuthoredConstrain(v.shard)), ...(eyeChosen(v.shard) ? { eye: drawnEye(v.shard) } : {}), face: drawnFace(v.shard), ...(v.unknownFace !== undefined ? { unknownFace: v.unknownFace } : {}) },
         };
     }
     budgetState() {

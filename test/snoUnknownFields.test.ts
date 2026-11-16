@@ -47,6 +47,36 @@ describe('fields this tool does not know', () => {
     }
   })
 
+  it('keep `face` "upright" (DECK-0003 1.18), leave "path" out as the default, and a malformed one out as repaired, never as an unknown field', () => {
+    const up = validateSnoPayload({ ...tri, face: 'upright' })
+    expect(up.ok && up.ignored).toEqual([])
+    expect(up.ok && up.repaired).toEqual([])
+    expect(up.ok && (up.payload as unknown as Record<string, unknown>).face).toBe('upright')
+    expect(up.ok && up.shard.extra?.face).toBe('upright')
+    const path = validateSnoPayload({ ...tri, face: 'path' })
+    expect(path.ok && path.repaired).toEqual([])
+    expect(path.ok && path.ignored).toEqual([])
+    expect(path.ok && path.payload).not.toHaveProperty('face')
+    for (const face of ['Upright', 'PATH', '', '9up', 'a'.repeat(33), 'up_right', 1, true, null, ['upright']]) {
+      const bad = validateSnoPayload({ ...tri, face })
+      expect(bad.ok && bad.repaired).toEqual(['face'])
+      expect(bad.ok && bad.ignored).toEqual([])
+      expect(bad.ok && bad.unknownFace).toBeUndefined()
+      expect(bad.ok && bad.payload).not.toHaveProperty('face')
+    }
+  })
+
+  it('carry a `face` shaped like a mode\'s name that this version does not know, named as unknownFace, never as repaired', () => {
+    for (const face of ['lean', 'sideways', 'a'.repeat(32), 'turn-2']) {
+      const v = validateSnoPayload({ ...tri, face })
+      expect(v.ok && v.unknownFace).toBe(face)
+      expect(v.ok && v.repaired).toEqual([])
+      expect(v.ok && v.ignored).toEqual([])
+      expect(v.ok && (v.payload as unknown as Record<string, unknown>).face).toBe(face)
+      expect(v.ok && v.shard.extra?.face).toBe(face)
+    }
+  })
+
   it('are an empty list when there are none', () => {
     const v = validateSnoPayload(tri)
     expect(v.ok && v.ignored).toEqual([])

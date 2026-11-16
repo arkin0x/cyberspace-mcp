@@ -16,6 +16,17 @@
 // is left out and named in `repaired` (a reader takes it as the automatic eye,
 // and a publisher never writes one); set_avatar refuses it instead.
 //
+// `face` (DECK-0003 1.18: how a worn avatar turns as it moves), which
+// sno-core 0.1.32 reads, is kept in `extra` when it is "upright". "path", the
+// default, is left out, since a publisher writes nothing for it. A name of
+// the shape every mode's name has (1 to 32 lowercase letters, digits and
+// hyphens, from a letter) that this version does not know is kept as found
+// and named in `unknownFace`: a later revision may define it, an editor
+// carries it, and a reader takes it as "path". Anything else (another case,
+// an empty string, a number, null) is left out and named in `repaired` (a
+// reader takes it as "path"). set_avatar refuses both in what the agent
+// writes, and keeps an unknown name in an object it copies by address.
+//
 // `objects` (DECK-0003 1.10: the payloads of placed objects carried inside the
 // object that places them), which sno-core 0.1.20 knows, is left out and named
 // in `ignored`, as every unknown field was before: this tool writes no table
@@ -24,6 +35,8 @@
 
 import { blankName, fromPayload, readOpacity, toPayload, type ShardModel, type ShardPayload } from 'sno-core/shards'
 import { EYE_FIELD, readEye } from 'sno-core/eye'
+import { DEFAULT_FACE, FACE_FIELD, readFace } from 'sno-core/face'
+import { faceNameShaped } from './faceName.js'
 import { CONSTRAIN_FIELD, chosenConstrain } from './walkConstrain.js'
 
 export type Validation =
@@ -44,10 +57,13 @@ export type Validation =
        * writes it.
        */
       ignored: string[]
-      /** Fields whose value was malformed and is left out, as DECK-0003 repairs them: `opacity` (drawn opaque), `constrain` (not a choice, so the default is written), `eye` (the automatic eye). */
+      /** Fields whose value was malformed and is left out, as DECK-0003 repairs them: `opacity` (drawn opaque), `constrain` (not a choice, so the default is written), `eye` (the automatic eye), `face` ("path"). */
       repaired: string[]
+      /** A `face` (DECK-0003 1.18) shaped like a mode's name that this version does not know, kept as found and read as "path"; absent when there is none. */
+      unknownFace?: string
     }
   | { ok: false; errors: string[] }
+
 
 const MODES = new Set(['solid', 'points', 'lines'])
 
@@ -157,17 +173,24 @@ export function validateSnoPayload(raw: unknown): Validation {
   const chosen = chosenConstrain(carried[CONSTRAIN_FIELD])
   // Carried in the version 2 frame, a version 1 payload's included (sno-core flips it with the vertices).
   const eye = Object.hasOwn(p, EYE_FIELD) ? readEye(carried[EYE_FIELD]) : undefined
-  const ignored = Object.keys(carried).filter((k) => k !== CONSTRAIN_FIELD && k !== EYE_FIELD)
+  // Read from the payload as given: facing is a name, the same in either frame.
+  const face = Object.hasOwn(p, FACE_FIELD) ? readFace(p[FACE_FIELD]) : undefined
+  const ignored = Object.keys(carried).filter((k) => k !== CONSTRAIN_FIELD && k !== EYE_FIELD && k !== FACE_FIELD)
   // Not written yet (see the header): named back to the agent, as before 0.1.20.
   if (p.objects !== undefined) ignored.push('objects')
   const repaired: string[] = []
   if (p.opacity !== undefined && p.opacity !== 100 && readOpacity(p.opacity) === undefined) repaired.push('opacity')
   if (CONSTRAIN_FIELD in carried && !chosen) repaired.push(CONSTRAIN_FIELD)
   if (Object.hasOwn(p, EYE_FIELD) && !eye) repaired.push(EYE_FIELD)
+  // A name of the right shape this version does not know is not malformed: kept, as an editor keeps it (DECK-0003 1.18).
+  const unknownFace = Object.hasOwn(p, FACE_FIELD) && !face && faceNameShaped(p[FACE_FIELD]) ? p[FACE_FIELD] : undefined
+  if (Object.hasOwn(p, FACE_FIELD) && !face && unknownFace === undefined) repaired.push(FACE_FIELD)
   const kept: Record<string, unknown> = {}
   if (chosen) kept[CONSTRAIN_FIELD] = chosen
   if (eye) kept[EYE_FIELD] = eye
+  if (face && face !== DEFAULT_FACE) kept[FACE_FIELD] = face
+  if (unknownFace !== undefined) kept[FACE_FIELD] = unknownFace
   const shard: ShardModel = Object.keys(kept).length ? { ...bare, extra: kept } : bare
   const payload = toPayload(shard)
-  return { ok: true, shard, payload, bytes: new TextEncoder().encode(JSON.stringify(payload)).length, vertices: shard.vertices.length, faces: shard.faces.length, ignored, repaired }
+  return { ok: true, shard, payload, bytes: new TextEncoder().encode(JSON.stringify(payload)).length, vertices: shard.vertices.length, faces: shard.faces.length, ignored, repaired, ...(unknownFace !== undefined ? { unknownFace } : {}) }
 }
