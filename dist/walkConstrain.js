@@ -80,7 +80,8 @@ export function withAuthoredConstrain(s) {
 }
 /**
  * `s` at an opacity in whole percent (DECK-0003 1.11): 100 is fully opaque
- * and is written as no field, the canonical form; 1 to 99 as that percent.
+ * and is written as no field, the canonical form; 0 to 99 as that percent
+ * (0 draws nothing of the object's own, and is written as 0).
  */
 export function withOpacity(s, opacity) {
     const { opacity: _old, ...rest } = s;
