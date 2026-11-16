@@ -532,11 +532,17 @@ describe('constrain_placed and move_placed, the smaller points of the review of 
     const same = await s.call('constrain_placed', { target: 'glass floor', opacity: 0 })
     expect(same.isError).toBe(false)
     expect(same.text).toContain('Nothing to change')
-    // "opaque" at 0 holds nothing, and says so.
+    expect(s.canonical.published.length).toBe(published)
+    // The listing says it is there although nothing of it is drawn (DECK-0003 1.11: its author can find it).
+    expect((await s.call('placed')).text).toContain('invisible (opacity 0')
+    // "opaque" at 0 holds nothing, and says so; a constrain-only change keeps opacity 0.
     const opaque = await s.call('constrain_placed', { target: 'glass floor', constrain: 'opaque' })
     expect(opaque.isError).toBe(false)
     expect(opaque.text).toContain('see-through (opacity 0)')
+    expect(opaque.text).toContain('still invisible (opacity 0)')
     expect(s.canonical.published.length).toBeGreaterThan(published)
+    const kept = (await entriesOf(bagOn(s.canonical, s.a.pubkey, k.lookupId)!, k.key)).find((e) => (e as NostrEvent).kind === SHARD_KIND) as NostrEvent
+    expect(payloadOf(kept)).toMatchObject({ opacity: 0, constrain: 'opaque' })
     // Outside 0 to 100, or not whole, is still refused, and nothing is written.
     const before = s.canonical.published.length
     for (const opacity of [-1, 101, 0.5]) expect((await s.call('constrain_placed', { target: 'glass floor', opacity })).isError, String(opacity)).toBe(true)

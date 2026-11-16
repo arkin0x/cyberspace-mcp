@@ -455,7 +455,8 @@ export class Placements {
             for (const r of b.rows) {
                 const how = r.byReference === 'sealed' ? ' [by reference, sealed to this place]' : r.byReference === 'public' ? ' [a public object placed by reference]' : '';
                 const moved = r.lineage && r.lineage !== r.id && /^[0-9a-f]{64}$/.test(r.lineage) ? `, moved (lineage ${r.lineage.slice(0, 12)})` : '';
-                const walk = r.hidden?.shard ? `, ${walkWords(r.hidden.shard)}` : '';
+                // An object at opacity 0 is still there; its author should be able to find it (DECK-0003 1.11).
+                const walk = r.hidden?.shard ? `, ${walkWords(r.hidden.shard)}${readOpacity(r.hidden.shard.opacity) === 0 ? ', invisible (opacity 0: a reader draws nothing of its own)' : ''}` : '';
                 out.push(`  ${r.type} "${r.label}" id ${r.id.slice(0, 12)} at ${words(r.at)}${how}${moved}${walk}`);
             }
         }
@@ -987,8 +988,8 @@ export class Placements {
      * constrain_placed: set the WALK setting (DECK-0003 1.12) and, if asked,
      * the opacity (1.11) of shards placed, in place, as ONOSENDAI's EDIT writes
      * them (#461, #476). Opacity is 0 to 100: at 0 nothing of the shard is
-     * drawn, and its constrain still holds walkers as written (DECK-0003 1.11, 1.12). Each bag is read fresh and changed by one call at a
-     * time; an inline shard is signed again with its lineage (d = its first
+     * drawn, and its constrain still holds walkers as written (DECK-0003 1.11,
+     * 1.12). Each bag is read fresh and changed by one call at a time; an inline shard is signed again with its lineage (d = its first
      * id) and its bag rewritten in one step, keeping every other entry exactly
      * as found; a shard hidden by reference has its own sealed object sealed
      * again to the same place under the same d (its address, which comments
@@ -1129,7 +1130,7 @@ export class Placements {
         });
         const setting = (r) => {
             const w = wantOf(r);
-            return walkWords({ mode: r.hidden.shard.mode, opacity: w.opacity, extra: { constrain: w.constrain } }) + (input.opacity !== undefined ? `, opacity ${w.opacity ?? 100}` : '');
+            return walkWords({ mode: r.hidden.shard.mode, opacity: w.opacity, extra: { constrain: w.constrain } }) + (input.opacity !== undefined ? `, opacity ${w.opacity ?? 100}` : w.opacity === 0 ? ', still invisible (opacity 0)' : '');
         };
         const name = (r) => `shard "${r.label}" at ${words(r.at)}${r.byReference === 'sealed' ? ' [by reference]' : ''}`;
         const asked = [constrain ? `constrain "${constrain}" (${CONSTRAIN_WORDS[constrain]})` : '', input.opacity !== undefined ? `opacity ${input.opacity}` : ''].filter(Boolean).join(' and ');
@@ -1147,7 +1148,7 @@ export class Placements {
             out.push(`  ${name(c.row)}: now ${setting(c.row)}; new id ${c.id.slice(0, 12)}, ${c.how}.`);
         // Opacity 0 (DECK-0003 1.11, no floor since 2026-11-15): nothing of the shard is drawn, and its constrain still holds as written (1.12).
         if (input.opacity === 0 && changed.length)
-            out.push('At opacity 0 a reader draws nothing of these shards\' own (a glow still shows), and they still hold walkers as their constrain says: "all" holds a walker at an invisible wall; "opaque" never holds one at opacity 0, since the shard is not opaque (DECK-0003 1.11, 1.12).');
+            out.push('At opacity 0 a reader draws nothing of these shards\' own (its glow, if it has one, still shows), and they still hold walkers as their constrain says: "all" holds a walker at an invisible wall; "opaque" never holds one at opacity 0, since the shard is not opaque (DECK-0003 1.11, 1.12).');
         out.push(...bagNotes);
         if (already.length)
             out.push(`Already set, left as they are: ${already.map((r) => `"${r.label}" (id ${r.id.slice(0, 12)})`).join(', ')}.`);
