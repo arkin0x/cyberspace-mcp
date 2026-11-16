@@ -19,7 +19,7 @@ import { generateSecretKey } from 'nostr-tools/pure'
 import { afterAll, describe, expect, it } from 'vitest'
 import { Agent } from '../src/agent.js'
 import { unbag } from '../src/hidden/bags.js'
-import { regionKeyAt } from '../src/hidden/crypto.js'
+import { decryptForRegion, regionKeyAt } from '../src/hidden/crypto.js'
 import { doorSecretOf, roomKey, roomLookupId } from '../src/hidden/doors.js'
 import { bytesToHex, hexToBytes, type NostrEvent } from '../src/nostr/event.js'
 import { createServer } from '../src/server.js'
@@ -145,6 +145,57 @@ describe('seal_door: a door, its room, and what a finder reads', () => {
     expect(kept[1].secret).toBe(kept[0].secret)
     expect((await call('seal_door', { name: 'Too big', lock: 'Vault Key', room_height: 6, height: 5 })).text).toMatch(/REFUSED: room_height must be a whole number from 1 to the height of the bag/)
     expect((await call('hide', { contents: { message: 'hello' }, coordinate: { dx: 0, dy: 0, dz: 0 }, height: 4, riddle: 'who?' })).text).toMatch(/REFUSED: This place is inside the room of your door/)
-    expect((await call('seal_door', { name: 'Inner', lock: 'Vault Key', room_height: 4, height: 4 })).text).toMatch(/REFUSED: A door inside the room of "Vault door" must have a lower height/)
+    // A door of the same room hidden at the room's own height stands in the ordinary bag, beside the first, with the same secret (§3.7.5).
+    const same = await call('seal_door', { name: 'Side door', lock: 'Vault Key', room_height: 4, height: 4 })
+    expect(same.isError, same.text).toBe(false)
+    expect(same.text).not.toContain('room of your door')
+    // A smaller door inside the room goes into the room bag (§3.7.6).
+    const inner = await call('seal_door', { name: 'Inner door', lock: 'Vault Key', room_height: 3, height: 4 })
+    expect(inner.text).toContain('inside the room of your door')
+    const doors = JSON.parse(readFileSync(join(dir, 'keys', 'doors.json'), 'utf8')).doors as Array<{ name: string; secret: string; plane: number }>
+    expect(doors.find((d) => d.name === 'Side door')!.secret).toBe(doors[0].secret)
+    expect(doors.find((d) => d.name === 'Inner door')!.secret).not.toBe(doors[0].secret)
+  })
+
+  it('keeps a room\'s things in it: a move inside stays in the room bag, a move out is refused, a reference placed there joins it, and the twin plane gets its own secret', async () => {
+    const { a, call } = await start()
+    const pos = (a as unknown as { keeper: { place(): { position: { x: bigint; y: bigint; z: bigint }; plane: 0 | 1 } } }).keeper.place()
+    // A move inside the room (one gibson, staying in the same h4 cube): the statue stays in the room bag.
+    const step = pos.position.x % 16n < 15n ? 1 : -1
+    const within = await call('move_placed', { target: 'statue', by: { dx: step } })
+    expect(within.isError, within.text).toBe(false)
+    expect(within.data.lookupId ?? within.text).not.toBe(regionKeyAt(pos.position, 4, 16).lookupId)
+    const out = await call('move_placed', { target: 'statue', to: { dx: 0, dy: 0, dz: 0 }, height: 6 })
+    expect(out.text).toMatch(/REFUSED: .*inside one of your locked rooms/)
+    const pub = await call('publish_object', { object: { ...PRIZE, name: 'public statue' } })
+    expect(pub.isError, pub.text).toBe(false)
+    const ref = await call('place', { address: (pub.data as { address: string }).address, coordinate: { dx: 0, dy: 0, dz: 0 }, height: 4 })
+    expect(ref.isError, ref.text).toBe(false)
+    const doors = JSON.parse(readFileSync(join(dir, 'keys', 'doors.json'), 'utf8')).doors as Array<{ name: string; secret: string; roomLookupId?: string }>
+    const roomLookup = doors[0].roomLookupId!
+    expect(roomLookup).toMatch(/^[0-9a-f]{64}$/)
+    const roomBag = relay.all().find((e) => e.kind === 33330 && e.tags.some((t) => t[0] === 'd' && t[1] === roomLookup))!
+    const rk = roomKey(regionKeyAt(pos.position, 4, 16).key, hexToBytes(doors[0].secret))
+    const entries = JSON.parse((await decryptForRegion(rk, roomBag.tags.find((t) => t[0] === 'encrypted')![2]))!) as unknown[]
+    // The statue, the inner door, and the reference to the public statue.
+    expect(entries.some((e) => Array.isArray(e) && e[0] === 'a' && String(e[1]).startsWith('33331:'))).toBe(true)
+    expect(entries.length).toBe(3)
+    // The twin region in the other plane is another room, with another secret.
+    const other = pos.plane === 0 ? 1 : 0
+    const twin = await call('seal_door', { name: 'Twin door', lock: 'Vault Key', room_height: 4, height: 5, coordinate: { x: pos.position.x.toString(), y: pos.position.y.toString(), z: pos.position.z.toString(), plane: other } })
+    expect(twin.isError, twin.text).toBe(false)
+    const after = JSON.parse(readFileSync(join(dir, 'keys', 'doors.json'), 'utf8')).doors as Array<{ name: string; secret: string }>
+    expect(after.find((d) => d.name === 'Twin door')!.secret).not.toBe(after[0].secret)
+  })
+
+  it('removes a door of several, but not the last door of a room that still holds things', async () => {
+    const { call } = await start()
+    expect((await call('remove_placed', { target: 'Back door' })).isError).toBe(false)
+    expect((await call('remove_placed', { target: 'Side door' })).isError).toBe(false)
+    const last = await call('remove_placed', { target: 'Vault door' })
+    expect(last.text).toMatch(/REFUSED: "Vault door" is the last door of its room/)
+    const names = (JSON.parse(readFileSync(join(dir, 'keys', 'doors.json'), 'utf8')).doors as Array<{ name: string }>).map((d) => d.name)
+    expect(names).toContain('Vault door')
+    expect(names).not.toContain('Back door')
   })
 })

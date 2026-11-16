@@ -67,7 +67,7 @@ import { kitObject } from './kits/transform.js'
 import { chosenConstrainOf, walkWords, withAuthoredConstrain } from './walkConstrain.js'
 import { DEFAULT_PUBLISH_PER_DAY, MAX_ALT_LENGTH, MAX_NAME_LENGTH, dProblem, newObjectId, objectPointers, publicObjectTemplate } from './publicObject.js'
 import { hopCeiling, loadOrMeasure, projectCantorMs, type Calibration } from './space/calibration.js'
-import { describePlace, distanceBetween, distanceWords, parseCoordinate, placeFromHex, placeOf, spawnPlace, type CoordinateInput, type Place } from './space/coords.js'
+import { describePlace, distanceBetween, distanceWords, parseCoordinate, placeFromHex, placeOf, spawnPlace, type CoordinateInput, type Place, type Position } from './space/coords.js'
 import { apartOnBestAxis, nearestClear, overlapping, spacingFor, type Body } from './space/personalSpace.js'
 import { AvatarSizes } from './avatarSizes.js'
 import { planSummary, priceNextStep, type Ceilings, type PricedStep } from './space/plan.js'
@@ -424,6 +424,16 @@ export class Agent {
       summarize: (h, lookupId) => this.summarize(h, lookupId),
       here: () => this.keeper.place(),
       maxHeight: MAX_KEY_HEIGHT, minHeight: SCAN_MIN_HEIGHT, log: this.log,
+      // Locked rooms (DECK-0004 §3.7): a move into a room goes into its room bag; the last door of a room that holds things stays.
+      roomKeyFor: (at, plane, height, key) => this.roomHeld(at, plane, height, key)?.key ?? key,
+      isRoomBag: (lookupId) => this.doors.isRoomBag(lookupId),
+      beforeRemove: (id) => {
+        const door = this.doors.byId(id)
+        if (!door || this.doors.siblings(door).length) return
+        const bag = door.roomLookupId ? this.keys.mine.get(door.roomLookupId) : undefined
+        if (bag && !bag.deletedAt) throw new Refusal(`"${door.name}" is the last door of its room, and the room still holds things. Removing it would leave a room bag no door names (DECK-0004 §3.7.8). First take the room's things out (remove_placed each, or remove_placed with whole_bag on one of them), then remove the door. Nothing was changed.`)
+      },
+      afterRemove: (id) => this.doors.remove(id),
     })
   }
 
@@ -2029,13 +2039,15 @@ export class Agent {
     const { keyMs } = placeKey
     let { key, regionKey } = placeKey
     // Inside the room of one of this server's doors, at exactly its height, a placement goes into the room bag (DECK-0004 §3.7.4).
-    const room = this.doors.roomAt(at.position, at.plane, input.height)
-    if (room) {
+    // A second door of that same room is not inside it: it stands in the ordinary bag like the first (§3.7.5).
+    const sameRoomDoor = 'door' in input.contents && Number(input.contents.door.room_height) === input.height
+    const inRoomBag = sameRoomDoor ? null : this.roomHeld(at.position, at.plane, input.height, placeKey.key)
+    const room = inRoomBag?.door ?? null
+    if (inRoomBag && room) {
       if (input.hint_heights || input.riddle) throw new Refusal(`This place is inside the room of your door "${room.name}" at height ${room.height}, so it goes into the room bag, which carries no hint or riddle (DECK-0004 §3.7.2). Leave them out, or hide it at another height.`)
       if ('door' in input.contents && !(Number(input.contents.door.room_height) < room.height)) throw new Refusal(`A door inside the room of "${room.name}" must have a lower height than that room (${room.height}), DECK-0004 §3.7.6.`)
-      const rk = roomKey(hexToBytes(placeKey.key.keyHex), hexToBytes(room.secret))
-      key = { ...placeKey.key, lookupId: roomLookupId(rk), keyHex: bytesToHex(rk) }
-      regionKey = rk
+      key = inRoomBag.key
+      regionKey = inRoomBag.regionKey
     }
     // One bag per author per region: read before write, never replace; one change to a bag at a time (placed.ts).
     return this.placements.withBags([key.lookupId], async () => {
@@ -2139,13 +2151,18 @@ export class Agent {
 
   /** Hide a reference entry in the agent's bag at a cube: the same read-before-write as hide. */
   private async hideReference(ref: Reference, at: Place, height: number, what: string): Promise<ToolResult> {
-    const { key, keyMs, regionKey } = this.regionAt(at, height)
+    const cube = this.regionAt(at, height)
+    // A reference placed inside one of this server's rooms, at its height, goes into the room bag as anything else does (DECK-0004 §3.7.4).
+    const inRoom = this.roomHeld(at.position, at.plane, height, cube.key)
+    const { keyMs } = cube
+    const key = inRoom?.key ?? cube.key
+    const regionKey = inRoom?.regionKey ?? cube.regionKey
     return this.placements.withBags([key.lookupId], async () => {
     const { current, entries: carried } = await this.placements.ownBag(key.lookupId, regionKey)
     const now = nowSeconds()
     const have = new Set(carried.map(entryKey))
     const merged = have.has(entryKey(ref)) ? carried : [...carried, ref]
-    const settings = current ? bagSettingsOf(current, height) : { heightTag: true, hint: null, riddle: '' }
+    const settings = inRoom ? ROOM_BAG_SETTINGS : current ? bagSettingsOf(current, height) : { heightTag: true, hint: null, riddle: '' }
     const createdAt = Math.max(now, (current?.created_at ?? 0) + 1, this.placements.floor(key.lookupId))
     const bag = this.sign(await bagTemplate(merged, regionKey, key.lookupId, height, createdAt, HIDDEN_KIND, settings, { at: at.position, plane: hintPlaneFor(current, merged, at.plane) }))
     // Recorded whole before it is sent, so no later rewrite builds on an older copy, whichever relays take it.
@@ -2459,7 +2476,18 @@ export class Agent {
     const q = (((Number(li.turn ?? 0) / 90) % 4) + 4) % 4
     if (!Number.isInteger(q)) throw new Refusal(`The ${which} look's turn must be a multiple of 90.`)
     const unit = v.shard.unit + Math.max(0, Math.floor(Number(li.scale ?? 0)))
+    if (unit > 84) throw new Refusal(`The ${which} look's scale would put its unit past 84.`)
     return { ...turnModel(v.shard, q), unit }
+  }
+
+  /** The room bag's key, when a place at this height is inside the room of one of this server's doors (DECK-0004 §3.7.4); null otherwise. */
+  private roomHeld(at: Position, plane: Plane, height: number, key: HeldKey): { key: HeldKey; regionKey: Uint8Array; door: OwnDoor } | null {
+    const door = this.doors.roomAt(at, plane, height)
+    if (!door) return null
+    const rk = roomKey(hexToBytes(key.keyHex), hexToBytes(door.secret))
+    const lookupId = roomLookupId(rk)
+    this.doors.noteRoom(door, lookupId)
+    return { key: { ...key, lookupId, keyHex: bytesToHex(rk) }, regionKey: rk, door }
   }
 
   /** seal_door: a locked door (DECK-0004 §3.7) hidden like a chest; its room bag takes what is hidden in its room at its height from then on. */

@@ -97,6 +97,8 @@ export interface OwnDoor {
   bagHeight: number
   secret: string
   createdAt: number
+  /** The room bag's lookup id, once something has been hidden in the room (so a move or a removal knows a room bag when it sees one). */
+  roomLookupId?: string
 }
 
 interface DoorsFile { version: 1; doors: OwnDoor[] }
@@ -124,6 +126,38 @@ export class DoorStore {
   /** Keep a door once its bag is written. */
   add(door: OwnDoor): void {
     this.doors.push(door)
+    this.save()
+  }
+
+  /** One of these doors, by its event id. */
+  byId(id: string): OwnDoor | null {
+    return this.doors.find((d) => d.doorId === id) ?? null
+  }
+
+  /** The other doors of a door's room: the same signer (all of these are), height, region and plane (§3.7.5). */
+  siblings(door: OwnDoor): OwnDoor[] {
+    return this.doors.filter((d) => d !== door && d.height === door.height && d.plane === door.plane && inRoom(toPos(door.at), door.height, toPos(d.at)))
+  }
+
+  /** Remember a room's bag, on every door of the room. */
+  noteRoom(door: OwnDoor, lookupId: string): void {
+    let changed = false
+    for (const d of [door, ...this.siblings(door)]) if (d.roomLookupId !== lookupId) { d.roomLookupId = lookupId; changed = true }
+    if (changed) this.save()
+  }
+
+  /** Whether a bag is the room bag of one of these doors. */
+  isRoomBag(lookupId: string): boolean {
+    return this.doors.some((d) => d.roomLookupId === lookupId)
+  }
+
+  /** Forget a door once it is removed. */
+  remove(id: string): void {
+    const i = this.doors.findIndex((d) => d.doorId === id)
+    if (i >= 0) { this.doors.splice(i, 1); this.save() }
+  }
+
+  private save(): void {
     this.dir.writeJson(DOORS_FILE, { version: 1, doors: this.doors } satisfies DoorsFile)
   }
 }

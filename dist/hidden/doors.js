@@ -98,6 +98,40 @@ export class DoorStore {
     /** Keep a door once its bag is written. */
     add(door) {
         this.doors.push(door);
+        this.save();
+    }
+    /** One of these doors, by its event id. */
+    byId(id) {
+        return this.doors.find((d) => d.doorId === id) ?? null;
+    }
+    /** The other doors of a door's room: the same signer (all of these are), height, region and plane (§3.7.5). */
+    siblings(door) {
+        return this.doors.filter((d) => d !== door && d.height === door.height && d.plane === door.plane && inRoom(toPos(door.at), door.height, toPos(d.at)));
+    }
+    /** Remember a room's bag, on every door of the room. */
+    noteRoom(door, lookupId) {
+        let changed = false;
+        for (const d of [door, ...this.siblings(door)])
+            if (d.roomLookupId !== lookupId) {
+                d.roomLookupId = lookupId;
+                changed = true;
+            }
+        if (changed)
+            this.save();
+    }
+    /** Whether a bag is the room bag of one of these doors. */
+    isRoomBag(lookupId) {
+        return this.doors.some((d) => d.roomLookupId === lookupId);
+    }
+    /** Forget a door once it is removed. */
+    remove(id) {
+        const i = this.doors.findIndex((d) => d.doorId === id);
+        if (i >= 0) {
+            this.doors.splice(i, 1);
+            this.save();
+        }
+    }
+    save() {
         this.dir.writeJson(DOORS_FILE, { version: 1, doors: this.doors });
     }
 }

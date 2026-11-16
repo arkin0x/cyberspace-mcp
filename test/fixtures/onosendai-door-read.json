@@ -1,7 +1,7 @@
 {
  "note": "What ONOSENDAI's own reader read from test/fixtures/xor-door.json (scripts/check-door-in-onosendai.ts).",
  "onosendai": "4db7253e",
- "fixtureSha256": "991d38ba1fc33e2851ca246b41ad4be72efee8558586245bf7a2d307e2917ca9",
+ "fixtureSha256": "813c71081c8e73bed920c7c19e91eb9aad83479214d4a02ffae806b58aebcec0",
  "ok": true,
  "checks": [
   {
@@ -50,7 +50,7 @@
   "doorHeight": 4,
   "closedLook": "slab",
   "openLook": "slab open",
-  "roomLookupId": "2d1a673db9d02897d14b7e9eed26659d3a87afff63a1ac4876ff7b78f5544734",
+  "roomLookupId": "a8a5fe0abb59fd5b6976274cc7d90cb6bc856ffc76867215df7bba61acce8f85",
   "roomEntries": [
    "statue"
   ]
