@@ -1,14 +1,14 @@
 // avatarVectors.test.ts: what this server draws and refuses for an avatar is
 // the spec's (spec 8.10 since 2026-11: no proof of work, a 128 KiB limit).
 // fixtures/avatar-vectors.json is the spec's golden file, copied unchanged
-// from arkin0x/cyberspace at 938b105 (written by avatar-reference.py; sha256
-// 22830c6e...84725f). Every `verdicts` row goes through verifyAvatar, the
+// from arkin0x/cyberspace at 1420330 (written by avatar-reference.py; sha256
+// 3f2b9220...febf0e). Every `verdicts` row goes through verifyAvatar, the
 // check paidShard and set_avatar read; every `content_limit` and `corpus`
-// row through set_avatar's size rule. No network.
+// row through avatarTooLarge, the predicate set_avatar refuses by. No network.
 
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { AVATAR_CONTENT_MAX, AVATAR_KIND, avatarContentBytes, paidShard, verifyAvatar } from '../src/avatar.js'
+import { AVATAR_CONTENT_MAX, AVATAR_KIND, avatarContentBytes, avatarTooLarge, paidShard, verifyAvatar } from '../src/avatar.js'
 
 interface VectorEvent { kind: number; pubkey: string; created_at: number; tags: string[][]; content: string | null; id: string; content_recipe?: { prefix: string; fill: string; count: number; suffix: string } }
 interface Vectors {
@@ -27,8 +27,8 @@ function built(e: VectorEvent): VectorEvent & { content: string } {
   return { ...e, content: r.prefix + r.fill.repeat(r.count) + r.suffix }
 }
 
-/** set_avatar's size rule: refused above AVATAR_CONTENT_MAX bytes of UTF-8. */
-const refusedHere = (bytes: number): boolean => bytes > AVATAR_CONTENT_MAX
+/** set_avatar's own size rule (avatarTooLarge): refused above AVATAR_CONTENT_MAX bytes of UTF-8. */
+const refusedHere = avatarTooLarge
 
 describe('the spec\'s avatar vectors', () => {
   it('the constants are the spec\'s', () => {

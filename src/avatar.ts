@@ -34,6 +34,11 @@ export function avatarTemplate(shard: ShardModel | null, createdAt: number): Eve
   }
 }
 
+/** Whether content of this many UTF-8 bytes is over the limit (a reader draws the dodecahedron for it). */
+export function avatarTooLarge(bytes: number): boolean {
+  return bytes > AVATAR_CONTENT_MAX
+}
+
 /** The refusal's words for content over the limit. */
 export function avatarTooLargeWords(bytes: number): string {
   return `the payload is ${bytes} bytes, and an avatar is at most ${AVATAR_CONTENT_MAX} bytes (spec 8.10; a reader draws the dodecahedron for anything larger)`

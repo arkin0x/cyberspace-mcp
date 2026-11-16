@@ -5,8 +5,8 @@
 // thread nothing else was answered meanwhile, no progress notification left,
 // and a client that gave up could not stop it. Here the proof runs on a
 // worker_thread, as a ride's leaves (rideHost.ts) already do: the main
-// thread keeps answering tool calls and
-// sending progress, and a cancellation terminates the thread at once.
+// thread keeps answering tool calls and sending progress, and a
+// cancellation terminates the thread at once.
 //
 // Only the work moves. The thread is handed the head's coordinates and id
 // and hands back the proof's values; the caller builds the template, confirms

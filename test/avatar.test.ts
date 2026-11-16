@@ -50,6 +50,20 @@ const padded = (n: number) => ({
   colors: Array.from({ length: n }, (_, i) => [((i * 37) % 255) / 255, ((i * 91) % 255) / 255, ((i * 13) % 255) / 255]),
 })
 
+/** A padded payload whose content as signed is exactly `bytes` long: the vertex count gets within 63, the name (up to 64 characters) the rest. */
+function exactly(bytes: number) {
+  const sizeOf = (n: number): number => { const v = validateSnoPayload({ ...padded(n), name: 'P' }); if (!v.ok) throw new Error(v.errors.join(' ')); return v.bytes }
+  // About 25.3 bytes a vertex: aim a little short with each step, a handful of validations in all.
+  let n = Math.floor(bytes / 26)
+  for (let step = 0; step < 20; step++) {
+    const base = sizeOf(n)
+    if (base > bytes) { n -= 3; continue }
+    if (bytes - base <= 63) return { ...padded(n), name: 'P'.repeat(1 + bytes - base) }
+    n += Math.max(1, Math.floor((bytes - base - 30) / 26))
+  }
+  throw new Error(`no payload of exactly ${bytes} bytes found`)
+}
+
 const avatarsOf = (pubkey: string): NostrEvent[] => canonical.published.filter((e) => e.kind === AVATAR_KIND && e.pubkey === pubkey)
 
 describe('ONOSENDAI\'s avatar, read here', () => {
@@ -152,6 +166,26 @@ describe('set_avatar', () => {
     const before = avatarsOf(a.pubkey).length
     await expect(a.setAvatar({ object: padded(5300) })).rejects.toThrow(/the payload is 13\d{4} bytes, and an avatar is at most 131072 bytes/)
     expect(avatarsOf(a.pubkey)).toHaveLength(before)
+  }, 30_000)
+
+  it('the limit is exact: 131072 bytes of content are published, 131073 are refused', async () => {
+    const a = await start()
+    const at = exactly(AVATAR_CONTENT_MAX)
+    const r = await a.setAvatar({ object: at })
+    expect(r.data.bytes).toBe(AVATAR_CONTENT_MAX)
+    expect(new TextEncoder().encode(avatarsOf(a.pubkey).at(-1)!.content).length).toBe(AVATAR_CONTENT_MAX)
+    const before = avatarsOf(a.pubkey).length
+    await expect(a.setAvatar({ object: exactly(AVATAR_CONTENT_MAX + 1) })).rejects.toThrow(/the payload is 131073 bytes, and an avatar is at most 131072 bytes/)
+    expect(avatarsOf(a.pubkey)).toHaveLength(before)
+  }, 120_000)
+
+  it('a burst of calls signs each in a later second, never dated ahead of the clock', async () => {
+    const a = await start()
+    const results = await Promise.all([a.setAvatar({ object: wedge }), a.setAvatar({ object: { ...wedge, name: 'Second' } }), a.setAvatar({ clear: true })])
+    const events = results.map((r) => avatarsOf(a.pubkey).find((e) => e.id === r.data.eventId)!)
+    const times = events.map((e) => e.created_at)
+    expect(new Set(times).size).toBe(3)
+    expect(Math.max(...times)).toBeLessThanOrEqual(Math.floor(Date.now() / 1000))
   }, 30_000)
 
   it('a payload of about 76 KB is published as it is, with a short note that remote signers may refuse one that large', async () => {

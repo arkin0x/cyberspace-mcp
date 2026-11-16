@@ -32,7 +32,7 @@ import { ProofAborted, proveInThread, type ProofJob, type ProofResult } from './
 import { ChainKeeper } from './chain/keeper.js'
 import { askChainEvents, parsePubkey } from './chain/resolve.js'
 import { causeWords, decideSelfCheck } from './chain/selfCheck.js'
-import { AVATAR_CONTENT_MAX, AVATAR_CONTENT_WARN, AVATAR_KIND, avatarContentBytes, avatarTemplate, avatarTooLargeWords, paidShard, verifyAvatar } from './avatar.js'
+import { AVATAR_CONTENT_WARN, AVATAR_KIND, avatarContentBytes, avatarTemplate, avatarTooLarge, avatarTooLargeWords, paidShard, verifyAvatar } from './avatar.js'
 import { Chat, type ChatLine } from './chat.js'
 import {
   CHAT_KIND, HIDDEN_KIND, MAX_ABOUT, MAX_ITEM_NAME, bagEntries, carriedTags, hintPlaneFor, namesNoPlane, planeOfEntry, sameHintBox, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
@@ -2408,7 +2408,8 @@ export class Agent {
    * The created_at of the last avatar this server signed. A replaceable tie
    * on created_at goes to the lower id (NIP-01), so a second avatar signed in
    * the same second as the first could lose to it by chance: each avatar is
-   * signed at least a second after the last.
+   * signed in a later second than the last, waiting for the clock rather
+   * than dating it ahead, so a burst of calls never signs into the future.
    */
   private lastAvatarAt = 0
 
@@ -2434,7 +2435,8 @@ export class Agent {
       }
       const v = validateSnoPayload(raw)
       if (!v.ok) throw new Refusal(`Not set: the payload is not valid SNO. ${v.errors.join(' ')}`)
-      if (v.bytes > AVATAR_CONTENT_MAX) throw new Refusal(`Not set: ${avatarTooLargeWords(v.bytes)}. Use fewer vertices and faces.`)
+      // v.bytes is the content as it is signed: sno-core's toPayload, as avatarTemplate writes it.
+      if (avatarTooLarge(v.bytes)) throw new Refusal(`Not set: ${avatarTooLargeWords(v.bytes)}. Use fewer vertices and faces.`)
       shard = v.shard
       source = 'payload'
     } else if (input.address !== undefined) {
@@ -2444,15 +2446,14 @@ export class Agent {
       try { raw = JSON.parse(object.content || 'null') } catch { raw = null }
       const v = validateSnoPayload(raw)
       if (!v.ok) throw new Refusal(`The object at ${address} is not valid SNO: ${v.errors.join(' ')}`)
-      if (v.bytes > AVATAR_CONTENT_MAX) throw new Refusal(`Not set: the object at ${address} is too large for an avatar: ${avatarTooLargeWords(v.bytes)}.`)
+      if (avatarTooLarge(v.bytes)) throw new Refusal(`Not set: the object at ${address} is too large for an avatar: ${avatarTooLargeWords(v.bytes)}.`)
       shard = v.shard
       source = `address ${address} (payload copied: an avatar carries its shape, not a reference)`
     }
-    const createdAt = Math.max(nowSeconds(), this.lastAvatarAt + 1)
-    const template: EventTemplate = avatarTemplate(shard, createdAt)
-    // The content as it is signed (sno-core's toPayload), checked as well as the payload as given.
+    // A later second than the last avatar signed here, by waiting (at most a second), never by dating it ahead.
+    while (nowSeconds() <= this.lastAvatarAt) await new Promise((r) => setTimeout(r, 100))
+    const template: EventTemplate = avatarTemplate(shard, nowSeconds())
     const contentBytes = avatarContentBytes(template.content)
-    if (contentBytes > AVATAR_CONTENT_MAX) throw new Refusal(`Not set: ${avatarTooLargeWords(contentBytes)}. Use fewer vertices and faces.`)
     const event = this.sign(template)
     // The reader's check before any relay sees it: what ONOSENDAI would not draw is never published.
     if (shard) {
@@ -2463,8 +2464,9 @@ export class Agent {
     this.lastAvatarAt = event.created_at
     const entry = this.outbox.add(event)
     const result = await this.outbox.send(entry)
-    // The size the personal-space rule gives the agent's own avatar from now on (space/personalSpace.ts).
-    if (entry.accepted.length) this.avatars.set(this.pubkey, shard)
+    // The size the personal-space rule gives the agent's own avatar from now on (space/personalSpace.ts),
+    // unless a newer avatar was signed while this one was sent: the newest one is the one relays keep.
+    if (entry.accepted.length && event.created_at === this.lastAvatarAt) this.avatars.set(this.pubkey, shard)
     const relayWords = entry.accepted.length ? `Accepted by ${entry.accepted.join(', ')}.` : `No relay accepted it${result.ok ? '' : `: ${result.reason}`}.`
     // Spec 8.10, non-normative: some remote signers (NIP-46) refuse an event this large. This server signs with its own key.
     const warnWords = contentBytes > AVATAR_CONTENT_WARN ? ` Over ${AVATAR_CONTENT_WARN} bytes: a client that signs through a remote signer (NIP-46) may be refused one this large; this server signs with its own key.` : ''

@@ -4,10 +4,11 @@
 //
 // A person's avatar is their newest kind 11333 (spec 8.10), drawn only when
 // cyberspace-core's verifyAvatar accepts it, within the size limit
-// (paidShard, as ONOSENDAI's useAvatars draws it), else the default. Nothing here ever makes a tool wait: radius() answers from
-// memory, the default for anyone not read yet, and asks the relays in the
-// background, a batch at a time; an answer is kept five minutes, as
-// ONOSENDAI's useAvatars refreshes.
+// (paidShard, as ONOSENDAI's useAvatars draws it), else the default.
+// Nothing here ever makes a tool wait: radius() answers from memory, the
+// default for anyone not read yet, and asks the relays in the background, a
+// batch at a time; an answer is kept five minutes, as ONOSENDAI's useAvatars
+// refreshes.
 import { AVATAR_KIND, paidShard } from './avatar.js';
 import { DEFAULT_AVATAR_RADIUS, avatarRadius } from './space/personalSpace.js';
 /** How long a read avatar is trusted before it is read again. */
