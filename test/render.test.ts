@@ -13,6 +13,7 @@ import type { Agent } from '../src/agent.js'
 import { renderShard } from '../src/render.js'
 import { createServer } from '../src/server.js'
 import { validateSnoPayload } from '../src/sno.js'
+import { drawnEye } from 'sno-core/eye'
 
 /** Read back a PNG this encoder wrote: 8-bit RGB, rows filtered None or Sub. */
 function decode(png: Buffer): { width: number; height: number; at: (x: number, y: number) => [number, number, number] } {
@@ -161,6 +162,62 @@ describe('render', () => {
     const r = renderShard(shard, { size: 512 })
     expect(performance.now() - t0).toBeLessThan(1500)
     expect(r.faces).toBe(600)
+  })
+
+  it('marks an avatar\'s eye with a magenta ring over everything, keeps a far one in the frame, and names it in the caption', () => {
+    const magenta = (png: Buffer) => {
+      const img = decode(png)
+      let n = 0, sx = 0, sy = 0
+      for (let y = 0; y < img.height; y++) for (let x = 0; x < img.width; x++) {
+        const [r, g, b] = img.at(x, y)
+        if (r > 200 && g < 110 && b > 180) { n++; sx += x; sy += y }
+      }
+      return { n, x: sx / Math.max(n, 1), y: sy / Math.max(n, 1) }
+    }
+    const shard = shardOf(CUBE)
+    const plain = renderShard(shard, { view: 'front', size: 256 })
+    expect(magenta(plain.png).n).toBe(0)
+    expect(plain.eye).toBeUndefined()
+    expect(plain.caption).not.toMatch(/eye/)
+    // Inside the cube, at its middle: drawn over the front face, not hidden by it.
+    const inside = renderShard(shard, { view: 'front', size: 256, eye: { at: [0, 0, 0], chosen: false } })
+    const mark = magenta(inside.png)
+    expect(mark.n).toBeGreaterThan(30)
+    const cube = decode(plain.png)
+    // The ring's middle is where the cube's middle is drawn: the front face's center of cyan.
+    let cx = 0, cy = 0, cn = 0
+    for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) { const c = cube.at(x, y); if (c[2] > c[0] + 60) { cx += x; cy += y; cn++ } }
+    expect(Math.abs(mark.x - cx / cn)).toBeLessThan(3)
+    expect(Math.abs(mark.y - cy / cn)).toBeLessThan(3)
+    expect(inside.eye).toEqual({ at: [0, 0, 0], chosen: false })
+    expect(inside.caption).toContain('; the magenta ring is the eye, AUTO, at 0, 0, 0 units')
+    // Higher up on the picture for a higher eye, and CHOSEN in the caption.
+    const high = renderShard(shard, { view: 'front', size: 256, eye: { at: [0, 0.75, 0], chosen: true } })
+    expect(magenta(high.png).y).toBeLessThan(mark.y - 10)
+    expect(high.caption).toContain('the magenta ring is the eye, CHOSEN, at 0, 0.75, 0 units')
+    // Far outside the shape (DECK-0003 1.17 does not clamp it): the frame grows to show it.
+    const far = renderShard(shard, { view: 'front', size: 256, eye: { at: [0, 20, 20], chosen: true } })
+    expect(magenta(far.png).n).toBeGreaterThan(30)
+  })
+
+  it('puts the eye where a vertex at the same wire point is drawn: the payload frame, +Z toward the viewer, never negated', () => {
+    // One point 3 units toward the viewer and 2 up, and an eye written at the same place; seen from the side, Z is across the picture.
+    const point = shardOf({ v: 2, name: 'pt', unit: 0, mode: 'points', vertices: [[0, 2, 3]], colors: [7], faces: [], eye: [0, 240, 360] })
+    const eye = drawnEye(point)
+    expect(eye).toEqual([0, 240, 360])
+    const at = eye.map((t) => t / 120) as [number, number, number]
+    const centroid = (png: Buffer, test: (c: [number, number, number]) => boolean) => {
+      const img = decode(png)
+      let n = 0, sx = 0, sy = 0
+      for (let y = 0; y < img.height; y++) for (let x = 0; x < img.width; x++) if (test(img.at(x, y))) { n++; sx += x; sy += y }
+      return { n, x: sx / Math.max(n, 1), y: sy / Math.max(n, 1) }
+    }
+    const dot = centroid(renderShard(point, { view: 'side', size: 256 }).png, (c) => c[2] > 150 && c[1] > 150 && c[0] < 100)
+    const ring = centroid(renderShard(point, { view: 'side', size: 256, eye: { at, chosen: true } }).png, ([r, g, b]) => r > 200 && g < 110 && b > 180)
+    expect(dot.n).toBeGreaterThan(5)
+    expect(ring.n).toBeGreaterThan(30)
+    expect(Math.abs(ring.x - dot.x)).toBeLessThan(3)
+    expect(Math.abs(ring.y - dot.y)).toBeLessThan(3)
   })
 
   it('comes back over MCP as an image content block and a caption', async () => {

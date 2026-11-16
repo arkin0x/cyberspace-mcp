@@ -20,6 +20,11 @@
 //
 // Placed parts (DECK-0003 1.10) are not fetched or drawn here; the caption
 // says how many were left out.
+//
+// For an avatar, set_avatar passes the eye (DECK-0003 1.17), where the
+// wearer's first-person view looks from, and it is marked over everything
+// else: a magenta ring around a dot, on a dark halo, since the eye usually
+// sits inside the shape. The caption names it, AUTO or CHOSEN.
 import { createHash } from 'node:crypto';
 import { faceEdges } from 'sno-core/outline';
 import { formatCellSize } from 'sno-core/scale';
@@ -63,6 +68,9 @@ const GRID = [0.13, 0.22, 0.28];
 const AXIS_X = [0.85, 0.25, 0.25];
 const AXIS_Y = [0.3, 0.8, 0.35];
 const AXIS_Z = [0.3, 0.5, 0.95];
+/** The eye marker: magenta, a color no axis uses, on a near-black halo. */
+const EYE = [255, 60, 230];
+const EYE_HALO = [0, 0, 0];
 /** Outlines darken the pixels where one face meets another at a crease, or meets nothing. */
 const OUTLINE = 0.55;
 /** Supersampling per axis: drawn at twice the size and averaged down, so edges are smooth. */
@@ -172,6 +180,9 @@ export function renderShard(shard, opts = {}) {
         for (const z of [gz0, gz1])
             fit([x, gridY, z]);
     fit([0, axisLen, 0]);
+    // An eye may sit outside the shape (DECK-0003 1.17 does not hold it to the model's box): keep it in the frame.
+    if (opts.eye)
+        fit(opts.eye.at);
     for (let i = 0; i < nv; i++)
         fit([P[i * 3], P[i * 3 + 1], P[i * 3 + 2]]);
     const span = Math.max(maxX - minX, maxY - minY, 1e-9);
@@ -302,6 +313,28 @@ export function renderShard(shard, opts = {}) {
     for (let f = 0; f < faces.length; f++)
         if (shown[f] >= SS * SS && back[f])
             backFacing++;
+    // The eye over everything, after the count above: it is not a face.
+    if (opts.eye) {
+        const ex = cx + sx(opts.eye.at) * scale, ey = cy - sy(opts.eye.at) * scale;
+        const ring = SS * Math.max(6, view.size / 36);
+        const band = SS * Math.max(1.5, view.size / 160);
+        const rr = Math.ceil(ring + 2 * band);
+        for (let oy = -rr; oy <= rr; oy++) {
+            for (let ox = -rr; ox <= rr; ox++) {
+                const px = Math.floor(ex) + ox, py = Math.floor(ey) + oy;
+                if (px < 0 || py < 0 || px >= W || py >= W)
+                    continue;
+                const dist = Math.hypot(ox, oy);
+                // A dot in the middle and a ring around it, each inside a halo one band wide.
+                const core = ring * 0.3;
+                const paint = dist <= core || Math.abs(dist - ring) <= band / 2 ? EYE
+                    : dist <= core + band || Math.abs(dist - ring) <= band * 1.5 ? EYE_HALO : null;
+                if (!paint)
+                    continue;
+                color.set(paint, (py * W + px) * 3);
+            }
+        }
+    }
     const N = view.size;
     const out = downsample(color, W, N);
     const png = encodePng(N, N, out);
@@ -316,9 +349,10 @@ export function renderShard(shard, opts = {}) {
         `${JSON.stringify(shard.name)}: ${shard.vertices.length} vertices, ${shard.faces.length} faces, mode ${shard.mode}; ${box}; one unit is ${formatCellSize(shard.unit)} (2^${shard.unit} gibsons), one floor square is ${step} unit${step === 1 ? '' : 's'} at y ${gridY}; ${viewWords}, ${N}x${N}`,
         backFacing > 0 ? `; ${backFacing} face${backFacing === 1 ? ' shows its' : 's show their'} back (darker: wound clockwise from here; if that side is the outside, reverse the face's vertex order)` : '',
         partsNotDrawn > 0 ? `; ${partsNotDrawn} placed part${partsNotDrawn === 1 ? '' : 's'} not drawn` : '',
+        opts.eye ? `; the magenta ring is the eye, ${opts.eye.chosen ? 'CHOSEN' : 'AUTO'}, at ${opts.eye.at.map(fmt).join(', ')} units` : '',
         `; drawn in ${Math.round(ms)} ms.`,
     ].join('');
-    return { png, size: N, view: { name: view.name, yaw: view.yaw, pitch: view.pitch }, vertices: shard.vertices.length, faces: shard.faces.length, bounds, backFacing, partsNotDrawn, gridY, ms, caption };
+    return { png, size: N, view: { name: view.name, yaw: view.yaw, pitch: view.pitch }, vertices: shard.vertices.length, faces: shard.faces.length, bounds, backFacing, partsNotDrawn, ...(opts.eye ? { eye: opts.eye } : {}), gridY, ms, caption };
 }
 /**
  * The frame's buffers, kept between calls and cleared for each: at the largest

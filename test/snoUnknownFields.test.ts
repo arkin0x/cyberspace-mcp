@@ -31,6 +31,22 @@ describe('fields this tool does not know', () => {
     expect(v.payload).not.toHaveProperty('objects')
   })
 
+  it('keep a well formed `eye` (DECK-0003 1.17), and leave out a malformed one as repaired, never as unknown', () => {
+    const v = validateSnoPayload({ ...tri, eye: [0, 159, -60] })
+    expect(v.ok && v.ignored).toEqual([])
+    expect(v.ok && v.repaired).toEqual([])
+    expect(v.ok && (v.payload as unknown as Record<string, unknown>).eye).toEqual([0, 159, -60])
+    // A version 1 payload's eye is read into the version 2 frame with its vertices.
+    const v1 = validateSnoPayload({ ...tri, v: 1, colors: [[1, 1, 1], [1, 1, 1], [1, 1, 1]], eye: [0, 159, -60] })
+    expect(v1.ok && (v1.payload as unknown as Record<string, unknown>).eye).toEqual([0, 159, 60])
+    for (const eye of [[0, 159], [0, 1.5, 0], [0, 7681, 0], 'up', null]) {
+      const bad = validateSnoPayload({ ...tri, eye })
+      expect(bad.ok && bad.repaired).toEqual(['eye'])
+      expect(bad.ok && bad.ignored).toEqual([])
+      expect(bad.ok && bad.payload).not.toHaveProperty('eye')
+    }
+  })
+
   it('are an empty list when there are none', () => {
     const v = validateSnoPayload(tri)
     expect(v.ok && v.ignored).toEqual([])

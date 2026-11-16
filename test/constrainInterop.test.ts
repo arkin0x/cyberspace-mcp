@@ -54,12 +54,14 @@ describe('what place, hide and publish_object write, against ONOSENDAI 88da640',
   it('validation keeps a chosen word and names a malformed constrain or opacity as repaired, never as unknown', () => {
     expect(shardOf(fx.payloads.all).shard.extra).toEqual({ constrain: 'all' })
     expect(shardOf(fx.payloads.none).shard).not.toHaveProperty('extra')
-    const bad = shardOf({ ...fx.payloads.none, constrain: 'ALL', opacity: 0, note: 'x' })
+    const bad = shardOf({ ...fx.payloads.none, constrain: 'ALL', opacity: 101, note: 'x' })
     expect(bad.ignored).toEqual(['note'])
     expect(bad.repaired).toEqual(['opacity', 'constrain'])
     expect(bad.shard).not.toHaveProperty('extra')
     expect(shardOf(fx.payloads.faint).shard.opacity).toBe(40)
     expect(shardOf({ ...fx.payloads.none, opacity: 100 }).repaired).toEqual([])
+    // Since sno-core 0.1.30 (DECK-0003 1.11), 0 is a percent like any other: it draws nothing of the object's own.
+    expect(shardOf({ ...fx.payloads.none, opacity: 0 }).repaired).toEqual([])
   })
 })
 
@@ -94,7 +96,7 @@ describe('rewritePayload keeps what it does not change', () => {
   })
 
   it('a malformed opacity is not written again; a payload that is not SNO is refused (null)', () => {
-    const out = JSON.parse(rewritePayload(JSON.stringify({ ...base, opacity: 0 }), { constrain: 'all' })!) as Record<string, unknown>
+    const out = JSON.parse(rewritePayload(JSON.stringify({ ...base, opacity: 101 }), { constrain: 'all' })!) as Record<string, unknown>
     expect(out).not.toHaveProperty('opacity')
     expect(rewritePayload('not json')).toBeNull()
     expect(rewritePayload(JSON.stringify({ ...base, faces: 'x' }))).toBeNull()

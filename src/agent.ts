@@ -21,7 +21,8 @@ import type { Filter } from 'nostr-tools/filter'
 import { v2 as nip44 } from 'nostr-tools/nip44'
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { normalizeURL } from 'nostr-tools/utils'
-import { toPayload, type ShardModel } from 'sno-core/shards'
+import { TICKS_PER_UNIT, toPayload, type ShardModel } from 'sno-core/shards'
+import { EYE_FIELD, EYE_REACH, drawnEye, eyeChosen, readEye, type Eye } from 'sno-core/eye'
 import { Budget, DAILY_BUDGET_FILE, DEFAULT_CAP_DAILY_SECONDS } from './budget.js'
 import { ACTION_KIND, chainTemplateProblem, hopTemplate, sidestepTemplate, spawnTemplate } from './chain/builder.js'
 import { findDivergence } from './chain/divergence.js'
@@ -163,9 +164,17 @@ const OBJECTS_REMEMBERED = 64
 function ignoredNote(ignored: string[], repaired: string[] = []): string {
   const left = ignored.length ? ` Left out, not fields this tool knows (DECK-0003 section 1.1): ${ignored.map((k) => JSON.stringify(k)).join(', ')}.` : ''
   const fixed = repaired.map((k) => (k === 'opacity'
-    ? ' "opacity" was not a whole percent from 1 to 100, so it is left out and the object is drawn fully opaque (DECK-0003 1.11).'
-    : ' "constrain" was not one of "off", "all" or "opaque", so it is not a choice: the default "opaque" is written (DECK-0003 1.12).')).join('')
+    ? ' "opacity" was not a whole percent from 0 to 100, so it is left out and the object is drawn fully opaque (DECK-0003 1.11).'
+    : k === EYE_FIELD
+      ? ` "eye" was not three whole numbers of ticks from ${-EYE_REACH} to ${EYE_REACH}, so it is left out: worn as an avatar, it looks from the automatic eye (DECK-0003 1.17).`
+      : ' "constrain" was not one of "off", "all" or "opaque", so it is not a choice: the default "opaque" is written (DECK-0003 1.12).')).join('')
   return left + fixed
+}
+
+/** An avatar's eye (DECK-0003 1.17) in words: "AUTO 0, 159, 0 ticks (0, 1.325, 0 units)", or CHOSEN for one its author wrote. */
+function eyeWords(eye: Eye, chosen: boolean): string {
+  const units = eye.map((t) => String(Math.round((t / TICKS_PER_UNIT) * 1000) / 1000))
+  return `${chosen ? 'CHOSEN' : 'AUTO'} ${eye.join(', ')} ticks (${units.join(', ')} units)`
 }
 
 /**
@@ -2422,6 +2431,13 @@ export class Agent {
    * the content is at most AVATAR_CONTENT_MAX bytes, refused above it, and
    * the signed event is checked with cyberspace-core's verifyAvatar before
    * any relay sees it.
+   *
+   * The payload's `eye` (DECK-0003 1.17, ruled 2026-11-16), where the
+   * avatar's own first-person viewer looks from, is published as given; a
+   * malformed one in `object` is refused, since a publisher never writes
+   * one, and one in an object copied by address is left out (AUTO, as every
+   * reader reads it). The answer says which eye goes out, and the picture
+   * marks it.
    */
   async setAvatar(input: { object?: unknown; address?: string; clear?: boolean }): Promise<ToolResult> {
     const given = [input.object, input.address, input.clear ? true : undefined].filter((x) => x !== undefined).length
@@ -2432,6 +2448,10 @@ export class Agent {
       let raw = input.object
       if (typeof raw === 'string') {
         try { raw = JSON.parse(raw) } catch { throw new Refusal('object is a string that is not JSON; give the SNO payload as an object.') }
+      }
+      if (raw && typeof raw === 'object' && !Array.isArray(raw) && Object.hasOwn(raw, EYE_FIELD)) {
+        const eyeGiven = (raw as Record<string, unknown>)[EYE_FIELD]
+        if (readEye(eyeGiven) === undefined) throw new Refusal(`Not set: "eye" must be three whole numbers of ticks (120 a unit), each from ${-EYE_REACH} to ${EYE_REACH} (DECK-0003 1.17); got ${String(JSON.stringify(eyeGiven)).slice(0, 80)}. Leave eye out for the automatic eye. Nothing was signed or published.`)
       }
       const v = validateSnoPayload(raw)
       if (!v.ok) throw new Refusal(`Not set: the payload is not valid SNO. ${v.errors.join(' ')}`)
@@ -2448,7 +2468,7 @@ export class Agent {
       if (!v.ok) throw new Refusal(`The object at ${address} is not valid SNO: ${v.errors.join(' ')}`)
       if (avatarTooLarge(v.bytes)) throw new Refusal(`Not set: the object at ${address} is too large for an avatar: ${avatarTooLargeWords(v.bytes)}.`)
       shard = v.shard
-      source = `address ${address} (payload copied: an avatar carries its shape, not a reference)`
+      source = `address ${address} (payload copied: an avatar carries its shape, not a reference${v.repaired.includes(EYE_FIELD) ? '; its malformed eye is left out, so the eye is AUTO' : ''})`
     }
     // A later second than the last avatar signed here, by waiting (at most a second), never by dating it ahead.
     while (nowSeconds() <= this.lastAvatarAt) await new Promise((r) => setTimeout(r, 100))
@@ -2474,16 +2494,18 @@ export class Agent {
     if (!shard) {
       return { text: `Avatar cleared: you are drawn as the dodecahedron again (kind 11333 ${event.id.slice(0, 8)}..., empty content). ${relayWords}${refusedWords}`, data: { eventId: event.id, cleared: true, accepted: entry.accepted, refused: entry.refused ?? {} } }
     }
+    const eye = drawnEye(shard)
+    const chosen = eyeChosen(shard)
     let r
     try {
-      r = renderShard(shard, {})
+      r = renderShard(shard, { eye: { at: eye.map((t) => t / TICKS_PER_UNIT) as [number, number, number], chosen } })
     } catch (err) {
       throw new Refusal(`Published as ${event.id}, but the picture failed: ${err instanceof Error ? err.message : String(err)}`)
     }
     return {
-      text: `Avatar set: "${shard.name}" (${source}), kind 11333 ${event.id.slice(0, 8)}..., ${contentBytes} bytes of payload. ONOSENDAI draws it in place of your dodecahedron wherever you are seen. ${relayWords}${refusedWords}${warnWords} ${r.caption}`,
+      text: `Avatar set: "${shard.name}" (${source}), kind 11333 ${event.id.slice(0, 8)}..., ${contentBytes} bytes of payload, eye ${eyeWords(eye, chosen)}. ONOSENDAI draws it in place of your dodecahedron wherever you are seen. ${relayWords}${refusedWords}${warnWords} ${r.caption}`,
       images: [{ data: r.png.toString('base64'), mimeType: 'image/png' }],
-      data: { eventId: event.id, name: shard.name, source, bytes: contentBytes, accepted: entry.accepted, refused: entry.refused ?? {}, vertices: r.vertices, faces: r.faces, pngBytes: r.png.length },
+      data: { eventId: event.id, name: shard.name, source, bytes: contentBytes, eye: { ticks: eye, chosen }, accepted: entry.accepted, refused: entry.refused ?? {}, vertices: r.vertices, faces: r.faces, pngBytes: r.png.length },
     }
   }
 
@@ -2565,8 +2587,8 @@ export class Agent {
     const bytes = payloadBytes(v.shard)
     const byReference = wantsReference(v.shard)
     return {
-      text: `Valid SNO: "${v.shard.name}", ${v.vertices} vertices, ${v.faces} faces, mode ${v.shard.mode}, unit 2^${v.shard.unit} gibsons, ${bytes} bytes on the wire${byReference ? ' (large: it would be hidden by reference)' : ' (small: it would be carried inline)'}.${walkNote(v.shard)}${ignoredNote(v.ignored, v.repaired)}`,
-      data: { valid: true, name: v.shard.name, vertices: v.vertices, faces: v.faces, mode: v.shard.mode, unit: v.shard.unit, bytes, byReference, ignored: v.ignored, repaired: v.repaired, constrain: chosenConstrainOf(withAuthoredConstrain(v.shard)) },
+      text: `Valid SNO: "${v.shard.name}", ${v.vertices} vertices, ${v.faces} faces, mode ${v.shard.mode}, unit 2^${v.shard.unit} gibsons, ${bytes} bytes on the wire${byReference ? ' (large: it would be hidden by reference)' : ' (small: it would be carried inline)'}.${walkNote(v.shard)}${eyeChosen(v.shard) ? ` Eye, read only when worn as an avatar (DECK-0003 1.17): ${eyeWords(drawnEye(v.shard), true)}.` : ''}${ignoredNote(v.ignored, v.repaired)}`,
+      data: { valid: true, name: v.shard.name, vertices: v.vertices, faces: v.faces, mode: v.shard.mode, unit: v.shard.unit, bytes, byReference, ignored: v.ignored, repaired: v.repaired, constrain: chosenConstrainOf(withAuthoredConstrain(v.shard)), ...(eyeChosen(v.shard) ? { eye: drawnEye(v.shard) } : {}) },
     }
   }
 

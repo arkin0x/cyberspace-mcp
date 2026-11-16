@@ -1016,7 +1016,7 @@ export class Placements {
   async constrain(input: { target?: string | string[]; type?: string; match?: string; bag?: string; all?: boolean; constrain?: string; opacity?: number }): Promise<ToolResult> {
     const constrain = input.constrain === undefined ? undefined : chosenConstrain(input.constrain)
     if (input.constrain !== undefined && !constrain) throw new Refusal('constrain is one of three words, lowercase: "opaque" (WALK cannot cross it while it is solid and fully opaque; the default), "all" (WALK cannot cross any face) or "off" (WALK passes through). Nothing was changed.')
-    if (input.opacity !== undefined && (!Number.isInteger(input.opacity) || input.opacity < 1 || input.opacity > 100)) throw new Refusal('opacity is a whole percent from 1 to 100: 100 is fully opaque, and 1 to 9 are drawn at 10. Nothing was changed.')
+    if (input.opacity !== undefined && (!Number.isInteger(input.opacity) || input.opacity < 1 || input.opacity > 100)) throw new Refusal('opacity is a whole percent from 1 to 100: 100 is fully opaque. Nothing was changed.')
     if (constrain === undefined && input.opacity === undefined) throw new Refusal('Say what to set: constrain ("opaque", "all" or "off"), opacity (1 to 100), or both. Nothing was changed.')
     const selectors = [input.target !== undefined, input.match !== undefined, input.bag !== undefined, input.all === true].filter(Boolean).length
     if (selectors !== 1) throw new Refusal('Say which shards with exactly one of: target ("last", an exact name or an id, or a list of them), match (every shard whose name contains these words), bag (every shard in one bag, by its lookup id or bag id from placed), or all: true (every shard you placed). Nothing was changed.')

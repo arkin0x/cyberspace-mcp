@@ -988,7 +988,7 @@ export class Placements {
         if (input.constrain !== undefined && !constrain)
             throw new Refusal('constrain is one of three words, lowercase: "opaque" (WALK cannot cross it while it is solid and fully opaque; the default), "all" (WALK cannot cross any face) or "off" (WALK passes through). Nothing was changed.');
         if (input.opacity !== undefined && (!Number.isInteger(input.opacity) || input.opacity < 1 || input.opacity > 100))
-            throw new Refusal('opacity is a whole percent from 1 to 100: 100 is fully opaque, and 1 to 9 are drawn at 10. Nothing was changed.');
+            throw new Refusal('opacity is a whole percent from 1 to 100: 100 is fully opaque. Nothing was changed.');
         if (constrain === undefined && input.opacity === undefined)
             throw new Refusal('Say what to set: constrain ("opaque", "all" or "off"), opacity (1 to 100), or both. Nothing was changed.');
         const selectors = [input.target !== undefined, input.match !== undefined, input.bag !== undefined, input.all === true].filter(Boolean).length;
