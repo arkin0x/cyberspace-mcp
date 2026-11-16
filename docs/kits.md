@@ -98,14 +98,27 @@ its z negated (DECK-0003 section 2), so a face a payload's author calls +z on
 the wire is world -z. A turn is a quarter turn about +y that takes +x to -z
 and +z to +x, as ONOSENDAI turns a deployed copy.
 
-### Roles
+### Kinds and roles
 
-Hints name roles and the server looks up the piece that does the job in the
-local catalog, preferring the kit being checked. The roles `check_layout`
+`kind` is free text for search, but `check_layout` acts on a fixed set of
+kinds, so a kit uses these words for these jobs:
+
+- rooms kits: `tile` (a room on the grid) and `open` (an open-air piece on
+  the grid); `plug`, `recessed-plug`, `reducer`, `door`, `door-open` (what
+  seals or joins openings); `prop`, `decor`, `chest-look` (things standing in
+  rooms, on the floor unless `mount` says otherwise); `insert`, `cap` (placed
+  with a host tile). A piece of any other kind is checked only for overlaps
+  and bags.
+- terrain kits: any piece with `footprint` and `edges` is a tile; a piece
+  with `wall` is a wall; `decor` and `ruin` stand on the ground.
+
+Hints name roles, and the server looks up the piece that does the job in
+the local catalog, preferring the kit being checked. The roles `check_layout`
 asks for: `plug:<side>:<size>` (side wall, floor, ceiling, ceiling-recessed),
-`reducer:<side>:<from>-<to>`, `door:<size>`, `door-open:<size>`,
-`step-wall:<length>`, `seam-wall:<length>`, `ramp-step-wall`, `ramp-step-mirror`.
-A kit may give any other role it likes.
+`reducer:<side>:<from>-<to>`, `door:<size>`, `step-wall:<length>`,
+`seam-wall:<length>`, `ramp-step-wall`, `ramp-step-mirror`. The kit eval also
+uses `door-open:<size>` for a locked door's open look. A kit may give any
+other role it likes.
 
 ### Rules, and how generic they are
 
@@ -113,7 +126,7 @@ A kit may give any other role it likes.
 
 **Rooms** (`tile`, `wallInset`, `floor`, `doorOffset`, `builtFacing`):
 
-- Generic, from the manifest alone: tiles on the kit's grid, one per cell;
+- Generic, from the manifest (with the fixed kinds above): tiles on the kit's grid, one per cell;
   openings that meet must have the same size name, and long hatches (w and h
   differ) must lie the same way; a larger opening meets a smaller one only
   through a reducer at the larger one's tile (in an upper floor when vertical);

@@ -46,6 +46,8 @@ function turnTo(from, to) {
             return q * 90;
     return 0;
 }
+/** The piece kinds a rooms kit's rules act on (docs/kits.md): rooms, the pieces that seal openings, and what stands inside rooms. */
+const ROOM_KINDS = new Set(['tile', 'open', 'plug', 'recessed-plug', 'reducer', 'door', 'door-open', 'prop', 'decor', 'insert', 'cap', 'chest-look']);
 /** An opening's area, which orders sizes (a reducer goes from the larger to the smaller). */
 const area = (o) => o.w * o.h;
 function vec(at, i) {
@@ -148,9 +150,10 @@ export function checkLayout(lib, input) {
     const unruled = [];
     for (const [, ps] of byKit) {
         const rules = lib.rulesOf(ps[0].entry);
+        // A rooms kit's rules know the kinds in ROOM_KINDS; a piece of any other kind is checked only for overlaps and bags.
         if (rules?.family === 'rooms') {
-            checkRooms(lib, ps.filter((p) => p.entry.kind !== 'course'), rules, err, warn);
-            unruled.push(...ps.filter((p) => p.entry.kind === 'course'));
+            checkRooms(lib, ps.filter((p) => ROOM_KINDS.has(p.entry.kind)), rules, err, warn);
+            unruled.push(...ps.filter((p) => !ROOM_KINDS.has(p.entry.kind)));
         }
         else if (rules?.family === 'terrain')
             checkTerrain(lib, ps, rules, err, warn);
@@ -158,7 +161,7 @@ export function checkLayout(lib, input) {
             unruled.push(...ps);
     }
     if (unruled.length)
-        warn('no-rules', unruled, `${unruled.length} placement(s) have no rules here (pieces whose kit gives check_layout no rules, or course pieces with rules of their own in their kit's notes); only overlaps and the bag are checked for them.`);
+        warn('no-rules', unruled, `${unruled.length} placement(s) have no rules here (pieces whose kit gives check_layout no rules, or of a kind its rules do not act on); only overlaps and the bag are checked for them.`);
     checkOverlaps(placed, warn);
     const bag = checkBags(placed, input, err, warn);
     const counts = { placements: placed.length };
@@ -530,7 +533,7 @@ function checkTerrain(lib, terrain, rules, err, warn) {
             for (let b = a + 1; b < tiles.length; b++) {
                 const A = foot(tiles[a]), B = foot(tiles[b]);
                 if (Math.min(A.x1, B.x1) - Math.max(A.x0, B.x0) > 1e-6 && Math.min(A.z1, B.z1) - Math.max(A.z0, B.z0) > 1e-6)
-                    err('overlap', [tiles[a], tiles[b]], `${where(tiles[a])} and ${where(tiles[b])} overlap.`, 'tiles sit side by side, never on top of each other: a raised area is tiles placed 10 higher in place of the ground tiles, not over them');
+                    err('overlap', [tiles[a], tiles[b]], `${where(tiles[a])} and ${where(tiles[b])} overlap.`, 'tiles sit side by side, never on top of each other: a raised area is tiles placed higher in place of the lower tiles, not over them');
             }
     }
     // Wall centre lines in the world.
@@ -638,7 +641,7 @@ function checkTerrain(lib, terrain, rules, err, warn) {
     }
     if (exposed.length) {
         const list = exposed.map(({ e, segs }) => `${sideFace(e.side)} of ${shortId(e.p.entry)} at ${fmt(e.p.at)} (${e.profile}${segs.length === 1 && Math.abs(segs[0][1] - segs[0][0] - (e.b - e.a)) < 1e-6 ? '' : `, ${r1(segs.reduce((n, s) => n + s[1] - s[0], 0))} of ${r1(e.b - e.a)}`})`);
-        warn('region-edge', [...new Set(exposed.map((x) => x.e.p))], `${exposed.length} region edge${exposed.length === 1 ? '' : 's'} show the slabs' dirt skirts: ${list.join('; ')}.`, `line them with seam walls (${named('seam-wall:64', 'a seam wall')}, say), or add tiles beyond them`);
+        warn('region-edge', [...new Set(exposed.map((x) => x.e.p))], `${exposed.length} region edge${exposed.length === 1 ? '' : 's'} show the tiles' sides: ${list.join('; ')}.`, `line them with seam walls (${named(`seam-wall:${rules.tile * terrain[0].k}`, 'a seam wall')}, say), or add tiles beyond them`);
     }
     for (const w of walls) {
         if (!used.has(w.i)) {
