@@ -21,7 +21,8 @@ import type { Filter } from 'nostr-tools/filter'
 import { v2 as nip44 } from 'nostr-tools/nip44'
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { normalizeURL } from 'nostr-tools/utils'
-import { toPayload, type ShardModel } from 'sno-core/shards'
+import { TICKS_PER_UNIT, readOpacity, ticksOf, toPayload, type ShardModel } from 'sno-core/shards'
+import { EYE_FIELD, EYE_REACH, drawnEye, eyeChosen, readEye, type Eye } from 'sno-core/eye'
 import { Budget, DAILY_BUDGET_FILE, DEFAULT_CAP_DAILY_SECONDS } from './budget.js'
 import { ACTION_KIND, chainTemplateProblem, hopTemplate, sidestepTemplate, spawnTemplate } from './chain/builder.js'
 import { findDivergence } from './chain/divergence.js'
@@ -67,7 +68,7 @@ import { chosenConstrainOf, walkWords, withAuthoredConstrain } from './walkConst
 import { DEFAULT_PUBLISH_PER_DAY, MAX_ALT_LENGTH, MAX_NAME_LENGTH, dProblem, newObjectId, objectPointers, publicObjectTemplate } from './publicObject.js'
 import { hopCeiling, loadOrMeasure, projectCantorMs, type Calibration } from './space/calibration.js'
 import { describePlace, distanceBetween, distanceWords, parseCoordinate, placeFromHex, placeOf, spawnPlace, type CoordinateInput, type Place, type Position } from './space/coords.js'
-import { apartOnBestAxis, nearestClear, overlapping, spacingFor, type Body } from './space/personalSpace.js'
+import { MAX_AVATAR_REACH, apartOnBestAxis, nearestClear, overlapping, spacingFor, type Body } from './space/personalSpace.js'
 import { AvatarSizes } from './avatarSizes.js'
 import { planSummary, priceNextStep, type Ceilings, type PricedStep } from './space/plan.js'
 import { bagInPlane, KeyStore, keyItemOfHeld, planeName, MAX_COMPUTE_HEIGHT, SCAN_MAX_HEIGHT, SCAN_MIN_HEIGHT, sealerOfSeen, type EntrySummary, type HeldItem, type HeldKey, type ItemPlace, type OpenedBag, type SeenChest } from './space/regionKeys.js'
@@ -175,9 +176,51 @@ const OBJECTS_REMEMBERED = 64
 function ignoredNote(ignored: string[], repaired: string[] = []): string {
   const left = ignored.length ? ` Left out, not fields this tool knows (DECK-0003 section 1.1): ${ignored.map((k) => JSON.stringify(k)).join(', ')}.` : ''
   const fixed = repaired.map((k) => (k === 'opacity'
-    ? ' "opacity" was not a whole percent from 1 to 100, so it is left out and the object is drawn fully opaque (DECK-0003 1.11).'
-    : ' "constrain" was not one of "off", "all" or "opaque", so it is not a choice: the default "opaque" is written (DECK-0003 1.12).')).join('')
+    ? ' "opacity" was not a whole percent from 0 to 100, so it is left out and the object is drawn fully opaque (DECK-0003 1.11).'
+    : k === EYE_FIELD
+      ? ` "eye" was not three whole numbers of ticks from ${-EYE_REACH} to ${EYE_REACH}, so it is left out: worn as an avatar, it looks from the automatic eye (DECK-0003 1.17).`
+      : ' "constrain" was not one of "off", "all" or "opaque", so it is not a choice: the default "opaque" is written (DECK-0003 1.12).')).join('')
   return left + fixed
+}
+
+/** One line for an object at opacity 0 (DECK-0003 1.11, since sno-core 0.1.30): nothing of it is drawn. */
+function opacityNote(shard: ShardModel): string {
+  return readOpacity(shard.opacity) === 0 ? ' Opacity 0: a reader draws nothing of this object\'s own (DECK-0003 1.11; a glow still shows).' : ''
+}
+
+const gib = (n: number): string => String(Math.round(n * 1000) / 1000)
+
+/**
+ * What ONOSENDAI does to an avatar or its eye past MAX_AVATAR_REACH (4)
+ * gibsons from its origin on an axis (src/lib/avatar.ts; DECK-0003 1.17): it
+ * shrinks the shape to reach 4 and the eye with it, then brings the eye
+ * straight in toward the origin until it too is within 4, keeping its
+ * direction. Words when either happens, else empty. An avatar that places
+ * parts is left out: their reach is not fetched here.
+ */
+function nearerWords(shard: ShardModel, eye: Eye): string {
+  if (shard.parts?.length) return ''
+  const g = 2 ** shard.unit / TICKS_PER_UNIT
+  let reach = 0
+  for (const v of shard.vertices) for (const t of ticksOf(v)) reach = Math.max(reach, Math.abs(t))
+  const shape = reach * g
+  const f = shape > MAX_AVATAR_REACH ? MAX_AVATAR_REACH / shape : 1
+  let at = eye.map((t) => t * g * f)
+  const m = Math.max(...at.map(Math.abs))
+  const pulled = m > MAX_AVATAR_REACH
+  if (pulled) at = at.map((x) => (x * MAX_AVATAR_REACH) / m)
+  if (f === 1 && !pulled) return ''
+  const parts = [
+    f < 1 ? `the shape reaches ${gib(shape)} gibsons, so it is drawn at ${gib(f)} of true scale and the eye with it` : '',
+    pulled ? `the eye ${f < 1 ? 'is then' : 'reaches past 4 gibsons, so it is'} brought straight in toward your origin` : '',
+  ].filter(Boolean)
+  return ` ONOSENDAI will draw it nearer: it draws an avatar within ${MAX_AVATAR_REACH} gibsons of its origin on each axis, so ${parts.join(', and ')}, to ${at.map(gib).join(', ')} gibsons from your origin.`
+}
+
+/** An avatar's eye (DECK-0003 1.17) in words: "AUTO 0, 159, 0 ticks (0, 1.325, 0 units)", or CHOSEN for one its author wrote. */
+function eyeWords(eye: Eye, chosen: boolean): string {
+  const units = eye.map((t) => String(Math.round((t / TICKS_PER_UNIT) * 1000) / 1000))
+  return `${chosen ? 'CHOSEN' : 'AUTO'} ${eye.join(', ')} ticks (${units.join(', ')} units)`
 }
 
 /**
@@ -1933,9 +1976,9 @@ export class Agent {
         const objectEvent = this.sign(await objectTemplate(shard, regionKey, d, now))
         const result = await this.relays.publish(objectEvent)
         if (!result.ok) throw new Refusal(`The object's own event (kind ${OBJECT_KIND}) was not accepted by any relay: ${result.reason}. Each relay said: ${Object.entries(result.reasons).map(([u, r]) => `${u}: ${r}`).join('; ')}.`)
-        return { entries: [referenceTo(objectEvent, at.position, at.plane, result.accepted[0] ?? '')], what: `an object by reference (${shard.vertices.length} vertices)`, objectEvent, walk: walkNote(shard) }
+        return { entries: [referenceTo(objectEvent, at.position, at.plane, result.accepted[0] ?? '')], what: `an object by reference (${shard.vertices.length} vertices)`, objectEvent, walk: walkNote(shard) + opacityNote(shard) }
       }
-      return { entries: [this.sign(shardInnerTemplate(shard, at.position, at.plane, now))], what: `an object (${shard.vertices.length} vertices, inline)`, walk: walkNote(shard) }
+      return { entries: [this.sign(shardInnerTemplate(shard, at.position, at.plane, now))], what: `an object (${shard.vertices.length} vertices, inline)`, walk: walkNote(shard) + opacityNote(shard) }
     }
     if ('key' in contents) {
       const name = String(contents.key.name ?? '').trim().slice(0, MAX_ITEM_NAME)
@@ -2501,9 +2544,10 @@ export class Agent {
     return this.hide({ contents: { door }, coordinate: coordinate ?? { dx: 0, dy: 0, dz: 0 }, height, hint_heights, riddle })
   }
 
-  async render(input: { object?: unknown; id?: string; address?: string; kit?: string; turn?: number; scale?: number; layout?: PlacementInput[]; cut?: number; view?: NamedView; yaw?: number; pitch?: number; size?: number }): Promise<ToolResult> {
+  async render(input: { object?: unknown; id?: string; address?: string; kit?: string; turn?: number; scale?: number; layout?: PlacementInput[]; cut?: number; view?: NamedView; yaw?: number; pitch?: number; size?: number; eye?: boolean }): Promise<ToolResult> {
     const given = [input.object, input.id, input.address, input.kit, input.layout].filter((x) => x !== undefined).length
     if (given !== 1) throw new Refusal('Give exactly one of: object (an SNO payload), id (an object find or look listed), address (a public kind 33331), kit (a kit piece) or layout (a planned build of kit pieces).')
+    if (input.eye !== undefined && input.layout !== undefined) throw new Refusal('eye goes with one object (object, id, address or kit), not a layout.')
     if (input.layout !== undefined) return renderLayout(this.kits, { layout: input.layout, cut: input.cut, view: input.view, yaw: input.yaw, pitch: input.pitch, size: input.size })
     if (input.cut !== undefined) throw new Refusal('cut goes with layout.')
     if ((input.turn !== undefined || input.scale !== undefined) && input.kit === undefined) throw new Refusal('turn and scale go with kit.')
@@ -2539,7 +2583,10 @@ export class Agent {
     }
     let r
     try {
-      r = renderShard(shard, { view: input.view, yaw: input.yaw, pitch: input.pitch, size: input.size })
+      // The eye (DECK-0003 1.17) is marked whenever the payload chose one, and the AUTO eye when asked, so an agent sees it before set_avatar.
+      const chosen = eyeChosen(shard)
+      const eye = chosen || input.eye === true ? { at: drawnEye(shard).map((t) => t / TICKS_PER_UNIT) as [number, number, number], chosen } : undefined
+      r = renderShard(shard, { view: input.view, yaw: input.yaw, pitch: input.pitch, size: input.size, ...(eye ? { eye } : {}) })
     } catch (err) {
       throw new Refusal(err instanceof Error ? err.message : String(err))
     }
@@ -2547,7 +2594,7 @@ export class Agent {
       // An object found in cyberspace was named by someone else.
       text: source === 'payload' ? r.caption : source.startsWith('kit piece') ? `${source}: ${r.caption}` : `${r.caption} Its name is the author's text (untrusted).`,
       images: [{ data: r.png.toString('base64'), mimeType: 'image/png' }],
-      data: { source, name: shard.name, mode: shard.mode, unit: shard.unit, vertices: r.vertices, faces: r.faces, bounds: r.bounds, view: r.view, size: r.size, backFacing: r.backFacing, partsNotDrawn: r.partsNotDrawn, pngBytes: r.png.length, ms: Math.round(r.ms) },
+      data: { source, name: shard.name, mode: shard.mode, unit: shard.unit, vertices: r.vertices, faces: r.faces, bounds: r.bounds, view: r.view, size: r.size, backFacing: r.backFacing, partsNotDrawn: r.partsNotDrawn, ...(r.eye ? { eye: { ticks: drawnEye(shard), chosen: r.eye.chosen } } : {}), pngBytes: r.png.length, ms: Math.round(r.ms) },
     }
   }
 
@@ -2582,6 +2629,15 @@ export class Agent {
    * any relay sees it. At most avatarMaxPerDay in any 24 hours (clearing
    * included), counted on disk so a restart does not reset it; one no relay
    * takes does not count.
+   *
+   * The payload's `eye` (DECK-0003 1.17, ruled 2026-11-16), where the
+   * avatar's own first-person viewer looks from, is published in the
+   * version 2 frame (a version 1 payload's Z is flipped with its vertices).
+   * `eye: null` is no choice (AUTO, nothing written); any other malformed
+   * eye in `object` is refused, since a publisher never writes one, and one
+   * in an object copied by address is left out (AUTO, as every reader reads
+   * it). The answer says which eye goes out and what ONOSENDAI does to one
+   * past its 4-gibson reach, and the picture marks it.
    */
   async setAvatar(input: { object?: unknown; address?: string; clear?: boolean }): Promise<ToolResult> {
     const given = [input.object, input.address, input.clear ? true : undefined].filter((x) => x !== undefined).length
@@ -2592,6 +2648,14 @@ export class Agent {
       let raw = input.object
       if (typeof raw === 'string') {
         try { raw = JSON.parse(raw) } catch { throw new Refusal('object is a string that is not JSON; give the SNO payload as an object.') }
+      }
+      if (raw && typeof raw === 'object' && !Array.isArray(raw) && Object.hasOwn(raw, EYE_FIELD)) {
+        const eyeGiven = (raw as Record<string, unknown>)[EYE_FIELD]
+        // Null is no eye chosen: AUTO, and nothing written. A copy, so the caller's object is not changed.
+        if (eyeGiven === null) {
+          const { [EYE_FIELD]: _none, ...bare } = raw as Record<string, unknown>
+          raw = bare
+        } else if (readEye(eyeGiven) === undefined) throw new Refusal(`Not set: "eye" must be three whole numbers of ticks (120 a unit), each from ${-EYE_REACH} to ${EYE_REACH} (DECK-0003 1.17); got ${String(JSON.stringify(eyeGiven)).slice(0, 80)}. Leave eye out (or null) for the automatic eye. Nothing was signed or published.`)
       }
       const v = validateSnoPayload(raw)
       if (!v.ok) throw new Refusal(`Not set: the payload is not valid SNO. ${v.errors.join(' ')}`)
@@ -2610,7 +2674,7 @@ export class Agent {
       if (!v.ok) throw new Refusal(`The object at ${address} is not valid SNO: ${v.errors.join(' ')}`)
       if (avatarTooLarge(v.bytes)) throw new Refusal(`Not set: the object at ${address} is too large for an avatar: ${avatarTooLargeWords(v.bytes)}.`)
       shard = v.shard
-      source = `address ${address} (payload copied: an avatar carries its shape, not a reference)`
+      source = `address ${address} (payload copied: an avatar carries its shape, not a reference${v.repaired.includes(EYE_FIELD) ? '; its malformed eye is left out, so the eye is AUTO' : ''})`
     }
     // A later second than the last avatar signed here, by waiting (at most a second), never by dating it ahead.
     while (nowSeconds() <= this.lastAvatarAt) await new Promise((r) => setTimeout(r, 100))
@@ -2659,16 +2723,18 @@ export class Agent {
     if (!shard) {
       return { text: `Avatar cleared: you are drawn as the dodecahedron again (kind 11333 ${event.id.slice(0, 8)}..., empty content). ${relayWords}${refusedWords}${leftWords}`, data: { eventId: event.id, cleared: true, accepted: entry.accepted, refused: entry.refused ?? {}, leftToday: left, maxPerDay: limit } }
     }
+    const eye = drawnEye(shard)
+    const chosen = eyeChosen(shard)
     let r
     try {
-      r = renderShard(shard, {})
+      r = renderShard(shard, { eye: { at: eye.map((t) => t / TICKS_PER_UNIT) as [number, number, number], chosen } })
     } catch (err) {
       throw new Refusal(`Published as ${event.id}, but the picture failed: ${err instanceof Error ? err.message : String(err)}`)
     }
     return {
-      text: `Avatar set: "${shard.name}" (${source}), kind 11333 ${event.id.slice(0, 8)}..., ${contentBytes} bytes of payload. ONOSENDAI draws it in place of your dodecahedron wherever you are seen. ${relayWords}${refusedWords}${warnWords}${leftWords} ${r.caption}`,
+      text: `Avatar set: "${shard.name}" (${source}), kind 11333 ${event.id.slice(0, 8)}..., ${contentBytes} bytes of payload, eye ${eyeWords(eye, chosen)}.${nearerWords(shard, eye)} ONOSENDAI draws it in place of your dodecahedron wherever you are seen. ${relayWords}${refusedWords}${warnWords}${leftWords} ${r.caption}`,
       images: [{ data: r.png.toString('base64'), mimeType: 'image/png' }],
-      data: { eventId: event.id, name: shard.name, source, bytes: contentBytes, accepted: entry.accepted, refused: entry.refused ?? {}, vertices: r.vertices, faces: r.faces, pngBytes: r.png.length, leftToday: left, maxPerDay: limit },
+      data: { eventId: event.id, name: shard.name, source, bytes: contentBytes, eye: { ticks: eye, chosen }, accepted: entry.accepted, refused: entry.refused ?? {}, vertices: r.vertices, faces: r.faces, pngBytes: r.png.length, leftToday: left, maxPerDay: limit },
     }
   }
 
@@ -2735,7 +2801,7 @@ export class Agent {
     this.dir.writeJson(PUBLISHED_FILE, { posts: [...recent, now] } satisfies PublishedFile)
     const left = Math.max(0, limit - recent.length - 1)
     return {
-      text: `Published "${v.shard.name}" to the feed${replacing ? ` under d "${d}" (it replaces any earlier version there)` : ''}: kind 33331 ${event.id.slice(0, 8)}..., ${v.vertices} vertices, ${v.faces} faces, ${payloadBytes(v.shard)} bytes.${walkNote(v.shard)} Accepted by ${entry.accepted.join(', ')}.${refusedWords} Address ${address} (naddr ${naddr}). This publishes the object; it does not place it in the world. To hide it at a place, call place with this address. To change it later, publish again with d "${d}". ${left} more today.${ignoredNote(v.ignored, v.repaired)}`,
+      text: `Published "${v.shard.name}" to the feed${replacing ? ` under d "${d}" (it replaces any earlier version there)` : ''}: kind 33331 ${event.id.slice(0, 8)}..., ${v.vertices} vertices, ${v.faces} faces, ${payloadBytes(v.shard)} bytes.${walkNote(v.shard)}${opacityNote(v.shard)} Accepted by ${entry.accepted.join(', ')}.${refusedWords} Address ${address} (naddr ${naddr}). This publishes the object; it does not place it in the world. To hide it at a place, call place with this address. To change it later, publish again with d "${d}". ${left} more today.${ignoredNote(v.ignored, v.repaired)}`,
       data: { eventId: event.id, address, naddr, d, name: v.shard.name, replaced: replacing, accepted: entry.accepted, refused: entry.refused ?? {}, publishedToday: recent.length + 1, maxPerDay: limit, ignored: v.ignored, repaired: v.repaired, constrain: chosenConstrainOf(withAuthoredConstrain(v.shard)) },
     }
   }
@@ -2752,8 +2818,8 @@ export class Agent {
     const bytes = payloadBytes(v.shard)
     const byReference = wantsReference(v.shard)
     return {
-      text: `Valid SNO: "${v.shard.name}", ${v.vertices} vertices, ${v.faces} faces, mode ${v.shard.mode}, unit 2^${v.shard.unit} gibsons, ${bytes} bytes on the wire${byReference ? ' (large: it would be hidden by reference)' : ' (small: it would be carried inline)'}.${walkNote(v.shard)}${ignoredNote(v.ignored, v.repaired)}`,
-      data: { valid: true, name: v.shard.name, vertices: v.vertices, faces: v.faces, mode: v.shard.mode, unit: v.shard.unit, bytes, byReference, ignored: v.ignored, repaired: v.repaired, constrain: chosenConstrainOf(withAuthoredConstrain(v.shard)) },
+      text: `Valid SNO: "${v.shard.name}", ${v.vertices} vertices, ${v.faces} faces, mode ${v.shard.mode}, unit 2^${v.shard.unit} gibsons, ${bytes} bytes on the wire${byReference ? ' (large: it would be hidden by reference)' : ' (small: it would be carried inline)'}.${walkNote(v.shard)}${opacityNote(v.shard)}${eyeChosen(v.shard) ? ` Eye, read only when worn as an avatar (DECK-0003 1.17): ${eyeWords(drawnEye(v.shard), true)}.` : ''}${ignoredNote(v.ignored, v.repaired)}`,
+      data: { valid: true, name: v.shard.name, vertices: v.vertices, faces: v.faces, mode: v.shard.mode, unit: v.shard.unit, bytes, byReference, ignored: v.ignored, repaired: v.repaired, constrain: chosenConstrainOf(withAuthoredConstrain(v.shard)), ...(eyeChosen(v.shard) ? { eye: drawnEye(v.shard) } : {}) },
     }
   }
 

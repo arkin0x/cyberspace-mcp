@@ -10,6 +10,7 @@
 // kit's title: a piece an agent builds with is part of its build, never a kit
 // or catalog under the kit's name. A name that still starts with the kit's
 // title ("<title>: ...") loses that prefix.
+import { EYE_FIELD, readEye, withEye } from 'sno-core/eye';
 import { quarterTurnPart } from 'sno-core/parts';
 import { MAX_UNIT, ticksOf, toPayload, vertexAt } from 'sno-core/shards';
 import { validateSnoPayload } from '../sno.js';
@@ -28,13 +29,20 @@ export function turnY(p, q) {
         [x, z] = [z, -x];
     return [x, y, z];
 }
-/** The shard turned q quarter turns about Y (ONOSENDAI turnShard, Y only). */
+/**
+ * The shard turned q quarter turns about Y (ONOSENDAI turnShard, Y only). A
+ * chosen eye (DECK-0003 1.17) turns with the vertices: it is held in the
+ * payload's frame, Z negated from the model's, so the model's (x, y, z) to
+ * (z, y, -x) is (x, y, z) to (-z, y, x) for the eye. An AUTO eye writes
+ * nothing and follows the shape by itself.
+ */
 export function turnModel(s, q) {
     const n = ((q % 4) + 4) % 4;
     if (n === 0)
         return s;
     let vertices = s.vertices;
     let parts = s.parts;
+    let eye = readEye(s.extra?.[EYE_FIELD]);
     for (let k = 0; k < n; k++) {
         vertices = vertices.map((v) => {
             const p = ticksOf(v);
@@ -43,8 +51,11 @@ export function turnModel(s, q) {
         // About Y the plane runs z toward x: quarterTurnPart(part, 2, 0) takes z to x and x to -z.
         if (parts)
             parts = parts.map((part) => quarterTurnPart(part, 2, 0, [0, 0]) ?? part);
+        if (eye)
+            eye = [0 - eye[2], eye[1], eye[0] + 0];
     }
-    return parts ? { ...s, vertices, parts } : { ...s, vertices };
+    const turned = parts ? { ...s, vertices, parts } : { ...s, vertices };
+    return eye ? withEye(turned, eye) : turned;
 }
 /** A whole scale step, 0 or more, that keeps the unit inside the format, or a sentence. */
 export function scaleStep(scale, unit) {

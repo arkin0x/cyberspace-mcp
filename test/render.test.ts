@@ -5,7 +5,6 @@
 // typical shard draws in well under a second; and the MCP result carries the
 // picture as an image content block beside its caption. No network.
 
-import { inflateSync } from 'node:zlib'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { describe, expect, it } from 'vitest'
@@ -13,35 +12,8 @@ import type { Agent } from '../src/agent.js'
 import { renderShard } from '../src/render.js'
 import { createServer } from '../src/server.js'
 import { validateSnoPayload } from '../src/sno.js'
-
-/** Read back a PNG this encoder wrote: 8-bit RGB, rows filtered None or Sub. */
-function decode(png: Buffer): { width: number; height: number; at: (x: number, y: number) => [number, number, number] } {
-  expect([...png.subarray(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
-  let pos = 8
-  let width = 0
-  let height = 0
-  const idat: Buffer[] = []
-  while (pos < png.length) {
-    const len = png.readUInt32BE(pos)
-    const type = png.toString('ascii', pos + 4, pos + 8)
-    const data = png.subarray(pos + 8, pos + 8 + len)
-    if (type === 'IHDR') { width = data.readUInt32BE(0); height = data.readUInt32BE(4); expect(data[8]).toBe(8); expect(data[9]).toBe(2) }
-    if (type === 'IDAT') idat.push(data)
-    pos += 12 + len
-  }
-  const raw = inflateSync(Buffer.concat(idat))
-  const stride = width * 3
-  const rgb = new Uint8Array(stride * height)
-  for (let y = 0; y < height; y++) {
-    const filter = raw[y * (stride + 1)]
-    expect([0, 1]).toContain(filter)
-    for (let i = 0; i < stride; i++) {
-      const v = raw[y * (stride + 1) + 1 + i]
-      rgb[y * stride + i] = filter === 1 && i >= 3 ? (v + rgb[y * stride + i - 3]) & 0xff : v
-    }
-  }
-  return { width, height, at: (x, y) => [rgb[(y * width + x) * 3], rgb[(y * width + x) * 3 + 1], rgb[(y * width + x) * 3 + 2]] }
-}
+import { drawnEye } from 'sno-core/eye'
+import { decode, magentaRing } from './pngDecode.js'
 
 const BACKGROUND = [10, 12, 18]
 const brightness = (c: number[]) => c[0] + c[1] + c[2]
@@ -161,6 +133,72 @@ describe('render', () => {
     const r = renderShard(shard, { size: 512 })
     expect(performance.now() - t0).toBeLessThan(1500)
     expect(r.faces).toBe(600)
+  })
+
+  it('marks an avatar\'s eye with a magenta ring over everything, keeps a far one in the frame, and names it in the caption', () => {
+    const magenta = (png: Buffer) => {
+      const img = decode(png)
+      let n = 0, sx = 0, sy = 0
+      for (let y = 0; y < img.height; y++) for (let x = 0; x < img.width; x++) {
+        const [r, g, b] = img.at(x, y)
+        if (r > 200 && g < 110 && b > 180) { n++; sx += x; sy += y }
+      }
+      return { n, x: sx / Math.max(n, 1), y: sy / Math.max(n, 1) }
+    }
+    const shard = shardOf(CUBE)
+    const plain = renderShard(shard, { view: 'front', size: 256 })
+    expect(magenta(plain.png).n).toBe(0)
+    expect(plain.eye).toBeUndefined()
+    expect(plain.caption).not.toMatch(/eye/)
+    // Inside the cube, at its middle: drawn over the front face, not hidden by it.
+    const inside = renderShard(shard, { view: 'front', size: 256, eye: { at: [0, 0, 0], chosen: false } })
+    const mark = magenta(inside.png)
+    expect(mark.n).toBeGreaterThan(30)
+    const cube = decode(plain.png)
+    // The ring's middle is where the cube's middle is drawn: the front face's center of cyan.
+    let cx = 0, cy = 0, cn = 0
+    for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) { const c = cube.at(x, y); if (c[2] > c[0] + 60) { cx += x; cy += y; cn++ } }
+    expect(Math.abs(mark.x - cx / cn)).toBeLessThan(3)
+    expect(Math.abs(mark.y - cy / cn)).toBeLessThan(3)
+    expect(inside.eye).toEqual({ at: [0, 0, 0], chosen: false })
+    expect(inside.caption).toContain('; the magenta ring is the eye, AUTO, at 0, 0, 0 units')
+    // Higher up on the picture for a higher eye, and CHOSEN in the caption.
+    const high = renderShard(shard, { view: 'front', size: 256, eye: { at: [0, 0.75, 0], chosen: true } })
+    expect(magenta(high.png).y).toBeLessThan(mark.y - 10)
+    expect(high.caption).toContain('the magenta ring is the eye, CHOSEN, at 0, 0.75, 0 units')
+    // Far outside the shape (DECK-0003 1.17 does not clamp it): the frame grows to show it, and the caption says how far.
+    const far = renderShard(shard, { view: 'front', size: 256, eye: { at: [0, 20, 20], chosen: true } })
+    expect(magenta(far.png).n).toBeGreaterThan(30)
+    expect(far.caption).toContain('at 0, 20, 20 units (outside the shape\'s box by 19 units: it looks at the shape from outside, as an eye behind it does)')
+    expect(inside.caption).not.toMatch(/outside the shape/)
+    expect(magentaRing(far.png).n).toBe(magenta(far.png).n)
+  })
+
+  it('says in the caption that a reader draws nothing of an object at opacity 0, and still draws it here', () => {
+    const r = renderShard(shardOf({ ...CUBE, opacity: 0 }), { view: 'front', size: 128 })
+    expect(r.caption).toContain('; opacity 0: a reader draws nothing of this object\'s own (DECK-0003 1.11), drawn here as if opaque so you can see it')
+    expect(decode(r.png).at(64, 64)).not.toEqual(BACKGROUND)
+    expect(renderShard(shardOf({ ...CUBE, opacity: 40 }), { size: 64 }).caption).not.toMatch(/opacity/)
+  })
+
+  it('puts the eye where a vertex at the same wire point is drawn: the payload frame, +Z toward the viewer, never negated', () => {
+    // One point 3 units toward the viewer and 2 up, and an eye written at the same place; seen from the side, Z is across the picture.
+    const point = shardOf({ v: 2, name: 'pt', unit: 0, mode: 'points', vertices: [[0, 2, 3]], colors: [7], faces: [], eye: [0, 240, 360] })
+    const eye = drawnEye(point)
+    expect(eye).toEqual([0, 240, 360])
+    const at = eye.map((t) => t / 120) as [number, number, number]
+    const centroid = (png: Buffer, test: (c: [number, number, number]) => boolean) => {
+      const img = decode(png)
+      let n = 0, sx = 0, sy = 0
+      for (let y = 0; y < img.height; y++) for (let x = 0; x < img.width; x++) if (test(img.at(x, y))) { n++; sx += x; sy += y }
+      return { n, x: sx / Math.max(n, 1), y: sy / Math.max(n, 1) }
+    }
+    const dot = centroid(renderShard(point, { view: 'side', size: 256 }).png, (c) => c[2] > 150 && c[1] > 150 && c[0] < 100)
+    const ring = centroid(renderShard(point, { view: 'side', size: 256, eye: { at, chosen: true } }).png, ([r, g, b]) => r > 200 && g < 110 && b > 180)
+    expect(dot.n).toBeGreaterThan(5)
+    expect(ring.n).toBeGreaterThan(30)
+    expect(Math.abs(ring.x - dot.x)).toBeLessThan(3)
+    expect(Math.abs(ring.y - dot.y)).toBeLessThan(3)
   })
 
   it('comes back over MCP as an image content block and a caption', async () => {
