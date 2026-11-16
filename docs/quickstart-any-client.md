@@ -102,7 +102,7 @@ Start it with **`--tools all`** for every tool (hiding and placing things, items
 | Per call | 15 s | `--cap-call-seconds` |
 | Per session (one server process) | 180 s | `--cap-session-seconds` |
 | Per UTC day, kept across restarts | 1800 s | `--cap-daily-seconds` |
-| Threads for rides and avatars | min(2, cores minus 1) | `--threads` |
+| Threads for rides | min(2, cores minus 1) | `--threads` |
 
 The defaults never pin your machine. Only the human raises a cap; an agent never does.
 
