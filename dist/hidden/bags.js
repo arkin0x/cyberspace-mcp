@@ -433,7 +433,8 @@ export function chestInnerTemplate(chest, at, plane, createdAt) {
         kind: CHEST_KIND,
         created_at: createdAt,
         content: chest.payload,
-        tags: [['C', positionHex(at, plane)], ['title', chest.name.slice(0, MAX_ITEM_NAME)], ['lock', chest.lockPubkey, chest.senderPubkey], ['requires', chest.requires], [...PROTECTED_TAG]],
+        // Looks and the door tag in ONOSENDAI's order (lib/hidden.ts chestInnerTemplate): C, title, lock, requires, looks, door, -.
+        tags: [['C', positionHex(at, plane)], ['title', chest.name.slice(0, MAX_ITEM_NAME)], ['lock', chest.lockPubkey, chest.senderPubkey], ['requires', chest.requires], ...(chest.look ?? []).map((t) => [...t]), ...(chest.door !== undefined ? [['door', String(chest.door)]] : []), [...PROTECTED_TAG]],
     };
 }
 /** The inner chat event template (kind 23333). Never published bare: it only ever travels inside a CHAT_BAG_KIND envelope, as a rumor (chatRumor). */

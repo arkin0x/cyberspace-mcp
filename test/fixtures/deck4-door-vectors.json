@@ -1,0 +1,30 @@
+{
+ "source": "arkin0x/cyberspace decks/kinds-vectors.json (DECK-0004 section 5), locks.room and locks.door; the door event keeps only what opening it needs (its content and its lock and door tags)",
+ "room": {
+  "location_key": "78d749966d5bd372baccaa7f72cc844af5ffed9ad4f4415bc95330f63aefe37a",
+  "door_secret": "30efc02f532b5f7b117b23bae57036cbde2163eaf643ed2305017d3dad786649",
+  "room_key": "f2f2c2c83702a57d35a7cd01a6ff158818442c08336d82225bfaa57d89676491",
+  "room_lookup_id": "e9b3051490a55438b728e340ae5b02de39d5454b718388349efd9406eb1fcf3f"
+ },
+ "door": {
+  "event": {
+   "content": "AjDWBQh+EUNZ/stqb5tNAahCIWpplnT5avFXD3uqkFzW3nlX8y31h2FnEXKocSbRMbFSegvXzdZHFd3BfF/txzz0A7GVbRKwEXjISYoVLYPsG9sWKTrsX5jfjY6nNkK+1veASlJnkixOiLTHz/WebbEExo25HVQlsciEz8SqpubOZLWabB0Ht2FgiTG6Qdw1eBXGtdN6C87mSVp6aVF4sDiBVQ==",
+   "tags": [
+    [
+     "lock",
+     "aca9d6fa2946087f2d8ae0d66d4156b15aaac8b4b3faa68b21dfc14a03b173d5",
+     "7f43785829caf0f9f5c6febe915aa0880e4a0606062754848e90142fd7d6d941"
+    ],
+    [
+     "door",
+     "4"
+    ]
+   ]
+  },
+  "lock_secret": "dd5ac16b2c785b35f32d1db9ba05ff985bfab7371c53aca7602b36b79477ce5d",
+  "location_key": "0b4b24d2fe56cb82a468eb7151fbc21f4460a948463abb69a77463af904ed04f",
+  "door_secret": "5c10b87a8b7fb0c78045cbbf3d4b8103322926a841eff0d87f149a8d3fc4f6ce",
+  "room_key": "b13ad1c7705c82f4f3646035db2c1d2fcf4d4ef0d87d02a41ec221a54c6863f7",
+  "room_lookup_id": "bde7e68920a5cd267775efb01593d446b84364a26be7c1b3c5764f19460b9d2b"
+ }
+}
