@@ -449,3 +449,129 @@ describe('set_avatar and the eye', () => {
     expect(a.validateObject({ payload: { ...wedge, opacity: 0 } }).text).toContain('Opacity 0: a reader draws nothing of this object\'s own (DECK-0003 1.11; a glow still shows).')
   }, 30_000)
 })
+
+// The avatar's facing (DECK-0003 1.18, ruled 2026-11-16): how it turns as it
+// moves, "path" (the default) or "upright". set_avatar takes it as face or in
+// the payload, writes nothing for "path", writes "upright", refuses anything
+// else with nothing signed, and says which facing goes out.
+describe('set_avatar and the facing', () => {
+  const sent = () => canonical.published.length
+  const wedge2 = { ...wedge, v: 2, colors: [1, 1, 1, 1] }
+  const lastContent = (a: Agent): Record<string, unknown> => JSON.parse(avatarsOf(a.pubkey).at(-1)!.content)
+
+  it('the tool offers face, "path" or "upright", and its description says what each does', async () => {
+    const server = createServer({} as unknown as Agent)
+    const [x, y] = InMemoryTransport.createLinkedPair()
+    await server.connect(x)
+    const client = new Client({ name: 'test', version: '0' })
+    await client.connect(y)
+    const tool = (await client.listTools()).tools.find((t) => t.name === 'set_avatar')!
+    expect((tool.inputSchema.properties as Record<string, { enum?: string[] }>).face.enum).toEqual(['path', 'upright'])
+    expect(tool.description).toMatch(/"path" \(the default\) points your front, -Z, along your last move and tilts with it/)
+    expect(tool.description).toMatch(/"upright" turns you only about the viewer's up and never tilts you, and a move straight up or down keeps your heading/)
+    expect(tool.description).toMatch(/"path" writes nothing, "upright" is written into the payload, and any other value .* is refused/)
+    expect(tool.description).not.toContain('\u2014')
+    // A value the schema does not name never reaches the agent: the call is an error.
+    const wrong = await client.callTool({ name: 'set_avatar', arguments: { object: wedge2, face: 'Upright' } })
+    expect(wrong.isError).toBe(true)
+    await client.close()
+  })
+
+  it('"path", given or left out, writes no face and reports path', async () => {
+    const a = await start()
+    const none = await a.setAvatar({ object: wedge2 })
+    expect(none.text).toContain('facing path (the default: your front, the payload\'s -Z, points along your last move and tilts with it)')
+    expect(none.data.face).toBe('path')
+    expect(lastContent(a)).not.toHaveProperty('face')
+    const given = await a.setAvatar({ object: wedge2, face: 'path' })
+    expect(given.data.face).toBe('path')
+    expect(lastContent(a)).not.toHaveProperty('face')
+    // In the payload too, and as null: no choice.
+    for (const face of ['path', null]) {
+      const object = { ...wedge2, face }
+      const r = await a.setAvatar({ object })
+      expect(r.data.face).toBe('path')
+      expect(lastContent(a)).not.toHaveProperty('face')
+      expect(object).toHaveProperty('face', face)
+    }
+  }, 30_000)
+
+  it('"upright", as face or in the payload, is written into the payload and reported', async () => {
+    const a = await start()
+    const r = await a.setAvatar({ object: wedge2, face: 'upright' })
+    expect(r.text).toContain('facing upright (you turn only about the viewer\'s up and never tilt; a move straight up or down keeps your heading)')
+    expect(r.data.face).toBe('upright')
+    const ev = avatarsOf(a.pubkey).at(-1)!
+    expect(JSON.parse(ev.content).face).toBe('upright')
+    expect(paidShard(ev)?.extra?.face).toBe('upright')
+    // A version 1 payload carries it as given: facing is a name, not a direction in the frame.
+    const fromPayload = await a.setAvatar({ object: JSON.stringify({ ...wedge, face: 'upright' }) })
+    expect(fromPayload.data.face).toBe('upright')
+    expect(lastContent(a).face).toBe('upright')
+  }, 30_000)
+
+  it('face replaces the payload\'s: "path" removes an "upright" payload\'s, and the caller\'s object is left as it was', async () => {
+    const a = await start()
+    const object = { ...wedge2, face: 'upright' }
+    const r = await a.setAvatar({ object, face: 'path' })
+    expect(r.data.face).toBe('path')
+    expect(lastContent(a)).not.toHaveProperty('face')
+    expect(object.face).toBe('upright')
+    await a.setAvatar({ object: wedge2, face: 'upright' })
+    expect(lastContent(a).face).toBe('upright')
+  }, 30_000)
+
+  it('refuses a malformed face, as the input or in the payload, with nothing signed or published', async () => {
+    const a = await start()
+    const sign = vi.spyOn(a as unknown as { sign: (t: unknown) => unknown }, 'sign')
+    const before = sent()
+    const pending = a.outbox.state().pending.length
+    for (const face of ['Upright', 'PATH', 'up', '', 'upright ', 1, true, ['upright'], { mode: 'upright' }, null]) {
+      await expect(a.setAvatar({ object: wedge2, face })).rejects.toThrow(/Not set: face must be "path" or "upright", in lower case \(DECK-0003 1\.18\); got .*Leave it out for "path"\. Nothing was signed or published\./)
+      if (face === null) continue
+      await expect(a.setAvatar({ object: { ...wedge2, face } })).rejects.toThrow(/Not set: "face" in the payload must be "path" or "upright", in lower case \(DECK-0003 1\.18\); got .*Leave face out \(or null\) for "path"\. Nothing was signed or published\./)
+      await expect(a.setAvatar({ object: JSON.stringify({ ...wedge2, face }) })).rejects.toThrow(/Not set: "face" in the payload must be/)
+    }
+    await expect(a.setAvatar({ clear: true, face: 'upright' })).rejects.toThrow(/face goes with an avatar \(object or address\), not with clear/)
+    expect(sign).not.toHaveBeenCalled()
+    expect(sent()).toBe(before)
+    expect(a.outbox.state().pending).toHaveLength(pending)
+  }, 30_000)
+
+  it('copied by address: an "upright" face is kept, a malformed one is left out (path), and face replaces either', async () => {
+    const a = await start()
+    const author = generateSecretKey()
+    const at = Math.floor(Date.now() / 1000)
+    const upright = signEvent({ kind: 33331, created_at: at, tags: [['d', 'wedge-up']], content: JSON.stringify({ ...wedge2, face: 'upright' }) }, author)
+    const bad = signEvent({ kind: 33331, created_at: at, tags: [['d', 'wedge-bad']], content: JSON.stringify({ ...wedge2, face: 'Upright' }) }, author)
+    canonical.seed(upright)
+    canonical.seed(bad)
+    const kept = await a.setAvatar({ address: `33331:${upright.pubkey}:wedge-up` })
+    expect(kept.data.face).toBe('upright')
+    expect(lastContent(a).face).toBe('upright')
+    const left = await a.setAvatar({ address: `33331:${bad.pubkey}:wedge-bad` })
+    expect(String(left.data.source)).toContain('its malformed face is left out, so it faces along its path')
+    expect(left.data.face).toBe('path')
+    expect(lastContent(a)).not.toHaveProperty('face')
+    const replaced = await a.setAvatar({ address: `33331:${bad.pubkey}:wedge-bad`, face: 'upright' })
+    expect(String(replaced.data.source)).not.toContain('malformed face')
+    expect(lastContent(a).face).toBe('upright')
+    await a.setAvatar({ address: `33331:${upright.pubkey}:wedge-up`, face: 'path' })
+    expect(lastContent(a)).not.toHaveProperty('face')
+  }, 30_000)
+
+  it('validate_object names an "upright" facing in one line, a malformed one as left out, and nothing for path', async () => {
+    const a = await start()
+    const up = a.validateObject({ payload: { ...wedge2, face: 'upright' } })
+    expect(up.text).toContain('Facing, read only when worn as an avatar (DECK-0003 1.18): upright')
+    expect(up.data.face).toBe('upright')
+    const bad = a.validateObject({ payload: { ...wedge2, face: 'Upright' } })
+    expect(bad.data.repaired).toEqual(['face'])
+    expect(bad.data.face).toBe('path')
+    expect(bad.text).toContain('"face" was not "path" or "upright", so it is left out: worn as an avatar, it faces along its path (DECK-0003 1.18).')
+    const path = a.validateObject({ payload: { ...wedge2, face: 'path' } })
+    expect(path.text).not.toMatch(/facing|"face"/i)
+    expect(path.data.face).toBe('path')
+    expect(path.data.repaired).toEqual([])
+  }, 30_000)
+})

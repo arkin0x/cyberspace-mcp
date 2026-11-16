@@ -33,7 +33,7 @@
     "cyberspace-core": "git+https://github.com/arkin0x/cyberspace-core.git#ac82fa96f58ab0c3eea91403e6549ec16af73c02",
     "decimal.js": "^10.6.0",
     "nostr-tools": "^2.24.1",
-    "sno-core": "git+https://github.com/arkin0x/sno-core.git#v0.1.31",
+    "sno-core": "git+https://github.com/arkin0x/sno-core.git#v0.1.32",
     "zod": "^4.0.0"
   },
   "devDependencies": {

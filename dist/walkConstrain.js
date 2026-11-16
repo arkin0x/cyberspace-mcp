@@ -22,6 +22,7 @@
 // placed by reference (its author's), never an avatar (section 3.3).
 import { fromPayload, readOpacity } from 'sno-core/shards';
 import { EYE_FIELD, readEye } from 'sno-core/eye';
+import { DEFAULT_FACE, FACE_FIELD, readFace } from 'sno-core/face';
 /** What a shard whose author has not chosen is written as (DECK-0003 1.12). */
 export const CONSTRAIN_DEFAULT = 'opaque';
 /** The three settings. */
@@ -116,7 +117,9 @@ export function walkWords(s) {
  * (a move, ONOSENDAI #476); `opacity` left out keeps a valid one, and 100 is
  * written as no field. The two go last, opacity first, where sno-core's
  * toPayload puts them. A malformed `eye` (DECK-0003 1.17) is left out, since a
- * publisher never writes one; a well formed one stays as found. Null when the
+ * publisher never writes one; a well formed one stays as found. So is a
+ * `face` (DECK-0003 1.18) that is not "upright": "path" is the default a
+ * publisher leaves out, and anything else is malformed. Null when the
  * payload does not read as SNO.
  */
 export function rewritePayload(json, change = {}) {
@@ -133,7 +136,7 @@ export function rewritePayload(json, change = {}) {
     const opacity = readOpacity(change.opacity !== undefined ? change.opacity : p.opacity);
     const constrain = change.constrain ?? authoredConstrain(p[CONSTRAIN_FIELD]);
     // Built from entries, so a `__proto__` key in the payload stays data.
-    const kept = Object.entries(p).filter(([k, v]) => k !== 'opacity' && k !== CONSTRAIN_FIELD && !(k === EYE_FIELD && readEye(v) === undefined));
+    const kept = Object.entries(p).filter(([k, v]) => k !== 'opacity' && k !== CONSTRAIN_FIELD && !(k === EYE_FIELD && readEye(v) === undefined) && !(k === FACE_FIELD && (readFace(v) ?? DEFAULT_FACE) === DEFAULT_FACE));
     return JSON.stringify(Object.fromEntries([...kept, ...(opacity !== undefined ? [['opacity', opacity]] : []), [CONSTRAIN_FIELD, constrain]]));
 }
 //# sourceMappingURL=walkConstrain.js.map

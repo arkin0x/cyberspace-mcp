@@ -86,6 +86,16 @@ describe('the eye (DECK-0003 1.17) through place, hide and publish_object', () =
   })
 })
 
+describe('the facing (DECK-0003 1.18) through an EDIT', () => {
+  it('keeps "upright" as found, and leaves out "path" (the default) and a malformed one', () => {
+    const base = JSON.parse(fx.edited.before) as Record<string, unknown>
+    expect(JSON.parse(rewritePayload(JSON.stringify({ ...base, face: 'upright' }), { constrain: 'all' })!).face).toBe('upright')
+    for (const face of ['path', 'Upright', null, 1]) {
+      expect(JSON.parse(rewritePayload(JSON.stringify({ ...base, face }), { constrain: 'all' })!)).not.toHaveProperty('face')
+    }
+  })
+})
+
 describe('what an EDIT of a placed shard writes, against ONOSENDAI 88da640', () => {
   it('each word, an opacity, and a move that leaves the setting alone (the default for one that chose none)', () => {
     const e = fx.edited
