@@ -16,6 +16,7 @@ import { nip19 } from 'nostr-tools'
 import { finalizeEvent, getPublicKey } from 'nostr-tools/pure'
 import { parsePubkey } from './chain/resolve.js'
 import { parseArgs, readFileConfig, readWalletFile, settingsFrom } from './config.js'
+import { KitLibrary, kitsDirCandidates } from './kits/library.js'
 import { readToken } from './http.js'
 import { GENERAL_RELAYS, Relays, isRetiredRelay } from './nostr/relays.js'
 import { mergeAnswers } from './nostr/relayOutcome.js'
@@ -157,6 +158,15 @@ export async function runDoctor(argv: string[], deps: DoctorDeps): Promise<{ cod
   if (settings.operator && !operator) add({ name: 'operator', verdict: 'fail', detail: `not an npub: ${JSON.stringify(settings.operator)}`, fix: 'cyberspace-mcp init --operator <your npub>' })
   else if (!operator) add({ name: 'operator', verdict: 'info', detail: 'none: the agent answers only to its MCP client, and operator DMs are off', fix: 'to take orders from a human by nostr DM: cyberspace-mcp init --operator <their npub>' })
   else add({ name: 'operator', verdict: 'ok', detail: nip19.npubEncode(operator) })
+
+  // The building kits are local files: say which, or that there are none (an agent without them builds from its own objects).
+  {
+    const lib = new KitLibrary(kitsDirCandidates(stateDir, settings.kitsDir))
+    const dir = lib.dir()
+    let pieces = 0
+    try { pieces = dir ? lib.entries().length : 0 } catch { pieces = 0 }
+    add(dir && pieces ? { name: 'kits', verdict: 'ok', detail: `${pieces} pieces in ${dir} (${lib.catalogs().map((c) => c.kit).join(', ')}): local, never published` } : { name: 'kits', verdict: 'info', detail: `none installed (looked in ${kitsDirCandidates(stateDir, settings.kitsDir).join(' and ')})`, fix: 'optional: docs/kits.md says how a human copies kits in' })
+  }
 
   // The profile this server last published names the operator.
   const profile = StateDir.open(stateDir).readJson<{ tags?: string[][]; accepted?: string[] } | null>('profile.json', null)

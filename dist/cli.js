@@ -9,7 +9,8 @@
 //
 // The subcommands (arkinox, 2026-10-13): `serve` (one long-lived agent over
 // HTTP on 127.0.0.1, with its waker), `init` (the first run), `doctor` (what
-// is missing), and `wake pause|resume|status`.
+// is missing), `wake pause|resume|status`, and `kits add|list|remove` (the
+// building kits on this machine, docs/kits.md).
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { Agent } from './agent.js';
 import { parseArgs, readFileConfig, readWalletFile, retiredCanonicalWarning, settingsFrom, USAGE } from './config.js';
@@ -206,6 +207,59 @@ function wake(argv) {
         process.exit(2);
     }
 }
+const KITS_USAGE = `Usage: cyberspace-mcp kits add <kit.zip> | list | remove <kit> [--kits-dir <dir>] [--state <dir>]
+
+A kit is a zip with kit.json (the manifest), the pieces' SNO payloads in
+folders, and optionally GUIDE.md (docs/kits.md). add unpacks it into the kits
+directory and builds its catalog; list shows what is installed; remove takes
+one out. The kits directory: --kits-dir, else kitsDir in <state>/config.json,
+else <state>/kits or <state>/../kits, whichever holds kits (else <state>/kits).
+Kits are local data: nothing is fetched or published.`;
+/** kits add | list | remove: the kits on this machine (src/kits/install.ts). */
+async function kits(argv) {
+    const { KitError, KitLibrary, kitsDirCandidates } = await import('./kits/library.js');
+    const { installKit, listKits, removeKit } = await import('./kits/install.js');
+    const words = [];
+    let state = defaultStateDir();
+    let dir;
+    for (let i = 0; i < argv.length; i++) {
+        if (argv[i] === '--state' && argv[i + 1])
+            state = expandHome(argv[++i]);
+        else if (argv[i] === '--kits-dir' && argv[i + 1])
+            dir = expandHome(argv[++i]);
+        else if (argv[i] === '--help' || argv[i] === '-h') {
+            print(KITS_USAGE);
+            return;
+        }
+        else
+            words.push(argv[i]);
+    }
+    const file = readFileConfig(state);
+    const candidates = kitsDirCandidates(state, dir ?? (typeof file.kitsDir === 'string' && file.kitsDir.trim() ? expandHome(file.kitsDir) : undefined));
+    const kitsDir = new KitLibrary(candidates).dir() ?? candidates[0];
+    const [verb, arg] = words;
+    try {
+        if (verb === 'add' && arg) {
+            const r = installKit(arg, kitsDir);
+            print(`${r.replaced ? 'Replaced' : 'Installed'} ${r.kit} (${r.title}): ${r.pieces} pieces in ${r.dir}${r.guide ? ', with its guide' : ''}${r.briefs ? `, ${r.briefs} briefs` : ''}.${r.skipped.length ? ` Left out ${r.skipped.length}: ${r.skipped.slice(0, 5).map((s) => `${s.id} (${s.why})`).join('; ')}${r.skipped.length > 5 ? '; ...' : ''}.` : ''} Kits are local data: never publish them.`);
+        }
+        else if (verb === 'list') {
+            const all = listKits(kitsDir);
+            print(all.length ? all.map((k) => `${k.kit}: ${k.title}, ${k.pieces} pieces${k.guide ? ', guide' : ''}, installed ${k.generated}`).join('\n') : `No kits in ${kitsDir}.`);
+        }
+        else if (verb === 'remove' && arg) {
+            print(`Removed ${removeKit(kitsDir, arg)}.`);
+        }
+        else {
+            process.stderr.write(`${KITS_USAGE}\n`);
+            process.exit(2);
+        }
+    }
+    catch (err) {
+        process.stderr.write(`${err instanceof KitError ? err.message : err instanceof Error ? err.message : String(err)}\n`);
+        process.exit(1);
+    }
+}
 async function main() {
     const argv = process.argv.slice(2);
     const [first, ...rest] = argv;
@@ -214,6 +268,7 @@ async function main() {
         case 'init': return init(rest);
         case 'doctor': return doctor(rest);
         case 'wake': return wake(rest);
+        case 'kits': return kits(rest);
         case 'stdio': return stdio(rest);
         default: return stdio(argv);
     }
