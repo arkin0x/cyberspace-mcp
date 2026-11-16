@@ -15,7 +15,7 @@
 // chain is clear of it, and dropped when they show a fork.
 
 import { randomBytes } from 'node:crypto'
-import { type Plane } from 'cyberspace-core'
+import { AVATAR_MINE_MAX_TARGET, avatarTailEvent, type Plane } from 'cyberspace-core'
 import { nip19 } from 'nostr-tools'
 import type { Filter } from 'nostr-tools/filter'
 import { v2 as nip44 } from 'nostr-tools/nip44'
@@ -32,7 +32,7 @@ import { ProofAborted, proveInThread, type ProofJob, type ProofResult } from './
 import { ChainKeeper } from './chain/keeper.js'
 import { askChainEvents, parsePubkey } from './chain/resolve.js'
 import { causeWords, decideSelfCheck } from './chain/selfCheck.js'
-import { AVATAR_KIND, MAX_AVATAR_BYTES, avatarPrice, avatarSeconds, avatarTemplate, nonceTagged, paidShard, verifyAvatarWork } from './avatar.js'
+import { AVATAR_KIND, avatarFits, avatarPrice, avatarSeconds, avatarTemplate, avatarTooLargeWords, avatarTriesPerSec, paidShard, verifyAvatarWork } from './avatar.js'
 import { avatarThreads, mineAvatar } from './avatarMine.js'
 import { Chat, type ChatLine } from './chat.js'
 import {
@@ -2440,7 +2440,7 @@ export class Agent {
       }
       const v = validateSnoPayload(raw)
       if (!v.ok) throw new Refusal(`Not set: the payload is not valid SNO. ${v.errors.join(' ')}`)
-      if (v.bytes > MAX_AVATAR_BYTES) throw new Refusal(`Not set: the payload is ${v.bytes} bytes, and an avatar is at most ${MAX_AVATAR_BYTES} (every try of the work hashes the whole event). Use fewer vertices.`)
+      if (!avatarFits(v.bytes)) throw new Refusal(`Not set: ${avatarTooLargeWords(v.bytes)}. Use fewer vertices and faces.`)
       shard = v.shard
       source = 'payload'
     } else if (input.address !== undefined) {
@@ -2450,18 +2450,20 @@ export class Agent {
       try { raw = JSON.parse(object.content || 'null') } catch { raw = null }
       const v = validateSnoPayload(raw)
       if (!v.ok) throw new Refusal(`The object at ${address} is not valid SNO: ${v.errors.join(' ')}`)
-      if (v.bytes > MAX_AVATAR_BYTES) throw new Refusal(`The object at ${address} is ${v.bytes} bytes; an avatar is at most ${MAX_AVATAR_BYTES}.`)
+      if (!avatarFits(v.bytes)) throw new Refusal(`Not set: the object at ${address} is too large for an avatar: ${avatarTooLargeWords(v.bytes)}.`)
       shard = v.shard
       source = `address ${address} (payload copied: an avatar carries its shape, not a reference)`
     }
     const createdAt = Math.max(nowSeconds(), this.lastAvatarAt + 1)
     let template: EventTemplate = avatarTemplate(shard, createdAt)
-    let mined: { bits: number; tries: number; seconds: number; estimate: number } | null = null
+    let mined: { bits: number; tries: number; seconds: number; estimate: number; id: string } | null = null
     if (shard) {
-      const payload = JSON.parse(template.content)
-      const { bits, eventBytes } = avatarPrice(payload, template, this.pubkey)
+      const { bits, contentBytes } = avatarPrice(template.content)
+      // The content as it is signed (sno-core's toPayload), checked as well as the payload as given.
+      if (!avatarFits(contentBytes)) throw new Refusal(`Not set: ${avatarTooLargeWords(contentBytes)}. Use fewer vertices and faces.`)
       const threads = this.config.avatarThreads ?? avatarThreads(this.config.threads)
-      const estimate = avatarSeconds(bits, eventBytes, this.calibration.sha256PerSec, threads)
+      const estimate = avatarSeconds(bits, avatarTriesPerSec(this.calibration), threads)
+      if (bits > AVATAR_MINE_MAX_TARGET) throw new Refusal(`This avatar owes ${bits} bits of work (spec 8.10: reach and detail), more than the miner can aim for (${AVATAR_MINE_MAX_TARGET}). A smaller shape (nearer the build origin, fewer vertices and faces) costs less.`)
       const over = this.budget.refusal(estimate)
       if (over) throw new Refusal(`This avatar owes ${bits} bits of work (spec 8.10: reach and detail), about ${estimate.toFixed(1)} s expected on ${threads} thread(s). ${over} A smaller shape (nearer the build origin, fewer vertices and faces) costs less.`)
       const limit = Math.min(this.budget.capCallSeconds, this.budget.remainingSeconds())
@@ -2479,13 +2481,16 @@ export class Agent {
           ? `Mining stopped by the caller after ${seconds.toFixed(1)} s and ${outcome.tries} tries; nothing was published.`
           : `No nonce within the ${limit.toFixed(0)} s this call may spend (${outcome.tries} tries; ${bits} bits expects about ${(2 ** bits).toLocaleString('en-US')}, about ${estimate.toFixed(1)} s). The work is luck: call set_avatar again to try afresh. ${seconds.toFixed(1)} s were charged.`)
       }
-      template = nonceTagged(template, outcome.nonce, bits)
-      mined = { bits, tries: outcome.tries, seconds, estimate }
+      // The nonce as the last field of the content, the nonce tag committing to the bits: the event whose id the threads found.
+      const tail = avatarTailEvent({ ...template, pubkey: this.pubkey }, outcome.nonce, bits)
+      template = { kind: tail.kind, created_at: tail.created_at, tags: tail.tags, content: tail.content }
+      mined = { bits, tries: outcome.tries, seconds, estimate, id: outcome.id }
     }
     const event = this.sign(template)
     // The reader's check before any relay sees it: what ONOSENDAI would not draw is never published.
     if (shard) {
       const verdict = verifyAvatarWork(event)
+      if (event.id !== mined?.id) throw new Refusal('The signed avatar is not the event the threads mined; nothing was published. This is a bug in the server.')
       if (!verdict.ok || !paidShard(event)) throw new Refusal(`The signed avatar did not verify (${verdict.reason}); nothing was published. This is a bug in the server.`)
     }
     if (event.kind !== AVATAR_KIND) throw new Refusal('internal: not an avatar event')

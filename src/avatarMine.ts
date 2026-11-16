@@ -1,66 +1,36 @@
 // avatarMine.ts: the work an avatar owes, done off the main thread.
 //
-// ONOSENDAI's loop (src/lib/avatarMine.ts mineChunk, src/workers/
-// avatar.worker.ts), on node's worker_threads (arkinox, 2026-10-11:
-// responsiveness first, nothing blocks tool calls). The NIP-01 serialization
-// is built once around a marker, so only the nonce's digits change per try.
-// Each thread takes its own residue of the nonce (thread i of n tries i,
-// i+n, i+2n...), the first find wins, and every thread stops on a shared
-// flag: the deadline, the caller's signal, or the find. While the threads
-// hash, the main thread answers every other tool.
+// ONOSENDAI's worker pattern (src/workers/avatar.worker.ts) on node's
+// worker_threads (arkinox, 2026-10-11: responsiveness first, nothing blocks
+// tool calls), with cyberspace-core's midstate miner (AvatarTailMiner,
+// spec 8.10 since 2026-11): the nonce is the last field of the content, the
+// serialization before it is hashed once, and each try hashes one SHA-256
+// block, whatever the avatar's size. Each thread runs its own miner from its
+// own start (thread i at i * THREAD_SPAN), the first find wins, and every
+// thread stops on a shared flag: the deadline, the caller's signal, or the
+// find. While the threads hash, the main thread answers every other tool.
+// The event to sign is cyberspace-core's avatarTailEvent(template, nonce,
+// target), whose id is the find's.
 
-import { createHash } from 'node:crypto'
 import { availableParallelism } from 'node:os'
+import { AVATAR_MINE_MAX_TARGET, AvatarTailMiner, avatarTailSplit, type AvatarMineFound, type AvatarMineTemplate } from 'cyberspace-core'
 import { defaultThreads } from './budget.js'
 import { Worker, parentPort, workerData, type MessagePort } from 'node:worker_threads'
-import { nonceTagged } from './avatar.js'
 
-export interface MineTemplate {
-  pubkey: string
-  created_at: number
-  kind: number
-  tags: string[][]
-  content: string
-}
+export type MineTemplate = AvatarMineTemplate
+/** A find: the whole nonce field (any leading zeros included) and the id it gives. */
+export type MineFound = AvatarMineFound
 
-export interface MineFound { nonce: string; id: string }
-
-const MARKER = 'CYBERSPACE-MCP-NONCE-MARKER-7f3a9c'
-/** Tries between looks at the stop flag. */
-const CHUNK = 4096
-
-/** Leading zero bits of a hash. */
-export function leadingZeros(hash: Uint8Array): number {
-  let n = 0
-  for (const b of hash) {
-    if (b === 0) { n += 8; continue }
-    n += Math.clz32(b) - 24
-    break
-  }
-  return n
-}
-
+/** Tries between looks at the stop flag: a few milliseconds at the midstate rate. */
+const CHUNK = 8192
 /**
- * Try `count` nonces from `from`, `stride` apart; the first whose id carries
- * `target` leading zero bits, or null. Deterministic, so a thread and a test
- * find the same nonce for the same template.
+ * Nonces between one thread's start and the next's. The miner has room for
+ * 16 digits (10^16 nonces), so up to 10,000 threads never meet, and no
+ * thread exhausts its 10^12 before any deadline a call may set.
  */
-export function mineChunk(t: MineTemplate, target: number, from: number, count: number, stride: number = 1): MineFound | null {
-  const marked = nonceTagged(t, MARKER, target)
-  const split = JSON.stringify([0, t.pubkey, t.created_at, t.kind, marked.tags, t.content]).split(MARKER)
-  // The marker cannot be in the content of a template this server builds, but a
-  // second copy would make the split ambiguous: refuse rather than mine the wrong bytes.
-  if (split.length !== 2) throw new Error('the nonce marker appears in the event itself')
-  const head = Buffer.from(split[0], 'utf8')
-  const tail = Buffer.from(split[1], 'utf8')
-  const last = from + count * stride
-  for (let n = from; n < last; n += stride) {
-    const digits = String(n)
-    const hash = createHash('sha256').update(head).update(digits).update(tail).digest()
-    if (leadingZeros(hash) >= target) return { nonce: digits, id: hash.toString('hex') }
-  }
-  return null
-}
+export const THREAD_SPAN = 1e12
+/** The most threads whose ranges fit the miner's 16 digits. */
+const MAX_THREADS = 10_000
 
 // ---- the thread ------------------------------------------------------------
 
@@ -69,7 +39,6 @@ interface MineData {
   template: MineTemplate
   target: number
   start: number
-  stride: number
   stop: SharedArrayBuffer
 }
 
@@ -77,17 +46,13 @@ type MineMessage = { type: 'found'; found: MineFound; tries: number } | { type: 
 
 function threadMain(data: MineData, port: MessagePort): void {
   const stop = new Int32Array(data.stop)
-  let tries = 0
+  let miner: AvatarTailMiner | null = null
   try {
+    miner = new AvatarTailMiner(avatarTailSplit(data.template, data.target), data.start)
     for (;;) {
-      if (Atomics.load(stop, 0) !== 0) { port.postMessage({ type: 'stopped', tries } satisfies MineMessage); return }
-      const found = mineChunk(data.template, data.target, data.start + tries * data.stride, CHUNK, data.stride)
-      if (found) {
-        tries = (Number(found.nonce) - data.start) / data.stride + 1
-        port.postMessage({ type: 'found', found, tries } satisfies MineMessage)
-        return
-      }
-      tries += CHUNK
+      if (Atomics.load(stop, 0) !== 0) { port.postMessage({ type: 'stopped', tries: miner.tries } satisfies MineMessage); return }
+      const found = miner.run(CHUNK, data.target)
+      if (found) { port.postMessage({ type: 'found', found, tries: miner.tries } satisfies MineMessage); return }
     }
   } catch (err) {
     port.postMessage({ type: 'error', message: err instanceof Error ? err.message : String(err) } satisfies MineMessage)
@@ -115,15 +80,21 @@ export type MineOutcome =
 
 /**
  * Mine `template` to `target` bits on `threads` threads, stopping at
- * `deadlineMs` of wall time or on the signal. Resolves with the nonce, or
- * with how far it got; rejects only when a thread fails.
+ * `deadlineMs` of wall time or on the signal. Resolves with the nonce (the
+ * whole trailing field's value; sign avatarTailEvent(template, nonce,
+ * target)), or with how far it got; rejects only when a thread fails or the
+ * template cannot be mined (content not a JSON object, target over
+ * AVATAR_MINE_MAX_TARGET).
  */
 export function mineAvatar(template: MineTemplate, target: number, options: { threads: number; deadlineMs: number; signal?: AbortSignal }): Promise<MineOutcome> {
+  // What a thread would fail on, refused here before any thread starts.
+  if (!Number.isInteger(target) || target < 0 || target > AVATAR_MINE_MAX_TARGET) return Promise.reject(new Error(`the target must be 0 to ${AVATAR_MINE_MAX_TARGET} bits; got ${target}`))
+  try { avatarTailSplit(template, target) } catch (err) { return Promise.reject(err instanceof Error ? err : new Error(String(err))) }
   const started = Date.now()
   const stopBuffer = new SharedArrayBuffer(4)
   const stop = new Int32Array(stopBuffer)
   const spec = threadSpec()
-  const n = Math.max(1, options.threads)
+  const n = Math.min(MAX_THREADS, Math.max(1, Math.floor(options.threads)))
   return new Promise<MineOutcome>((resolve, reject) => {
     const workers: Worker[] = []
     const tries = new Array<number>(n).fill(0)
@@ -147,7 +118,7 @@ export function mineAvatar(template: MineTemplate, target: number, options: { th
     }
     if (options.signal?.aborted) { finish({ found: false, why: 'aborted', tries: 0, elapsedMs: 0 }); return }
     for (let i = 0; i < n; i++) {
-      const data: MineData = { avatarMine: true, template, target, start: i, stride: n, stop: stopBuffer }
+      const data: MineData = { avatarMine: true, template, target, start: i * THREAD_SPAN, stop: stopBuffer }
       const worker = new Worker(spec.url, spec.execArgv ? { workerData: data, execArgv: spec.execArgv } : { workerData: data })
       workers.push(worker)
       worker.on('message', (msg: MineMessage) => {

@@ -21,7 +21,7 @@
 
 import { cpus } from 'node:os'
 import {
-  AXIS_CENTER, computeAxisMerkleRoot, computeSubtreeCantor, deriveHopPrimes, hopAttempt, hopResidueCount, hopRerollAttempts, seedPrefix, wordAt,
+  AVATAR_KIND, AXIS_CENTER, AvatarTailMiner, avatarTailSplit, computeAxisMerkleRoot, computeSubtreeCantor, deriveHopPrimes, hopAttempt, hopResidueCount, hopRerollAttempts, seedPrefix, wordAt,
   type HopCostEstimate, type SidestepCostEstimate,
 } from 'cyberspace-core'
 import type { StateDir } from '../state/dir.js'
@@ -136,6 +136,13 @@ export interface Calibration {
   sha256PerSec: number
   /** The residue extension's unit costs; DEFAULT_RESIDUE_RATES when absent. A saved file without them is measured again. */
   residue?: ResidueRates
+  /**
+   * Avatar mining tries per second on one thread (cyberspace-core's
+   * AvatarTailMiner, one SHA-256 block per try whatever the avatar's size).
+   * Absent in a file saved before it was measured: avatar.ts then derives it
+   * from sha256PerSec until the file is measured again.
+   */
+  avatarTriesPerSec?: number
 }
 
 /** A week keeps the numbers honest without re-running every start. */
@@ -206,7 +213,25 @@ export function measure(now: number = Date.now()): Calibration {
   computeAxisMerkleRoot(seedPrefix(new Uint8Array(32), 0), 0, AXIS_CENTER, AXIS_CENTER + (1n << 16n))
   const sidestepMs = Math.max(performance.now() - t0, 0.5)
   const sha256PerSec = SIDESTEP_HASHES / (sidestepMs / 1000)
-  return { version: 1, at: now, fingerprint: fingerprint(), cantorMsByHeight, sha256PerSec, residue: measureResidueRates() }
+  return { version: 1, at: now, fingerprint: fingerprint(), cantorMsByHeight, sha256PerSec, residue: measureResidueRates(), avatarTriesPerSec: measureAvatarTriesPerSec() }
+}
+
+/** Tries run before timing (the JIT warms up), then timed: about a tenth of a second in all on a desktop core. */
+const AVATAR_TRIES_WARM = 1 << 14
+const AVATAR_TRIES_TIMED = 1 << 17
+
+/**
+ * The avatar miner's rate on this thread, in tries per second: the midstate
+ * miner set_avatar runs, over a small template, aimed at a target it cannot
+ * reach in so few tries. The cost of a try does not depend on the avatar.
+ */
+export function measureAvatarTriesPerSec(): number {
+  const template = { pubkey: '00'.repeat(32), created_at: 0, kind: AVATAR_KIND, tags: [['client', 'calibration']], content: '{"vertices":[]}' }
+  const miner = new AvatarTailMiner(avatarTailSplit(template, 64))
+  miner.run(AVATAR_TRIES_WARM, 64)
+  const t0 = performance.now()
+  miner.run(AVATAR_TRIES_TIMED, 64)
+  return AVATAR_TRIES_TIMED / (Math.max(performance.now() - t0, 0.5) / 1000)
 }
 
 /** Primes and attempts timed in bulk, a few tens of milliseconds in all; the same kernel the prover takes by default. */

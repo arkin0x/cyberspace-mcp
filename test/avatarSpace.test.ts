@@ -15,12 +15,11 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { findLcaHeight } from 'cyberspace-core'
+import { findLcaHeight, mineAvatarTail } from 'cyberspace-core'
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { fromPayload } from 'sno-core/shards'
 import { Agent } from '../src/agent.js'
-import { avatarTemplate, avatarWork, nonceTagged } from '../src/avatar.js'
-import { mineChunk } from '../src/avatarMine.js'
+import { avatarTemplate, avatarWork } from '../src/avatar.js'
 import { AvatarSizes } from '../src/avatarSizes.js'
 import { hopTemplate, spawnTemplate } from '../src/chain/builder.js'
 import { bytesToHex, nowSeconds, signEvent, type NostrEvent } from '../src/nostr/event.js'
@@ -41,7 +40,7 @@ const cal: Calibration = { version: 1, at: Date.now(), fingerprint: 'test', cant
 
 /** XOR's avatar as he published it (2026-10-11): a stella octangula, unit 0, every vertex at a corner of the one-gibson cube. */
 const xorPayload = JSON.parse(readFileSync(new URL('./fixtures/xor-stella-octangula.json', import.meta.url), 'utf8')) as Record<string, unknown>
-/** The same shape a size up (unit 1): it reaches two gibsons on each axis, 18 bits of work. */
+/** The same shape a size up (unit 1): it reaches two gibsons on each axis, 12 bits of work. */
 const bigPayload = { ...xorPayload, name: 'Big star', unit: 1 }
 const BIG_RADIUS = 2
 
@@ -51,15 +50,15 @@ function shardOf(payload: unknown) {
   return v.shard
 }
 
-/** A paid kind 11333 for this key, mined here with the server's own chunk loop. */
+/** A paid kind 11333 for this key, mined here with cyberspace-core's midstate miner (the one the server's threads run). */
 function paidAvatar(payload: unknown, sk: Uint8Array): NostrEvent {
   const shard = shardOf(payload)
   const t = avatarTemplate(shard, nowSeconds() - 60)
   const pubkey = getPublicKey(sk)
   const bits = avatarWork(JSON.parse(t.content))
-  let found = null
-  for (let from = 0; !found; from += 8192) found = mineChunk({ ...t, pubkey }, bits, from, 8192)
-  return signEvent(nonceTagged(t, found.nonce, bits), sk)
+  const mined = mineAvatarTail({ ...t, pubkey }, bits)
+  if (!mined) throw new Error('not mined')
+  return signEvent({ kind: mined.event.kind, created_at: mined.event.created_at, tags: mined.event.tags, content: mined.event.content }, sk)
 }
 
 describe('how big ONOSENDAI draws an avatar', () => {

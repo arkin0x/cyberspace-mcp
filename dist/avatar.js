@@ -14,18 +14,32 @@
 // and verifyAvatarWork, the same pinned commit ONOSENDAI draws with, so an
 // event this file mines is one ONOSENDAI draws, and one it would not draw is
 // never published.
-import { AVATAR_KIND, avatarWork, verifyAvatarWork } from 'cyberspace-core';
+//
+// Since 2026-11 (spec 8.10, cyberspace-core 0.3.0) the work is
+// ceil(10 + 2 log2(reach) + 1.5 log2(detail / 32)) and the content is at most
+// 131,072 bytes, a trailing nonce field included. The miner (avatarMine.ts)
+// writes the nonce as the last field of the content and hashes one SHA-256
+// block per try from a midstate, so a try costs the same at any size.
+import { AVATAR_CONTENT_MAX, AVATAR_KIND, AVATAR_NONCE_ROOM, avatarContentBytes, avatarWork, verifyAvatarWork } from 'cyberspace-core';
 import { fromPayload, toPayload } from 'sno-core/shards';
 import { CLIENT_NAME } from './nostr/event.js';
 export { AVATAR_KIND, avatarWork, verifyAvatarWork };
 /**
- * The largest payload an avatar may carry, in bytes. Every nonce hashes the
- * whole event, so bytes are paid per try (spec 8.10, "bytes are charged
- * already"); this is the threshold above which a bag carries a shard by
- * reference (DECK-0003 3.2), the size the rest of the server already treats
- * as large.
+ * The most bytes an avatar's content may hold, UTF-8, the mined nonce field
+ * included (spec 8.10, cyberspace-core's AVATAR_CONTENT_MAX): a reader draws
+ * the dodecahedron for a larger one, whatever work it carries.
  */
-export const MAX_AVATAR_BYTES = 16_384;
+export const MAX_AVATAR_BYTES = AVATAR_CONTENT_MAX;
+/** The most bytes a payload may have before mining: the limit less the room the nonce field may take (AVATAR_NONCE_ROOM). */
+export const MAX_AVATAR_PAYLOAD_BYTES = AVATAR_CONTENT_MAX - AVATAR_NONCE_ROOM;
+/** Whether a payload of this many bytes still fits the limit once the nonce is mined into it. */
+export function avatarFits(payloadBytes) {
+    return payloadBytes + AVATAR_NONCE_ROOM <= MAX_AVATAR_BYTES;
+}
+/** The refusal's words for a payload over the limit. */
+export function avatarTooLargeWords(payloadBytes) {
+    return `the payload is ${payloadBytes} bytes, and an avatar's content is at most ${MAX_AVATAR_BYTES} bytes with the mined nonce field (up to ${AVATAR_NONCE_ROOM} bytes) included, so at most ${MAX_AVATAR_PAYLOAD_BYTES} before mining; a reader draws the dodecahedron for anything larger (spec 8.10)`;
+}
 /** The event to mine and sign: this shard as the avatar, or none for the dodecahedron. ONOSENDAI's avatarTemplate. */
 export function avatarTemplate(shard, createdAt) {
     return {
@@ -35,24 +49,29 @@ export function avatarTemplate(shard, createdAt) {
         content: shard ? JSON.stringify(toPayload(shard)) : '',
     };
 }
-/** The template with its nonce tag set (replacing any earlier one), NIP-13 shape: ["nonce", n, target]. */
-export function nonceTagged(t, nonce, target) {
-    return { ...t, tags: [...t.tags.filter((tag) => tag[0] !== 'nonce'), ['nonce', nonce, String(target)]] };
-}
-/** The shard an avatar event carries, or null when it carries none or is not one. ONOSENDAI's avatarFromEvent. */
+/**
+ * The shard an avatar event carries, or null when it carries none or is not
+ * one. ONOSENDAI's avatarFromEvent. A `nonce` field in the content (the
+ * miner's, spec 8.10) is not part of the shape and is dropped before
+ * sno-core reads it, so it never rides along in the shard's `extra`.
+ */
 export function avatarFromEvent(ev) {
     if (ev.kind !== AVATAR_KIND)
         return null;
     if (!ev.content)
         return null;
     try {
-        return fromPayload(JSON.parse(ev.content), `avatar:${ev.pubkey}`);
+        const payload = JSON.parse(ev.content);
+        // sno-core would carry an unknown field through in `extra`; the nonce is the work's, not the shape's.
+        if (payload && typeof payload === 'object' && !Array.isArray(payload))
+            delete payload.nonce;
+        return fromPayload(payload, `avatar:${ev.pubkey}`);
     }
     catch {
         return null;
     }
 }
-/** The shard ONOSENDAI draws for an event: none for empty content, none for a shape that has not paid. ONOSENDAI's paidShard. */
+/** The shard ONOSENDAI draws for an event: none for empty content, none for a shape that has not paid or is over the limit. ONOSENDAI's paidShard. */
 export function paidShard(ev) {
     if (!ev.content)
         return null;
@@ -60,26 +79,43 @@ export function paidShard(ev) {
         return null;
     return avatarFromEvent(ev);
 }
-/** SHA-256 blocks a serialized event of this many bytes takes, padding included. */
-export function blocksOf(bytes) {
-    return Math.ceil((bytes + 9) / 64);
+/**
+ * Midstate tries per sha256PerSec, for a calibration saved before the
+ * miner's own rate was measured. The calibration's SHA-256 rate is a Merkle
+ * tree's, hashes of 64 bytes and more each; a midstate try is one
+ * compression with no allocation. Measured 3.6 to 4.7 on a desktop core
+ * (2026-11-16); 3 keeps the estimate on the slow side.
+ */
+export const AVATAR_TRIES_PER_SHA256 = 3;
+/**
+ * What each thread past the first adds to the rate. The threads are
+ * worker_threads, each with its own miner on its own range of nonces and
+ * nothing shared but a stop flag, so on idle cores they scale almost
+ * linearly; on a busy machine they share cores with everything else
+ * (measured 0.45 to 0.5 per extra thread on 16 cores at a load of 16,
+ * 2026-11-16). 0.7, the factor this estimate used before (ONOSENDAI's
+ * triesPerSec), sits between.
+ */
+export const AVATAR_THREAD_GAIN = 0.7;
+/** Tries per second on one thread: the calibration's measured miner rate, else derived from its SHA-256 rate. */
+export function avatarTriesPerSec(calibration) {
+    const measured = calibration.avatarTriesPerSec;
+    if (typeof measured === 'number' && Number.isFinite(measured) && measured > 0)
+        return measured;
+    return calibration.sha256PerSec * AVATAR_TRIES_PER_SHA256;
 }
 /**
- * Seconds of wall time the expected 2^bits tries take on this machine, from
- * the calibration's hash rate: each try hashes the whole event, plus about a
- * block's worth of per-try overhead, and each thread past the first adds
- * about seven tenths (ONOSENDAI's triesPerSec, measured there).
+ * Seconds of wall time the expected 2^bits tries take on this machine. A
+ * try is one SHA-256 block from a midstate whatever the avatar's size
+ * (avatarMine.ts), so the rate is a fixed tries per second per thread, and
+ * each thread past the first adds AVATAR_THREAD_GAIN of one.
  */
-export function avatarSeconds(bits, eventBytes, sha256PerSec, threads) {
-    const perThread = sha256PerSec / (blocksOf(eventBytes) + 1);
-    const rate = perThread * (1 + 0.7 * Math.max(0, threads - 1));
+export function avatarSeconds(bits, triesPerSec, threads) {
+    const rate = triesPerSec * (1 + AVATAR_THREAD_GAIN * Math.max(0, threads - 1));
     return 2 ** bits / rate;
 }
-/** What a payload owes, for the price: the bits, and the bytes each try hashes. */
-export function avatarPrice(payload, template, pubkey) {
-    const bits = avatarWork(payload);
-    const mined = nonceTagged(template, '0'.repeat(10), bits);
-    const eventBytes = new TextEncoder().encode(JSON.stringify([0, pubkey, mined.created_at, mined.kind, mined.tags, mined.content])).length;
-    return { bits, eventBytes };
+/** What an avatar's content owes, for the price: the bits (cyberspace-core's avatarWork over its payload) and its UTF-8 bytes before mining. */
+export function avatarPrice(content) {
+    return { bits: avatarWork(JSON.parse(content)), contentBytes: avatarContentBytes(content) };
 }
 //# sourceMappingURL=avatar.js.map

@@ -19,7 +19,7 @@
 // rule stays as ruled (one axis tree within HOP_AXIS_BUDGET_MS; arkinox,
 // 2026-10-29), so a hop at the ceiling simply costs more than it did.
 import { cpus } from 'node:os';
-import { AXIS_CENTER, computeAxisMerkleRoot, computeSubtreeCantor, deriveHopPrimes, hopAttempt, hopResidueCount, hopRerollAttempts, seedPrefix, wordAt, } from 'cyberspace-core';
+import { AVATAR_KIND, AXIS_CENTER, AvatarTailMiner, avatarTailSplit, computeAxisMerkleRoot, computeSubtreeCantor, deriveHopPrimes, hopAttempt, hopResidueCount, hopRerollAttempts, seedPrefix, wordAt, } from 'cyberspace-core';
 /** Budget for one axis tree of a hop; a whole commit is up to three plus the temporal tree. */
 const HOP_AXIS_BUDGET_MS = 5000;
 /** Budget for a whole sidestep. */
@@ -183,7 +183,23 @@ export function measure(now = Date.now()) {
     computeAxisMerkleRoot(seedPrefix(new Uint8Array(32), 0), 0, AXIS_CENTER, AXIS_CENTER + (1n << 16n));
     const sidestepMs = Math.max(performance.now() - t0, 0.5);
     const sha256PerSec = SIDESTEP_HASHES / (sidestepMs / 1000);
-    return { version: 1, at: now, fingerprint: fingerprint(), cantorMsByHeight, sha256PerSec, residue: measureResidueRates() };
+    return { version: 1, at: now, fingerprint: fingerprint(), cantorMsByHeight, sha256PerSec, residue: measureResidueRates(), avatarTriesPerSec: measureAvatarTriesPerSec() };
+}
+/** Tries run before timing (the JIT warms up), then timed: about a tenth of a second in all on a desktop core. */
+const AVATAR_TRIES_WARM = 1 << 14;
+const AVATAR_TRIES_TIMED = 1 << 17;
+/**
+ * The avatar miner's rate on this thread, in tries per second: the midstate
+ * miner set_avatar runs, over a small template, aimed at a target it cannot
+ * reach in so few tries. The cost of a try does not depend on the avatar.
+ */
+export function measureAvatarTriesPerSec() {
+    const template = { pubkey: '00'.repeat(32), created_at: 0, kind: AVATAR_KIND, tags: [['client', 'calibration']], content: '{"vertices":[]}' };
+    const miner = new AvatarTailMiner(avatarTailSplit(template, 64));
+    miner.run(AVATAR_TRIES_WARM, 64);
+    const t0 = performance.now();
+    miner.run(AVATAR_TRIES_TIMED, 64);
+    return AVATAR_TRIES_TIMED / (Math.max(performance.now() - t0, 0.5) / 1000);
 }
 /** Primes and attempts timed in bulk, a few tens of milliseconds in all; the same kernel the prover takes by default. */
 const PRIMES_TIMED = 2048;
