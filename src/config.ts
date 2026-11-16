@@ -13,6 +13,7 @@ import { parseNwc, Secret } from './nwc.js'
 import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS } from './wallet.js'
 import { DEFAULT_TRAVEL_PER_DAY, type TravelLogSettings } from './travel.js'
 import { DEFAULT_PUBLISH_PER_DAY } from './publicObject.js'
+import { DEFAULT_AVATAR_PER_DAY } from './avatar.js'
 import { expandHome } from './serveConfig.js'
 import { DEFAULT_CAP_CALL_SECONDS, DEFAULT_CAP_DAILY_SECONDS, DEFAULT_CAP_SESSION_SECONDS, defaultThreads } from './budget.js'
 
@@ -46,6 +47,8 @@ export interface Settings {
   chatWakeMinutes: number
   /** The most public objects publish_object may publish in any 24 hours (arkinox, 2026-10-13). */
   publishMaxPerDay: number
+  /** The most avatars set_avatar may publish in any 24 hours: with no work owed, the only brake on a loop. */
+  avatarMaxPerDay: number
   /** Which tools the MCP server shows (D7, 2026-11-09): all, the starter set, a list, or undefined for the default (server.ts selectTools). */
   tools?: 'all' | 'starter' | string[]
   /** --machine-id: this machine's id for the lock, in place of $CYBERSPACE_MCP_MACHINE_ID and <state>.machine-id (lock.ts). Never from config.json, which travels with the state directory. */
@@ -66,6 +69,7 @@ const DEFAULTS = {
   maxDailySats: DEFAULT_MAX_DAILY_SATS,
   chatWakeMinutes: DEFAULT_CHAT_WAKE_MINUTES,
   publishMaxPerDay: DEFAULT_PUBLISH_PER_DAY,
+  avatarMaxPerDay: DEFAULT_AVATAR_PER_DAY,
 } as const
 
 export interface ParsedArgs {
@@ -88,6 +92,7 @@ export interface ParsedArgs {
   travelLogMaxPerDay?: number
   chatWakeMinutes?: number
   publishMaxPerDay?: number
+  avatarMaxPerDay?: number
   machineId?: string
   tools?: 'all' | 'starter' | string[]
   kitsDir?: string
@@ -136,6 +141,8 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
                                 speaker; the operator's always. Default ${DEFAULTS.chatWakeMinutes}
   --publish-max-per-day <n>     The most public objects publish_object may publish in any 24 hours.
                                 Default ${DEFAULTS.publishMaxPerDay}
+  --avatar-max-per-day <n>      The most avatars set_avatar may publish in any 24 hours, clearing
+                                included. Default ${DEFAULTS.avatarMaxPerDay}
   --tools <which>               The tools the server shows: starter (identity, whereami, look,
                                 plan_hop, hop, say, listen, find, budget), all, or a
                                 comma-separated list (config.json "tools": "all", "starter" or a list).
@@ -152,7 +159,7 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
 
 The same keys may live in <state>/config.json: relays, operator, name, about,
 capCallSeconds, capSessionSeconds, capDailySeconds, threads, maxSidestepHeight, allowRespawn, hosakaUrl,
-nwc, maxPaymentSats, maxDailySats, chatWakeMinutes, publishMaxPerDay, kitsDir, and travelLog: { "enabled": true,
+nwc, maxPaymentSats, maxDailySats, chatWakeMinutes, publishMaxPerDay, avatarMaxPerDay, kitsDir, and travelLog: { "enabled": true,
 "maxPerDay": 6, "tagOperator": false }. The wallet string may also be the "nwc" key
 of <state>/wallet.json, which the server only reads.`
 
@@ -217,6 +224,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case '--travel-log-max-per-day': out.travelLogMaxPerDay = Math.max(1, Math.floor(num(a, next()))); break
       case '--chat-wake-minutes': out.chatWakeMinutes = num(a, next()); break
       case '--publish-max-per-day': out.publishMaxPerDay = Math.max(1, Math.floor(num(a, next()))); break
+      case '--avatar-max-per-day': out.avatarMaxPerDay = Math.max(1, Math.floor(num(a, next()))); break
       case '--machine-id': out.machineId = next(); if (!out.machineId) throw new Error('--machine-id needs a value'); break
       case '--tools': out.tools = toolsSetting('--tools', next()); break
       case '--kits-dir': out.kitsDir = next(); if (!out.kitsDir) throw new Error('--kits-dir needs a directory'); out.kitsDir = expandHome(out.kitsDir); break
@@ -246,6 +254,7 @@ interface FileConfig {
   travelLog?: unknown
   chatWakeMinutes?: unknown
   publishMaxPerDay?: unknown
+  avatarMaxPerDay?: unknown
   tools?: unknown
   kitsDir?: unknown
 }
@@ -323,6 +332,7 @@ export function settingsFrom(args: ParsedArgs, file: FileConfig, walletFile: Wal
     travelLog: travelLogSettings(args, file.travelLog),
     chatWakeMinutes: args.chatWakeMinutes ?? posNum(file.chatWakeMinutes) ?? DEFAULTS.chatWakeMinutes,
     publishMaxPerDay: args.publishMaxPerDay ?? (posNum(file.publishMaxPerDay) !== undefined ? Math.max(1, Math.floor(posNum(file.publishMaxPerDay)!)) : DEFAULTS.publishMaxPerDay),
+    avatarMaxPerDay: args.avatarMaxPerDay ?? (posNum(file.avatarMaxPerDay) !== undefined ? Math.max(1, Math.floor(posNum(file.avatarMaxPerDay)!)) : DEFAULTS.avatarMaxPerDay),
     ...(args.machineId ? { machineId: args.machineId } : {}),
     ...(tools !== undefined ? { tools } : {}),
     ...((args.kitsDir ?? str(file.kitsDir)) ? { kitsDir: args.kitsDir ?? expandHome(str(file.kitsDir)!) } : {}),

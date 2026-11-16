@@ -12,6 +12,7 @@ import { parseNwc, Secret } from './nwc.js';
 import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS } from './wallet.js';
 import { DEFAULT_TRAVEL_PER_DAY } from './travel.js';
 import { DEFAULT_PUBLISH_PER_DAY } from './publicObject.js';
+import { DEFAULT_AVATAR_PER_DAY } from './avatar.js';
 import { expandHome } from './serveConfig.js';
 import { DEFAULT_CAP_CALL_SECONDS, DEFAULT_CAP_DAILY_SECONDS, DEFAULT_CAP_SESSION_SECONDS, defaultThreads } from './budget.js';
 const DEFAULTS = {
@@ -26,6 +27,7 @@ const DEFAULTS = {
     maxDailySats: DEFAULT_MAX_DAILY_SATS,
     chatWakeMinutes: DEFAULT_CHAT_WAKE_MINUTES,
     publishMaxPerDay: DEFAULT_PUBLISH_PER_DAY,
+    avatarMaxPerDay: DEFAULT_AVATAR_PER_DAY,
 };
 export const USAGE = `cyberspace-mcp: a local MCP server that gives an AI agent a body in cyberspace.
 
@@ -69,6 +71,8 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
                                 speaker; the operator's always. Default ${DEFAULTS.chatWakeMinutes}
   --publish-max-per-day <n>     The most public objects publish_object may publish in any 24 hours.
                                 Default ${DEFAULTS.publishMaxPerDay}
+  --avatar-max-per-day <n>      The most avatars set_avatar may publish in any 24 hours, clearing
+                                included. Default ${DEFAULTS.avatarMaxPerDay}
   --tools <which>               The tools the server shows: starter (identity, whereami, look,
                                 plan_hop, hop, say, listen, find, budget), all, or a
                                 comma-separated list (config.json "tools": "all", "starter" or a list).
@@ -85,7 +89,7 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
 
 The same keys may live in <state>/config.json: relays, operator, name, about,
 capCallSeconds, capSessionSeconds, capDailySeconds, threads, maxSidestepHeight, allowRespawn, hosakaUrl,
-nwc, maxPaymentSats, maxDailySats, chatWakeMinutes, publishMaxPerDay, kitsDir, and travelLog: { "enabled": true,
+nwc, maxPaymentSats, maxDailySats, chatWakeMinutes, publishMaxPerDay, avatarMaxPerDay, kitsDir, and travelLog: { "enabled": true,
 "maxPerDay": 6, "tagOperator": false }. The wallet string may also be the "nwc" key
 of <state>/wallet.json, which the server only reads.`;
 /** An http(s) URL without a trailing slash, or a thrown sentence. */
@@ -203,6 +207,9 @@ export function parseArgs(argv) {
             case '--publish-max-per-day':
                 out.publishMaxPerDay = Math.max(1, Math.floor(num(a, next())));
                 break;
+            case '--avatar-max-per-day':
+                out.avatarMaxPerDay = Math.max(1, Math.floor(num(a, next())));
+                break;
             case '--machine-id':
                 out.machineId = next();
                 if (!out.machineId)
@@ -297,6 +304,7 @@ export function settingsFrom(args, file, walletFile = {}) {
         travelLog: travelLogSettings(args, file.travelLog),
         chatWakeMinutes: args.chatWakeMinutes ?? posNum(file.chatWakeMinutes) ?? DEFAULTS.chatWakeMinutes,
         publishMaxPerDay: args.publishMaxPerDay ?? (posNum(file.publishMaxPerDay) !== undefined ? Math.max(1, Math.floor(posNum(file.publishMaxPerDay))) : DEFAULTS.publishMaxPerDay),
+        avatarMaxPerDay: args.avatarMaxPerDay ?? (posNum(file.avatarMaxPerDay) !== undefined ? Math.max(1, Math.floor(posNum(file.avatarMaxPerDay))) : DEFAULTS.avatarMaxPerDay),
         ...(args.machineId ? { machineId: args.machineId } : {}),
         ...(tools !== undefined ? { tools } : {}),
         ...((args.kitsDir ?? str(file.kitsDir)) ? { kitsDir: args.kitsDir ?? expandHome(str(file.kitsDir)) } : {}),
