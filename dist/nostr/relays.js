@@ -41,13 +41,26 @@ import { GuardedWebSocket } from './websocket.js';
  */
 export const DEFAULT_RELAY = 'wss://relay.onosendai.tech';
 /**
- * The former canonical relay, kept second in the default list for about two
- * weeks after the 2026-11-05 switch so every event still reaches people who
- * read only it. Drop it from DEFAULT_RELAYS when the window closes.
+ * The former canonical relay (canonical from 2026-10-22 to 2026-11-05), being
+ * retired (the owner, 2026-11-22: "it's time to deprecate cyberspace.nostr1").
+ * It is no longer in the default list, so a server started without --relay or
+ * config.json relays never publishes there, never reads there, and never takes
+ * its word for a head; ONOSENDAI stopped pinning it and publishing to it by
+ * default the same day (ONOSENDAI #878). A list that still names it keeps
+ * working, and doctor warns. The relay's history is on DEFAULT_RELAY.
  */
-export const SECOND_RELAY = 'wss://cyberspace.nostr1.com';
-/** The relays a server uses when neither --relay nor config.json names any: the canonical one first. */
-export const DEFAULT_RELAYS = [DEFAULT_RELAY, SECOND_RELAY];
+export const DEPRECATED_RELAY = 'wss://cyberspace.nostr1.com';
+/** Whether a relay URL is the deprecated former canonical relay, compared the way nostr-tools normalizes URLs. */
+export function isDeprecatedRelay(url) {
+    try {
+        return normalizeURL(url.trim()) === normalizeURL(DEPRECATED_RELAY);
+    }
+    catch {
+        return false;
+    }
+}
+/** The relays a server uses when neither --relay nor config.json names any: the canonical one alone. */
+export const DEFAULT_RELAYS = [DEFAULT_RELAY];
 /** Whether a relay URL is the default canonical relay, compared the way nostr-tools normalizes URLs. */
 export function isDefaultRelay(url) {
     return normalizeURL(url) === normalizeURL(DEFAULT_RELAY);

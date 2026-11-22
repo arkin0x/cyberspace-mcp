@@ -61,7 +61,7 @@ const HISTORY_KEPT = 50
 /**
  * How long after signing an event the canonical relay took is still asked of
  * the other configured relays that have not taken it (a second relay that was
- * down then, as nostr1 is kept second after the 2026-11-05 switch). A day
+ * down then, or a second relay listed in config.json). A day
  * covers an outage without asking a relay gone for good forever.
  */
 export const OTHERS_RETRY_S = 24 * 3600
