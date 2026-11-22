@@ -11,7 +11,10 @@
 // somewhere else) or a person's pubkey, which is how a chest becomes a gift.
 // The seal is the gift-wrap pattern: a fresh keypair used once as the NIP-44
 // sender, its public half written into the chest's lock tag, its secret
-// discarded.
+// discarded. Past 65,535 bytes of plaintext nostr-tools writes and reads
+// NIP-44's extended length prefix (two zero bytes, then the length in four
+// bytes), so a chest up to CHEST_MAX_PLAINTEXT seals and opens with the same
+// two calls.
 
 import { v2 as nip44 } from 'nostr-tools/nip44'
 import { generateSecretKey, getEventHash, getPublicKey } from 'nostr-tools/pure'
@@ -24,13 +27,20 @@ export function forgeKey(name: string, about = ''): KeyItem {
   return { name, about, itemPubkey: getPublicKey(sk), secretHex: bytesToHex(sk) }
 }
 
-/** NIP-44 v2 seals at most this many bytes of plaintext. */
-const NIP44_MAX_PLAINTEXT = 65_535
+/**
+ * The most a chest's list of entries may be, in UTF-8 bytes (DECK-0004 3.2
+ * step 2 and Size, cyberspace #117; ONOSENDAI lib/chests.ts). Not NIP-44's
+ * limit: the event that carries the chest is. 131,072 bytes pad to 131,072
+ * and seal to 174,860 characters of content, and a chest of that, alone in
+ * one event, stays under the 240,000 bytes ONOSENDAI holds a bag to. One byte
+ * more pads to 163,840, which no bag or sealed entry can carry.
+ */
+export const CHEST_MAX_PLAINTEXT = 131_072
 
 /** Why a list of this many bytes cannot be sealed, in words, or null when it fits. */
 function sizeRefusal(bytes: number): string | null {
-  if (bytes <= NIP44_MAX_PLAINTEXT) return null
-  return `Too large to seal: ${bytes} of ${NIP44_MAX_PLAINTEXT} bytes. Take something out.`
+  if (bytes <= CHEST_MAX_PLAINTEXT) return null
+  return `Too large to seal: ${bytes} of ${CHEST_MAX_PLAINTEXT} bytes. Take something out.`
 }
 
 export interface Sealed {
