@@ -15,7 +15,7 @@ import { nip19 } from 'nostr-tools'
 import { runDoctor, type Check } from '../src/doctor.js'
 import { runInit } from '../src/init.js'
 import { nowSeconds, type NostrEvent } from '../src/nostr/event.js'
-import { RETIRED_HOSTS } from '../src/nostr/relays.js'
+import { DEPRECATED_RELAY, RETIRED_HOSTS } from '../src/nostr/relays.js'
 import { commandArgv } from '../src/serveConfig.js'
 import type { Calibration } from '../src/space/calibration.js'
 import { FakeNetwork, type FakeRelay } from './fakeRelay.js'
@@ -268,6 +268,26 @@ describe('doctor', () => {
     expect(warned?.fix).toContain('config.json')
     expect(r.checks.filter((c) => c.name === 'relay' && c.verdict === 'fail')).toHaveLength(0)
     expect(retired.received).toHaveLength(0)
+  })
+
+  it('warns, and does not fail, when config.json still lists the deprecated wss://cyberspace.nostr1.com', async () => {
+    const w = world()
+    w.network.add(DEPRECATED_RELAY)
+    const state = tmp()
+    expect((await init(w, ['--state', state, '--operator', nip19.npubEncode(getPublicKey(generateSecretKey())), '--client', 'none', '--relay', CANONICAL, '--yes', '--no-publish'])).code).toBe(0)
+    const path = join(state, 'config.json')
+    const config = JSON.parse(readFileSync(path, 'utf8')) as { relays: string[] }
+    writeFileSync(path, JSON.stringify({ ...config, relays: [CANONICAL, DEPRECATED_RELAY] }))
+    const r = await doctor(w, state)
+    const warned = r.checks.find((c) => c.name === 'relay' && c.detail.includes(DEPRECATED_RELAY))
+    expect(warned?.verdict).toBe('warn')
+    expect(warned?.fix).toContain('config.json')
+    expect(r.checks.filter((c) => c.name === 'relay' && c.verdict === 'fail')).toHaveLength(0)
+    // Listed first, it is the canonical relay: the warning says so, and how to fix it.
+    writeFileSync(path, JSON.stringify({ ...config, relays: [DEPRECATED_RELAY, CANONICAL] }))
+    const first = (await doctor(w, state)).checks.find((c) => c.name === 'relay' && c.detail.includes(DEPRECATED_RELAY))
+    expect(first?.detail).toContain('canonical relay')
+    expect(first?.fix).toContain('first')
   })
 
   it('fails a wake command that is not installed, and warns about a paused waker', async () => {

@@ -17,7 +17,7 @@ import { parsePubkey } from './chain/resolve.js';
 import { parseArgs, readFileConfig, readWalletFile, settingsFrom } from './config.js';
 import { KitLibrary, kitsDirCandidates } from './kits/library.js';
 import { readToken } from './http.js';
-import { GENERAL_RELAYS, Relays, isRetiredRelay } from './nostr/relays.js';
+import { DEFAULT_RELAY, GENERAL_RELAYS, Relays, isDeprecatedRelay, isRetiredRelay } from './nostr/relays.js';
 import { mergeAnswers } from './nostr/relayOutcome.js';
 import { MIN_NODE_MAJOR, nodeTooOld } from './nodeVersion.js';
 import { defaultStateDir, mcpUrl, serveSettingsFrom, splitServeArgs } from './serveConfig.js';
@@ -133,6 +133,10 @@ export async function runDoctor(argv, deps) {
     const retired = Array.isArray(listed) ? listed.filter((r) => typeof r === 'string' && isRetiredRelay(r)) : [];
     if (retired.length)
         add({ name: 'relay', verdict: 'warn', detail: `${retired.join(', ')} is retired: config.json still lists it, and it is not dialed`, fix: `remove it from ${join(stateDir, 'config.json')}` });
+    const deprecated = Array.isArray(listed) ? listed.filter((r) => typeof r === 'string' && isDeprecatedRelay(r)) : [];
+    const deprecatedFirst = Array.isArray(listed) && typeof listed[0] === 'string' && isDeprecatedRelay(listed[0]);
+    if (deprecated.length)
+        add({ name: 'relay', verdict: 'warn', detail: `${deprecated.join(', ')} is being retired: config.json still lists it${deprecatedFirst ? ' first, so it is this agent\'s canonical relay, and its moves will be refused once it is turned off' : ', so the agent still publishes there and reads it'}; its history is on ${DEFAULT_RELAY} (a --relay flag replaces config.json's list)`, fix: `remove it from ${join(stateDir, 'config.json')}${deprecatedFirst ? `, or put ${DEFAULT_RELAY} first` : ''}` });
     let serveSettings;
     try {
         serveSettings = serveSettingsFrom(serve, file);

@@ -14,7 +14,7 @@ import { parsePubkey } from './chain/resolve.js'
 import { readFileConfig, readWalletFile, settingsFrom } from './config.js'
 import { DEFAULT_CAP_CALL_SECONDS, DEFAULT_CAP_DAILY_SECONDS, DEFAULT_CAP_SESSION_SECONDS } from './budget.js'
 import { ensureToken, TOKEN_FILE } from './http.js'
-import { DEFAULT_RELAY, SECOND_RELAY, isRetiredRelay } from './nostr/relays.js'
+import { DEFAULT_RELAY, isRetiredRelay } from './nostr/relays.js'
 import { DEFAULT_PORT, PROMPT_PLACEHOLDER, defaultStateDir, expandHome, mcpUrl } from './serveConfig.js'
 import { LockHeldError, StateDir } from './state/dir.js'
 import { getPublicKey } from 'nostr-tools/pure'
@@ -32,7 +32,7 @@ Usage: cyberspace-mcp init [options]
   --cap-session-seconds <n>  The most compute a session may spend. Default ${DEFAULT_CAP_SESSION_SECONDS}
   --cap-daily-seconds <n>    The most compute one UTC day may spend, across restarts. Default ${DEFAULT_CAP_DAILY_SECONDS}
   --threads <n>              Worker threads for rides. Default min(2, cores - 1)
-  --relay <url>              A relay; repeatable; the first is canonical. Default ${DEFAULT_RELAY}, ONOSENDAI's relay, then ${SECOND_RELAY}.
+  --relay <url>              A relay; repeatable; the first is canonical. Default ${DEFAULT_RELAY}, ONOSENDAI's relay.
   --client <name>            Who runs the agent's turns: claude (Claude Code), hermes, or none. Default: claude
                              when it is installed, else hermes when it is, else none.
   --hermes-profile <name>    The Hermes profile for --client hermes. Default cyberspace

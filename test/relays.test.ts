@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { parseArgs, retiredCanonicalWarning, settingsFrom } from '../src/config.js'
-import { DEFAULT_RELAY, DEFAULT_RELAYS, RETIRED_HOSTS, SECOND_RELAY, Relays, isDefaultRelay, isRetiredRelay } from '../src/nostr/relays.js'
+import { DEFAULT_RELAY, DEFAULT_RELAYS, DEPRECATED_RELAY, RETIRED_HOSTS, Relays, isDefaultRelay, isDeprecatedRelay, isRetiredRelay } from '../src/nostr/relays.js'
 import { Holders } from '../src/chain/holders.js'
 import { StateDir } from '../src/state/dir.js'
 import { signEvent } from '../src/nostr/event.js'
@@ -115,13 +115,19 @@ describe('the default canonical relay', () => {
     expect(DEFAULT_RELAY).toBe('wss://relay.onosendai.tech')
   })
 
-  it('keeps the former canonical relay second while the switch settles', () => {
-    expect(SECOND_RELAY).toBe('wss://cyberspace.nostr1.com')
-    expect(DEFAULT_RELAYS).toEqual(['wss://relay.onosendai.tech', 'wss://cyberspace.nostr1.com'])
+  it('no longer lists the former canonical relay, wss://cyberspace.nostr1.com, which is being retired (owner, 2026-11-22)', () => {
+    expect(DEPRECATED_RELAY).toBe('wss://cyberspace.nostr1.com')
+    expect(DEFAULT_RELAYS).toEqual(['wss://relay.onosendai.tech'])
   })
 
-  it('is what a server started without --relay or config.json relays uses, the new relay first', () => {
-    expect(settingsFrom(parseArgs(['--state', '/x']), {}).relays).toEqual(['wss://relay.onosendai.tech', 'wss://cyberspace.nostr1.com'])
+  it('is what a server started without --relay or config.json relays uses, alone', () => {
+    expect(settingsFrom(parseArgs(['--state', '/x']), {}).relays).toEqual(['wss://relay.onosendai.tech'])
+  })
+
+  it('a list that still names the deprecated relay keeps it (doctor warns), however it is written', () => {
+    expect(settingsFrom(parseArgs(['--state', '/x']), { relays: ['wss://relay.onosendai.tech', 'wss://cyberspace.nostr1.com'] }).relays).toEqual(['wss://relay.onosendai.tech', 'wss://cyberspace.nostr1.com'])
+    for (const u of ['wss://cyberspace.nostr1.com', 'wss://cyberspace.nostr1.com/', ' WSS://Cyberspace.Nostr1.com ', 'ws://cyberspace.nostr1.com', 'wss://cyberspace.nostr1.com./x']) expect(isDeprecatedRelay(u)).toBe(true)
+    for (const u of ['wss://relay.onosendai.tech', 'wss://auth.nostr1.com', 'not a url']) expect(isDeprecatedRelay(u)).toBe(false)
   })
 
   it('is recognized however the URL is written, and no other relay is', () => {
