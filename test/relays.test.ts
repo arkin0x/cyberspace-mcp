@@ -126,7 +126,7 @@ describe('the default canonical relay', () => {
 
   it('a list that still names the deprecated relay keeps it (doctor warns), however it is written', () => {
     expect(settingsFrom(parseArgs(['--state', '/x']), { relays: ['wss://relay.onosendai.tech', 'wss://cyberspace.nostr1.com'] }).relays).toEqual(['wss://relay.onosendai.tech', 'wss://cyberspace.nostr1.com'])
-    for (const u of ['wss://cyberspace.nostr1.com', 'wss://cyberspace.nostr1.com/', ' WSS://Cyberspace.Nostr1.com ']) expect(isDeprecatedRelay(u)).toBe(true)
+    for (const u of ['wss://cyberspace.nostr1.com', 'wss://cyberspace.nostr1.com/', ' WSS://Cyberspace.Nostr1.com ', 'ws://cyberspace.nostr1.com', 'wss://cyberspace.nostr1.com./x']) expect(isDeprecatedRelay(u)).toBe(true)
     for (const u of ['wss://relay.onosendai.tech', 'wss://auth.nostr1.com', 'not a url']) expect(isDeprecatedRelay(u)).toBe(false)
   })
 

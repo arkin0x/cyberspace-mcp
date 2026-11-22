@@ -283,6 +283,11 @@ describe('doctor', () => {
     expect(warned?.verdict).toBe('warn')
     expect(warned?.fix).toContain('config.json')
     expect(r.checks.filter((c) => c.name === 'relay' && c.verdict === 'fail')).toHaveLength(0)
+    // Listed first, it is the canonical relay: the warning says so, and how to fix it.
+    writeFileSync(path, JSON.stringify({ ...config, relays: [DEPRECATED_RELAY, CANONICAL] }))
+    const first = (await doctor(w, state)).checks.find((c) => c.name === 'relay' && c.detail.includes(DEPRECATED_RELAY))
+    expect(first?.detail).toContain('canonical relay')
+    expect(first?.fix).toContain('first')
   })
 
   it('fails a wake command that is not installed, and warns about a paused waker', async () => {

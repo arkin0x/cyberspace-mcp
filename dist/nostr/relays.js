@@ -50,10 +50,10 @@ export const DEFAULT_RELAY = 'wss://relay.onosendai.tech';
  * working, and doctor warns. The relay's history is on DEFAULT_RELAY.
  */
 export const DEPRECATED_RELAY = 'wss://cyberspace.nostr1.com';
-/** Whether a relay URL is the deprecated former canonical relay, compared the way nostr-tools normalizes URLs. */
+/** Whether a relay URL is on the deprecated former canonical relay's host, however it is written (as isRetiredRelay). */
 export function isDeprecatedRelay(url) {
     try {
-        return normalizeURL(url.trim()) === normalizeURL(DEPRECATED_RELAY);
+        return new URL(normalizeURL(url.trim())).hostname.replace(/\.+$/, '') === new URL(DEPRECATED_RELAY).hostname;
     }
     catch {
         return false;

@@ -148,7 +148,8 @@ export async function runDoctor(argv: string[], deps: DoctorDeps): Promise<{ cod
   const retired = Array.isArray(listed) ? listed.filter((r): r is string => typeof r === 'string' && isRetiredRelay(r)) : []
   if (retired.length) add({ name: 'relay', verdict: 'warn', detail: `${retired.join(', ')} is retired: config.json still lists it, and it is not dialed`, fix: `remove it from ${join(stateDir, 'config.json')}` })
   const deprecated = Array.isArray(listed) ? listed.filter((r): r is string => typeof r === 'string' && isDeprecatedRelay(r)) : []
-  if (deprecated.length) add({ name: 'relay', verdict: 'warn', detail: `${deprecated.join(', ')} is being retired: config.json still lists it, so the agent still publishes there and reads it; its history is on ${DEFAULT_RELAY}`, fix: `remove it from ${join(stateDir, 'config.json')}` })
+  const deprecatedFirst = Array.isArray(listed) && typeof listed[0] === 'string' && isDeprecatedRelay(listed[0])
+  if (deprecated.length) add({ name: 'relay', verdict: 'warn', detail: `${deprecated.join(', ')} is being retired: config.json still lists it${deprecatedFirst ? ' first, so it is this agent\'s canonical relay, and its moves will be refused once it is turned off' : ', so the agent still publishes there and reads it'}; its history is on ${DEFAULT_RELAY} (a --relay flag replaces config.json's list)`, fix: `remove it from ${join(stateDir, 'config.json')}${deprecatedFirst ? `, or put ${DEFAULT_RELAY} first` : ''}` })
   let serveSettings
   try {
     serveSettings = serveSettingsFrom(serve, file)
