@@ -322,11 +322,11 @@ The human may connect a Nostr Wallet Connect wallet (NIP-47) so the agent's HOSA
   - a code such as `PAY-7KQ2XM`.
 
   The rules (`src/approvals.ts`):
-  - It is paid only when the operator answers with that code. The answer must be a DM sealed by the operator's own key, newer than the request; `no PAY-7KQ2XM` refuses it.
+  - It is paid only when the operator answers with that code: the code alone, or one yes-word with it (`yes PAY-7KQ2XM`). The answer must be a DM sealed by the operator's own key, newer than the request. `no PAY-7KQ2XM` refuses it. Any other reply, even one that names the code ("do not pay PAY-7KQ2XM", a question, two codes), approves nothing and is an ordinary message.
   - Each approval covers exactly one payment, of that amount and that invoice's payment hash, and is used once. There is no "approve all".
   - A wrong code, anyone else's DM, an answer after the request expired (30 minutes), and a code already used all pay nothing. When a request lapses or is refused, the invoice goes to the operator to pay or not, as above the limits.
   - The wallet itself refuses `pay_invoice` without an approval for exactly that payment, whatever called it.
-  - The code is never in a tool's answer.
+  - The code is never in a tool's answer. It is also blanked in what the server keeps of the DMs it sent, so no refusal can confirm a model's guess at it.
   - An answer to a request is never an order. The background poll reads it, so the payment does not wait for a turn.
   - Requests are kept in `approvals.json`.
 

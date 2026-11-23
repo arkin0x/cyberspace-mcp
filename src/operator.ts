@@ -80,6 +80,7 @@ import { mergeAnswers, type RelayAnswer } from './nostr/relayOutcome.js'
 import { normalizeRelay, type Relays } from './nostr/relays.js'
 import type { StateDir } from './state/dir.js'
 import { Refusal, type ToolResult } from './tool.js'
+import { withoutCodes } from './approvals.js'
 
 const FILE = 'dms.json'
 /** Contact lists. */
@@ -911,7 +912,8 @@ ${halt}` : line
     if (!facts) throw new Refusal('The operator channel is closed.')
     if (facts.inbox.length === 0) throw new Refusal(`${this.noInboxWords(facts)} Nothing was sent.`)
     const wrapped = this.deps.wrap(operator, text)
-    this.remember(text)
+    // Kept so a public tool refuses to repeat it; an approval code is blanked, so no refusal can tell a model what it is (approvals.ts).
+    this.remember(withoutCodes(text))
     const toThem = await this.deps.relays.publishMany(facts.inbox, wrapped.toRecipient)
     if (!toThem.ok) {
       throw new Refusal(`Not delivered: no relay of your operator's DM inbox took it (${Object.entries(toThem.reasons).map(([u, r]) => `${u}: ${r}`).join('; ') || toThem.reason}). The relays' words are verbatim.`)

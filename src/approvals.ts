@@ -49,6 +49,8 @@ export interface ApprovalRequest {
   /** When the operator's answer came, and the id of the DM that carried it. */
   answeredAt?: number
   answerId?: string
+  /** The DM asking the operator went out. */
+  notified?: boolean
 }
 
 interface ApprovalsFile { version: 1; requests: ApprovalRequest[] }
@@ -145,16 +147,26 @@ export class Approvals {
   answer(text: string, createdAtSeconds: number, messageId: string): ApprovalRequest | null {
     if (!this.required) return null
     this.expire()
-    const upper = text.toUpperCase()
-    const r = this.requests.find((q) => q.state === 'pending' && new RegExp(`(^|[^A-Z0-9-])${q.code}($|[^A-Z0-9])`).test(upper))
+    const said = readAnswer(text)
+    if (!said) return null
+    const r = this.requests.find((q) => q.state === 'pending' && q.code === said.code)
     if (!r) return null
     if (createdAtSeconds * 1000 < r.createdAt - 60_000) return null
-    const refused = /(^|[^A-Z])(NO|DENY|DENIED|REFUSE|CANCEL|DON'?T|STOP)([^A-Z]|$)/.test(upper)
-    r.state = refused ? 'refused' : 'approved'
+    r.state = said.yes ? 'approved' : 'refused'
     r.answeredAt = this.now()
     r.answerId = messageId
     this.save()
     return r
+  }
+
+  /** Whether the operator has been sent this request's DM; a request whose DM did not go out is sent again. */
+  notified(code: string): boolean {
+    return this.requests.find((q) => q.code === code)?.notified === true
+  }
+
+  markNotified(code: string): void {
+    const r = this.requests.find((q) => q.code === code)
+    if (r && !r.notified) { r.notified = true; this.save() }
   }
 
   /** Requests still waiting on the operator, for the wallet tool (never with the code). */
@@ -164,6 +176,34 @@ export class Approvals {
   }
 }
 
+const CODE = /\bPAY-[2-9A-HJKMNP-Z]{6}\b/gi
+const YES = new Set(['YES', 'Y', 'OK', 'OKAY', 'APPROVE', 'APPROVED', 'PAY', 'GO'])
+const NO = new Set(['NO', 'N', 'DENY', 'DENIED', 'REFUSE', 'REFUSED', 'REJECT', 'CANCEL'])
+
+/**
+ * What an operator's DM says about a request, read strictly (review of
+ * #107: "do not pay PAY-X" must never pay): the code alone, or one yes-word
+ * and the code, approves; one no-word and the code refuses. Anything else
+ * (other words, a question, two codes) answers nothing, and the message is
+ * an ordinary one. Case and the punctuation around the words do not count.
+ */
+export function readAnswer(text: string): { code: string; yes: boolean } | null {
+  const codes = text.match(CODE) ?? []
+  if (codes.length !== 1) return null
+  const code = codes[0].toUpperCase()
+  const words = text.toUpperCase().replace(CODE, ' ').replace(/[.,!:;"'()\s]+/g, ' ').trim().split(' ').filter(Boolean)
+  if (words.length === 0) return { code, yes: true }
+  if (words.length !== 1) return null
+  if (YES.has(words[0])) return { code, yes: true }
+  if (NO.has(words[0])) return { code, yes: false }
+  return null
+}
+
+/** A text with every approval code blanked: what the server keeps of the DMs it sent, so no tool can echo a code back (review of #107). */
+export function withoutCodes(text: string): string {
+  return text.replace(CODE, 'PAY-******')
+}
+
 /** The DM that asks the operator to approve one payment. */
 export function requestWords(r: ApprovalRequest, day: { spentSats: number; maxDailySats: number; maxPaymentSats: number }): string {
   const minutes = Math.round((r.expiresAt - r.createdAt) / 60_000)
@@ -171,6 +211,6 @@ export function requestWords(r: ApprovalRequest, day: { spentSats: number; maxDa
     `May I pay ${r.sats} sats? ${r.purpose}`,
     `Paid to: ${r.payee}.`,
     `Today so far: ${day.spentSats} of ${day.maxDailySats} sats spent; after this, ${Math.max(0, day.maxDailySats - day.spentSats - r.sats)} left. One payment may be at most ${day.maxPaymentSats} sats.`,
-    `To approve, reply with the code ${r.code}. To refuse, reply "no ${r.code}". It expires in ${minutes} minutes; if you do not answer, nothing is paid.`,
+    `To approve, reply with just the code ${r.code} (or "yes ${r.code}"). To refuse, reply "no ${r.code}". Any other reply approves nothing. It expires in ${minutes} minutes; if you do not answer, nothing is paid.`,
   ].join('\n')
 }

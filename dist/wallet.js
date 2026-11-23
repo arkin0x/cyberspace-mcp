@@ -30,7 +30,7 @@
 // bounds the sum of the last 24 hours (rolling), routing fees included once
 // the wallet reports them. Either at 0 turns paying off.
 import { createHash } from 'node:crypto';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, chmodSync } from 'node:fs';
 import { Approvals } from './approvals.js';
 import { decodeBolt11 } from './bolt11.js';
 import { NwcClient, NwcError, NwcNotSent, parseNwc } from './nwc.js';
@@ -63,6 +63,7 @@ export class Wallet {
     info = null;
     /** The operator's approvals, payment by payment (approvals.ts). */
     approvals;
+    pendingLog = [];
     constructor(dir, opts) {
         this.dir = dir;
         this.maxPaymentSats = opts.maxPaymentSats;
@@ -80,10 +81,14 @@ export class Wallet {
                 p.state = 'unknown';
                 p.error = 'the server stopped while this payment was going out; whether it was paid is unknown';
                 changed = true;
+                this.pendingLog.push(p);
             }
         }
         if (changed)
             this.save();
+        // Each payment's outcome has its line, the one a restart decided included.
+        for (const p of this.pendingLog.splice(0))
+            this.logSpend(p, { depositId: p.depositId, rideKey: p.rideKey, apiUrl: p.apiUrl, jobId: p.jobId, toHeight: p.toHeight, expectedMsats: p.sats * 1000, expectedHash: p.paymentHash });
     }
     /** Whether the human connected a wallet. */
     get connected() {
@@ -203,6 +208,8 @@ export class Wallet {
                 spentLast24hSats: this.spentLast24hSats(), maxDailySats: this.maxDailySats,
             };
             appendFileSync(this.dir.file(PAYMENTS_LOG), JSON.stringify(line) + '\n', { mode: 0o600 });
+            // The mode is set only when the file is made: a file that was already there is held to 600 too.
+            chmodSync(this.dir.file(PAYMENTS_LOG), 0o600);
         }
         catch { /* the ledger has it; a log that cannot be written never undoes a payment */ }
     }

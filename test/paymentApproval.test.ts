@@ -14,7 +14,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Agent } from '../src/agent.js'
-import { Approvals } from '../src/approvals.js'
+import { Approvals, readAnswer, withoutCodes } from '../src/approvals.js'
 import { parseArgs, settingsFrom } from '../src/config.js'
 import type { Line } from '../src/hyperspace/line.js'
 import { wrapMessage } from '../src/nostr/dm.js'
@@ -87,6 +87,25 @@ describe('approval requests', () => {
     expect(a.answer(`no ${r.code}`, at(), 'm1')?.state).toBe('refused')
     expect(a.verdict('dep1', 21, hash).state).toBe('refused')
     expect(a.use(r.code, 21, hash)).toBe(false)
+  })
+
+  // Review of #107: "do not pay PAY-X" paid. Only the code alone, or one yes-word with it, approves.
+  it('reads an answer strictly: the code alone or one yes-word approves, one no-word refuses, anything else answers nothing', () => {
+    const c = 'PAY-7KQ2XM'
+    for (const t of [c, `${c}.`, `yes ${c}`, `Yes, ${c}!`, `${c} ok`, `approve ${c}`, `pay ${c}`, c.toLowerCase()]) expect(readAnswer(t), t).toEqual({ code: c, yes: true })
+    for (const t of [`no ${c}`, `No. ${c}`, `deny ${c}`, `${c} reject`, `cancel ${c}`]) expect(readAnswer(t), t).toEqual({ code: c, yes: false })
+    for (const t of [`Do not pay ${c}, I have not decided yet`, `not now ${c}`, `nope ${c}`, `nah ${c}`, `never ${c}`, `hold ${c}`, `wait ${c}`, `decline ${c}`,
+      `what is ${c} for?`, `${c}? why so much?`, `yes, no problem ${c}`, `approve ${c} not PAY-ABCDEF`, `yes ${c} ${c}`, 'yes', '']) {
+      expect(readAnswer(t), t).toBeNull()
+    }
+    const a = fresh()
+    const r = ask(a)
+    expect(a.answer(`Do not pay ${r.code}, I have not decided yet`, at(), 'm')).toBeNull()
+    expect(a.verdict('dep1', 21, hash).state).toBe('pending')
+  })
+
+  it('blanks every code in what the server keeps of its own DMs', () => {
+    expect(withoutCodes('reply with PAY-7KQ2XM or "no PAY-7KQ2XM"')).toBe('reply with PAY-****** or "no PAY-******"')
   })
 
   it('answers nothing with approval off', () => {
@@ -208,6 +227,15 @@ describe('a HOSAKA ride under paymentApproval "operator"', () => {
     const status = await call(s, 'ride_status')
     expect(status.text).toMatch(/holds it until your operator approves it/)
     for (const o of [...outputs, JSON.stringify(await call(s, 'wallet'))]) expect(o).not.toContain(code)
+    // Nor in what a public tool checks its words against, so no refusal can tell a model whether it guessed the code (review of #107).
+    expect(s.agent.operatorChannel.privateTexts().join('\n')).not.toContain(code)
+    // Every 40-character window of this probe holds some of the real code: it no longer matches, while the same words with the code blanked do.
+    const at = ask.indexOf(code)
+    const probe = ask.slice(at - 33, at + code.length + 1)
+    expect((await call(s, 'comment', { target: 'deadbeefdeadbeef', text: probe })).text).not.toContain('repeats what')
+    expect((await call(s, 'comment', { target: 'deadbeefdeadbeef', text: withoutCodes(probe) })).text).toContain('repeats what')
+    // A reply that is not a clear yes approves nothing, even naming the code.
+    dmFrom(opSk, `Do not pay ${code}, I have not decided yet`)
     // A wrong code, and a stranger who somehow has the right one.
     dmFrom(opSk, 'yes PAY-ZZZZZZ')
     dmFrom(generateSecretKey(), `yes ${code}`)
@@ -230,8 +258,8 @@ describe('a HOSAKA ride under paymentApproval "operator"', () => {
     dmFrom(opSk, code)
     await settle(300)
     expect(service.payments()).toHaveLength(1)
-    // Only what answered no request is an ordinary message: the wrong code and the code sent again. The approval itself is not an order.
-    expect((await call(s, 'orders_waiting')).data.orders).toBe(2)
+    // Only what answered no request is an ordinary message: the wrong code, the unclear reply and the code sent again. The approval itself is not an order.
+    expect((await call(s, 'orders_waiting')).data.orders).toBe(3)
     await call(s, 'inbox')
     hosaka.complete([...hosaka.jobs.values()].at(-1)!.id)
     await until(() => state() === 'ready', 'ready')

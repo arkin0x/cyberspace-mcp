@@ -60,7 +60,7 @@ import type { StateDir } from './state/dir.js'
 import { Refusal, type ToolResult } from './tool.js'
 import type { RidePlan, RideStateData } from './transit.js'
 import type { PayContext, Wallet } from './wallet.js'
-import { requestWords } from './approvals.js'
+import { requestWords, type ApprovalRequest } from './approvals.js'
 
 /**
  * Where a HOSAKA ride stands. `submitting`: a submit whose answer has not
@@ -351,6 +351,7 @@ export class HosakaRides {
         const attempt = this.host.wallet.attemptFor(inv.depositId)
         rec.payment = { ...rec.payment, state: attempt && attempt.state !== 'sending' ? attempt.state : 'unknown', reason: attempt?.error ?? 'the server stopped while the payment was going out' }
         this.save()
+        if (rec.payment.state === 'failed' || rec.payment.state === 'unknown') await this.afterFailure(rec, rec.payment.sats ?? 0, rec.payment.state, rec.payment.reason ?? 'unknown')
         if (rec.payment.state !== 'paid') await this.deliverInvoice(rec)
       } else if (rec.payment?.state !== 'paid') {
         // The DM that did not get through is tried again.
@@ -386,7 +387,11 @@ export class HosakaRides {
         await this.askApproval(rec, inv, first.sats, first.invoice.paymentHash)
         return
       }
-      if (v.state === 'pending') return
+      if (v.state === 'pending') {
+        // The request's DM did not get through: it is sent again, so the operator can answer before it lapses.
+        if (!wallet.approvals.notified(v.request.code)) await this.sendApprovalRequest(v.request)
+        return
+      }
       if (v.state !== 'approved') {
         this.notes.push(`Not paid: ${v.reason}.`)
         await toOperator(v.reason)
@@ -412,10 +417,29 @@ export class HosakaRides {
       await toOperator(decision.reason)
       return
     }
+    // The approval is judged again here, with nothing awaited between this and the payment: it may have lapsed while the relays were asked.
+    if (wallet.approvals.required) {
+      const again = wallet.approvals.verdict(inv.depositId, decision.sats, decision.invoice.paymentHash)
+      if (again.state !== 'approved' || again.request.code !== approvalCode) {
+        const why = again.state === 'approved' || again.state === 'pending' || again.state === 'none' ? 'the approval changed before the payment went out' : again.reason
+        this.notes.push(`Not paid: ${why}.`)
+        await toOperator(why)
+        return
+      }
+    }
     rec.payDecidedFor = inv.depositId
     rec.payment = { depositId: inv.depositId, state: 'sending', sats: decision.sats, reason: null }
     this.save()
-    const outcome = await wallet.pay(inv.bolt11, { ...this.payContext(rec, inv), ...(approvalCode ? { approvalCode } : {}), purpose: this.purpose(rec) })
+    let outcome: Awaited<ReturnType<typeof wallet.pay>>
+    try {
+      outcome = await wallet.pay(inv.bolt11, { ...this.payContext(rec, inv), ...(approvalCode ? { approvalCode } : {}), purpose: this.purpose(rec) })
+    } catch (err) {
+      // pay() refused before anything went out (it throws only then): nothing moved, and nobody is told otherwise.
+      const why = words(err).replace(/^not paid: /, '')
+      this.notes.push(`Not paid: ${why}.`)
+      await toOperator(why)
+      return
+    }
     rec.payment = { depositId: inv.depositId, state: outcome.state, sats: decision.sats, reason: outcome.state === 'paid' ? null : outcome.reason }
     this.save()
     if (outcome.state === 'paid') {
@@ -444,11 +468,18 @@ export class HosakaRides {
     const request = wallet.approvals.request({ depositId: inv.depositId, paymentHash, sats, purpose: this.purpose(rec), payee: `HOSAKA at ${rec.apiUrl} (a Lightning invoice for exactly ${sats} sats)` })
     rec.payment = { depositId: inv.depositId, state: 'approval', sats, reason: null }
     this.save()
+    await this.sendApprovalRequest(request)
+  }
+
+  /** The DM asking for one approval; tried again at the next step while the request waits, when it did not go out. */
+  private async sendApprovalRequest(request: ApprovalRequest): Promise<void> {
+    const { wallet } = this.host
     try {
       await this.host.messageOperator(requestWords(request, { spentSats: wallet.spentLast24hSats(), maxDailySats: wallet.maxDailySats, maxPaymentSats: wallet.maxPaymentSats }))
-      this.notes.push(`The payment (${sats} sats) waits for your operator's approval: the server asked them by DM. Nothing is paid unless they approve within 30 minutes.`)
+      wallet.approvals.markNotified(request.code)
+      this.notes.push(`The payment (${request.sats} sats) waits for your operator's approval: the server asked them by DM. Nothing is paid unless they approve within 30 minutes.`)
     } catch (err) {
-      this.notes.push(`The approval request (${sats} sats) could NOT be sent to your operator: ${words(err)}. Nothing is paid without their approval; it lapses in 30 minutes.`)
+      this.notes.push(`The approval request (${request.sats} sats) could NOT be sent to your operator just now: ${words(err)}. It is tried again shortly; nothing is paid without their approval, and it lapses in 30 minutes.`)
     }
   }
 
