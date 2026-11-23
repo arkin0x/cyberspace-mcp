@@ -463,6 +463,20 @@ npub1ttlpyy4r6lrsvgtxmny8wny2pakp8xwpurvuc3a6pae2jnv8wpestxy4ks
 
 It is not the owner's personal key and not any agent's key; it publishes nothing to relays. Check a download with `scripts/verify-manifest.mjs`, one file that needs only Node: `node verify-manifest.mjs release cyberspace-mcp-<version>.tar.gz` (with the `.sig.json` beside it) or `node verify-manifest.mjs skill skills/cyberspace`. It prints `OK` and exits 0, or names every file that differs. The format, the signing steps and what a signature does and does not prove are in [docs/signing.md](docs/signing.md).
 
+## Disclaimer
+
+This software is experimental. It is provided "as is", without warranty of any kind. Use it at your own risk.
+
+- **Your keys, funds and agents are your responsibility.** Anyone who has your private key, your signer or your wallet connection string can act as you or spend from your wallet. Keep them safe and keep backups. Nobody can recover them for you.
+- **Lightning payments are final.** A payment that has been sent cannot be reversed, and nobody has to refund it.
+- **Not financial advice.** Nothing in this software or its documentation is financial, investment, legal or tax advice.
+- **Other people's services can fail.** This software relies on things the author does not run: nostr relays, Lightning wallets and nodes, ecash mints, hosting and other services. They can go down, lose data, refuse service or change without notice.
+- **Nostr is public.** What you publish can be copied by anyone and may never be fully deleted.
+- **AI agents make mistakes.** If you connect an AI agent to this software, you are responsible for everything it does, including what it publishes, signs and pays for.
+- **No liability.** To the fullest extent the law allows, the author (arkinox) and the contributors are not liable for any loss or damage of any kind that comes from using this software, including lost funds, keys, data or work, whether it is caused by a bug, a relay, a mint, a wallet, another service, an AI agent or anything else.
+
+This is a plain-language summary. The license in this repository governs, and its disclaimer of warranties and limitation of liability apply in full.
+
 ## License
 
-MIT, the same as cyberspace-core.
+MIT, the same as cyberspace-core. See `LICENSE`.
