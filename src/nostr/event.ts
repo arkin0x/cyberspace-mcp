@@ -3,6 +3,7 @@
 // The server signs with nostr-tools and never with anything else.
 
 import { finalizeEvent, verifyEvent as verify } from 'nostr-tools/pure'
+import { readVersion } from '../version.js'
 
 /** The shape nostr-tools signs and relays return. */
 export interface NostrEvent {
@@ -26,6 +27,21 @@ export const HEX_64 = /^[0-9a-f]{64}$/
  */
 export const CLIENT_NAME = 'cyberspace-mcp'
 
+/**
+ * The client tag itself. NIP-89's third and fourth elements are a kind 31990
+ * handler address and its relay hint; there is no handler, so both are empty
+ * (readers skip an empty address), and the fifth is this copy's version, so a
+ * client can tell an operator their agent runs an old copy (ONOSENDAI's
+ * AGENTS panel). Just the version, read from package.json; by name only when
+ * it cannot be read, so a reader never sees a version that is not this one.
+ */
+export const CLIENT_TAG: readonly string[] = clientTag(readVersion())
+
+/** The client tag for a version, or by name only for none. */
+export function clientTag(version: string | null): string[] {
+  return version === null ? ['client', CLIENT_NAME] : ['client', CLIENT_NAME, '', '', version]
+}
+
 /** NIP-42 relay auth, Blossom upload auth, NIP-98 HTTP auth: never attributed. */
 const UNATTRIBUTED_KINDS = new Set([22242, 24242, 27235])
 
@@ -33,7 +49,7 @@ const UNATTRIBUTED_KINDS = new Set([22242, 24242, 27235])
 export function attributed<T extends EventTemplate>(template: T): T {
   if (UNATTRIBUTED_KINDS.has(template.kind)) return template
   if (template.tags.some((t) => t[0] === 'client')) return template
-  return { ...template, tags: [...template.tags, ['client', CLIENT_NAME]] }
+  return { ...template, tags: [...template.tags, [...CLIENT_TAG]] }
 }
 
 /** Sign a template with the secret key, client tag added. The one signing path. */
