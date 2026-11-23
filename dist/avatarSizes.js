@@ -21,14 +21,18 @@ export class AvatarSizes {
     relays;
     log;
     now;
+    hears;
     known = new Map();
     wanted = new Set();
     inflight = new Set();
     flushing = null;
-    constructor(relays, log = () => { }, now = Date.now) {
+    constructor(relays, log = () => { }, now = Date.now, 
+    /** Whose words reach the model (listenTo.ts): anyone else's avatar keeps its size, never its name. */
+    hears = () => true) {
         this.relays = relays;
         this.log = log;
         this.now = now;
+        this.hears = hears;
     }
     /** How far this pubkey's avatar reaches from its center, in gibsons: from memory, the default until read. Starts a read in the background when due. */
     radius(pubkey) {
@@ -88,7 +92,7 @@ export class AvatarSizes {
                     const ev = newest.get(pk);
                     // A shape that has not paid is drawn as the default, so it is the default's size.
                     const shard = ev ? paidShard(ev) : null;
-                    this.known.set(pk, { radius: avatarRadius(shard), name: shard?.name ?? null, at });
+                    this.known.set(pk, { radius: avatarRadius(shard), name: this.hears(pk) ? shard?.name ?? null : null, at });
                 }
             }
             catch (err) {
