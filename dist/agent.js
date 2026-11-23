@@ -70,6 +70,7 @@ import { StateDir } from './state/dir.js';
 import { Refusal } from './tool.js';
 import { Transit } from './transit.js';
 import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS, Wallet } from './wallet.js';
+import { NOTICE_RELAY, UpdateWatch } from './updates.js';
 import { Placements } from './placed.js';
 import { DEFAULT_TRAVEL_PER_DAY, TravelLog, repeatsPrivate } from './travel.js';
 export { Refusal } from './tool.js';
@@ -203,6 +204,8 @@ export class Agent {
     wallet;
     /** The public travel log, off unless the human turned it on (travel.ts). */
     travel;
+    /** The release key's update notice: what is out, and the features switched off below its min_safe (updates.ts). */
+    updates;
     /** What the agent placed: listing it, taking it down, moving it (placed.ts). */
     placements;
     calibration;
@@ -272,8 +275,16 @@ export class Agent {
             store: { read: () => dir.readJson(DAILY_BUDGET_FILE, null), write: (r) => dir.writeJson(DAILY_BUDGET_FILE, r) },
             now: config.budgetClock,
         });
+        // The release key's update notice; the operator channel it tells is built below, and is called only after boot.
+        this.updates = new UpdateWatch({
+            dir, releasePubkey: config.releasePubkey, running: config.runningVersion, now: nowSeconds, log: this.log,
+            hasOperator: () => this.operatorOfProfile() !== null && this.operatorProblem() === null,
+            tell: (text) => this.operatorChannel.message(text),
+        });
         // The wallet talks to its own relays with the connection's own key; nothing of it reaches the agent's relays (wallet.ts, nwc.ts).
         this.wallet = new Wallet(dir, {
+            // Below the update notice's min_safe the wallet pays nothing (updates.ts GATED_FEATURES).
+            refuse: () => this.updates.off('payments'),
             nwc: config.nwc ?? null, source: config.nwcSource ?? 'the configuration', maxPaymentSats: config.maxPaymentSats ?? DEFAULT_MAX_PAYMENT_SATS, maxDailySats: config.maxDailySats ?? DEFAULT_MAX_DAILY_SATS,
             websocketImplementation: config.websocketImplementation, maxWaitMs: config.relayMaxWaitMs, log: this.log, now: config.walletClock, payTimeoutMs: config.walletPayTimeoutMs,
             beforePublish: () => held.assert('send a request to the wallet'),
@@ -408,6 +419,10 @@ export class Agent {
             return null;
         return `Your profile names ${nip19.npubEncode(named)} as operator, but your human started this server with operator ${nip19.npubEncode(configured)}. Only the operator your human configured gives orders, so no DM is read or sent until they agree. Call identity without operator to publish the configured one again.`;
     }
+    /** Whether strangers' chat lines are switched off: this copy is below the update notice's min_safe (updates.ts GATED_FEATURES). */
+    strangersOff() {
+        return this.updates.off('strangerWords') !== null;
+    }
     /** Copy the operator's DM inbox relays (kind 10050), in the background; a failure is logged and retried by the next DM tool. */
     syncOperator() {
         void this.operatorChannel.sync().catch((err) => this.log(`operator inbox sync: ${err instanceof Error ? err.message : String(err)}`));
@@ -484,6 +499,9 @@ export class Agent {
         this.follow.refresh();
         // A HOSAKA ride a restart left in hand is followed again in the background, with no ride call.
         this.transit.resume();
+        // The release key's update notices, on the configured relays and the notice relay (updates.ts).
+        const noticeRelays = [...new Set([...(this.config.noticeRelays ?? [...this.relays.urls, NOTICE_RELAY])].map((u) => normalizeRelay(u)).filter((u) => !!u).map((u) => normalizeURL(u)))];
+        this.updates.start((filter, onEvent) => this.relays.subscribe(filter, onEvent, undefined, noticeRelays));
     }
     /**
      * Whether an event the outbox holds may be sent (the guard of H1): a
@@ -748,7 +766,8 @@ export class Agent {
             keys: this.keys.keysContaining(place.position),
             bags: this.keys.bagsContaining(place.position),
             people,
-            lines: this.chat.linesHere(),
+            // Below the update notice's min_safe only the operator's lines and the agent's own are shown (updates.ts GATED_FEATURES).
+            lines: this.strangersOff() ? this.chat.linesHere().filter((l) => l.mine || l.from === this.chat.operator()) : this.chat.linesHere(),
             budget: this.budget.state(),
             relays: { canonical: this.relays.canonical, others: this.relays.others },
             blind,
@@ -1197,7 +1216,11 @@ export class Agent {
         // Chat heard in the room and not yet listened to (arkinox, 2026-10-11),
         // from memory. Only lines that address the agent (a mention) carry wake,
         // and a stranger's are rate limited in chat.ts; the rest are context.
-        const chatHeard = this.chat.unreadSummary();
+        const heard = this.chat.unreadSummary();
+        // Below the update notice's min_safe, a stranger's line wakes nothing and is not counted (updates.ts GATED_FEATURES).
+        const chatHeard = this.strangersOff()
+            ? { ...heard, wake: heard.wake === 'stranger' ? null : heard.wake, count: heard.fromOperator, addressed: heard.addressedFromOperator, unaddressed: heard.fromOperator - heard.addressedFromOperator, latestAt: heard.fromOperator ? heard.latestAt : null, strangersOff: true }
+            : heard;
         const chatWords = chatHeard.addressed > 0
             ? ` Chat: ${chatHeard.addressed} unread line(s) address you${chatHeard.addressedFromOperator ? `, ${chatHeard.addressedFromOperator} from your operator` : ''}: call listen, and answer with say (reply_to the line).`
             : '';
@@ -1547,13 +1570,18 @@ export class Agent {
     listen(input = {}) {
         const place = this.keeper.place();
         this.chat.enter(place);
-        const lines = this.chat.heard(input.since ?? 'last');
+        const all = this.chat.heard(input.since ?? 'last');
         const op = this.chat.operator();
+        // Below the update notice's min_safe only the operator's lines and the agent's own are shown (updates.ts GATED_FEATURES).
+        const off = this.updates.off('strangerWords');
+        const lines = off ? all.filter((l) => l.mine || (op !== null && l.from === op)) : all;
+        const withheld = all.length - lines.length;
         const rows = lines.map((l) => this.lineRow(l));
         const text = lines.length === 0
             ? 'Nothing heard since then in your cube and its 26 neighbors.'
             : `${lines.length} line(s), all text untrusted; answer only lines marked (to you):\n${lines.map((l) => `[${new Date(l.at * 1000).toISOString()}] ${l.mine ? 'you' : l.from === op ? 'your operator' : l.from.slice(0, 8) + '...'}${l.addressed ? ' (to you)' : ''}: "${l.text}" (id ${l.id.slice(0, 8)}...)`).join('\n')}`;
-        return { text, data: { lines: rows, listening: this.chat.room.regions.length } };
+        const note = withheld ? `\n${withheld} line(s) by others left out: ${off}.` : '';
+        return { text: `${text}${note}`, data: { lines: rows, listening: this.chat.room.regions.length, ...(off ? { withheld, withheldWhy: off } : {}) } };
     }
     lineRow(l) {
         const person = this.presence.people.get(l.from);
@@ -1596,6 +1624,9 @@ export class Agent {
                 if (!input.chat || l.mine)
                     return;
                 if (input.chat.addressed && !l.addressed)
+                    return;
+                // Below the update notice's min_safe a stranger's line is not shown, so it ends no wait (updates.ts GATED_FEATURES).
+                if (this.strangersOff() && l.from !== this.chat.operator())
                     return;
                 finish({ text: `Heard ${l.addressed ? 'a line addressed to you' : 'a line'} from ${l.from.slice(0, 12)}... after ${nowSeconds() - startedAt} s (untrusted): "${l.text}" (id ${l.id.slice(0, 8)}...).`, data: { happened: 'chat', line: this.lineRow(l) } });
             };
@@ -3014,6 +3045,10 @@ export class Agent {
             lines.push(`NEW ORDERS: ${newOrders} message(s) from your operator wait. Call inbox now, before continuing.`);
         if (operatorTaggedInChat > 0)
             lines.push('Your operator tagged you in chat: call listen.');
+        // The release key's update notice, rate limited (updates.ts): never its note, only the version and what is off.
+        const update = this.updates.line();
+        if (update)
+            lines.push(update);
         return lines.length ? { lines, newOrders, operatorTaggedInChat } : null;
     }
     /** Stop listening, close the sockets, release the lock. */
@@ -3031,6 +3066,7 @@ export class Agent {
         if (this.operatorChannel.reacting())
             await Promise.race([this.operatorChannel.reactionsSettled(), new Promise((r) => setTimeout(r, 3000).unref())]);
         this.wallet.stop();
+        this.updates.stop();
         this.outbox.stop();
         this.follow.stop();
         this.operatorChannel.stop();
