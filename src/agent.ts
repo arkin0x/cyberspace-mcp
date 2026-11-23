@@ -37,7 +37,7 @@ import { causeWords, decideSelfCheck } from './chain/selfCheck.js'
 import { AVATAR_CONTENT_WARN, AVATAR_KIND, DEFAULT_AVATAR_PER_DAY, avatarContentBytes, avatarTemplate, avatarTooLarge, avatarTooLargeWords, paidShard, verifyAvatar } from './avatar.js'
 import { Chat, type ChatLine } from './chat.js'
 import {
-  CHAT_KIND, HIDDEN_KIND, MAX_ABOUT, MAX_ITEM_NAME, bagEntries, carriedTags, hintPlaneFor, namesNoPlane, planeOfEntry, sameHintBox, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
+  CHAT_KIND, HIDDEN_KIND, bagGrowthRefusal, MAX_ABOUT, MAX_ITEM_NAME, bagEntries, carriedTags, hintPlaneFor, namesNoPlane, planeOfEntry, sameHintBox, MAX_MESSAGE_LENGTH, MAX_RIDDLE_LENGTH, OBJECT_KIND, bagSettingsOf, bagTemplate, chestInnerTemplate, heightHint, isReference,
   audioLabel, itemLineage, keyInnerTemplate, messageInnerTemplate, messagePreview, objectTemplate, payloadBytes, referenceCount, referenceTo, rumorOf, shardInnerTemplate, unbag, wantsReference, entryKey,
   type BagEntry, type Hidden, type HiddenType, type KeyItem, type Reference, type Rumor,
 } from './hidden/bags.js'
@@ -1980,7 +1980,7 @@ export class Agent {
   }
 
   /** The inner entry (or entries) for what is being hidden, signed. A large object is published first as its own kind 33331. */
-  private async entriesFor(contents: Contents, at: Place, regionKey: Uint8Array, now: number, where: { lookupId: string; height: number }): Promise<{ entries: BagEntry[]; what: string; walk?: string; objectEvent?: NostrEvent; item?: { name: string; itemPubkey: string }; chest?: { id: string; name: string; lock: string; requires: string }; door?: Omit<OwnDoor, 'createdAt'> }> {
+  private async entriesFor(contents: Contents, at: Place, regionKey: Uint8Array, now: number, where: { lookupId: string; height: number }): Promise<{ entries: BagEntry[]; what: string; walk?: string; objectEvent?: NostrEvent; item?: { name: string; itemPubkey: string }; chest?: { id: string; name: string; lock: string; requires: string }; door?: Omit<OwnDoor, 'createdAt'>; hold?: () => void }> {
     const place: ItemPlace = { lookupId: where.lookupId, height: where.height, x: at.position.x.toString(), y: at.position.y.toString(), z: at.position.z.toString(), plane: at.plane }
     if ('message' in contents) {
       const text = String(contents.message)
@@ -2004,9 +2004,9 @@ export class Agent {
       if (!name) throw new Refusal('An item needs a name: what the finder sees, and what you seal chests to it by.')
       const key = forgeKey(name, String(contents.key.about ?? '').trim().slice(0, MAX_ABOUT))
       const event = this.sign(keyInnerTemplate(key, at.position, at.plane, now))
-      // Forged is held at once (B1 3.1), so chests can be sealed to it before anyone finds it.
-      this.keys.holdItem({ itemPubkey: key.itemPubkey, secretHex: key.secretHex, name: key.name, about: key.about, foundIn: where.lookupId, at: now, source: 'forged', hider: this.pubkey, eventId: event.id, place, ...lookOf(key), carried: carriedTags(event.tags) })
-      return { entries: [event], what: `an item "${key.name}" (public key ${key.itemPubkey})`, item: { name: key.name, itemPubkey: key.itemPubkey } }
+      // Forged is held once the bag that hides it is signed (B1 3.1), so chests can be sealed to it before anyone finds it; hide calls `hold` after the bag fits.
+      const hold = (): void => { this.keys.holdItem({ itemPubkey: key.itemPubkey, secretHex: key.secretHex, name: key.name, about: key.about, foundIn: where.lookupId, at: now, source: 'forged', hider: this.pubkey, eventId: event.id, place, ...lookOf(key), carried: carriedTags(event.tags) }) }
+      return { entries: [event], what: `an item "${key.name}" (public key ${key.itemPubkey})`, item: { name: key.name, itemPubkey: key.itemPubkey }, hold }
     }
     if ('chest' in contents) {
       const name = String(contents.chest.name ?? '').trim().slice(0, MAX_ITEM_NAME)
@@ -2049,14 +2049,15 @@ export class Agent {
       const requires = (contents.chest.requires ?? (lock.item ? `the ${lock.item.name}` : lock.person ? 'being the one it was sealed for' : '')).trim().slice(0, MAX_ITEM_NAME)
       const chest = { name, lockPubkey: lock.pubkey, senderPubkey: sealed.senderPubkey, requires, payload: sealed.payload }
       const event = this.sign(chestInnerTemplate(chest, at.position, at.plane, now))
-      for (const f of forged) {
+      const hold = (): void => { for (const f of forged) {
         this.keys.holdItem({ itemPubkey: f.key.itemPubkey, secretHex: f.key.secretHex, name: f.key.name, about: f.key.about, foundIn: where.lookupId, at: now, source: 'forged', hider: this.pubkey, eventId: f.event.id, place, from: { chestId: event.id, chestName: name }, ...lookOf(f.key), carried: carriedTags(f.event.tags) })
-      }
+      } }
       const counts = (['message', 'object', 'item'] as const).map((k) => [k, (contents.chest.entries ?? []).filter((e) => k in e || (k === 'item' && 'key' in e)).length] as const).filter(([, n]) => n > 0).map(([k, n]) => `${n} ${k}${n === 1 ? '' : 's'}`)
       return {
         entries: [event],
         what: `a chest "${name}" (id ${handle(event.id)}) sealed to ${lock.words}, holding ${counts.join(', ')}${forged.length ? `; you hold the new item(s) ${forged.map((f) => `"${f.key.name}" (public key ${f.key.itemPubkey})`).join(', ')}` : ''}`,
         chest: { id: event.id, name, lock: lock.pubkey, requires },
+        hold,
         ...(objectWalks.length ? { walk: ` WALK for the object(s) sealed in it: ${objectWalks.join('; ')}.` } : {}),
       }
     }
@@ -2125,7 +2126,7 @@ export class Agent {
     const currentSettings = current ? bagSettingsOf(current, height) : null
     const hint = input.hint_heights ?? currentSettings?.hint ?? null
     if (hint && !hintFits(hint, height)) throw new Refusal(`hint_heights ${hint.join(',')} cannot contain a height ${height} region: each must be from ${height} to 85.`)
-    const { entries, what, walk, objectEvent, item, chest, door } = await this.entriesFor(input.contents, at, regionKey, now, { lookupId: key.lookupId, height })
+    const { entries, what, walk, objectEvent, item, chest, door, hold } = await this.entriesFor(input.contents, at, regionKey, now, { lookupId: key.lookupId, height })
     const have = new Set(carried.map(entryKey))
     const merged = [...carried, ...entries.filter((e) => !have.has(entryKey(e)))]
     const riddle = (input.riddle ?? currentSettings?.riddle ?? '').slice(0, MAX_RIDDLE_LENGTH)
@@ -2134,6 +2135,12 @@ export class Agent {
     const hintPlane = input.hint_heights ? at.plane : hintPlaneFor(current, merged, at.plane)
     const template = await bagTemplate(merged, regionKey, key.lookupId, height, createdAt, HIDDEN_KIND, room ? ROOM_BAG_SETTINGS : { heightTag: currentSettings?.heightTag ?? true, hint, riddle, contents: currentSettings?.contents, money: currentSettings?.money }, { at: at.position, plane: hintPlane })
     const bag = this.sign(template)
+    // A bag past BAG_SAFE_BYTES is refused before anything is kept or sent, when this write makes it larger (ONOSENDAI lib/bagSize.ts, bagFit.ts growthRefusal):
+    // the canonical relay refuses an event past 262,200 bytes, and a chest of up to 131,072 bytes (DECK-0004 §3.2) can bring a bag there. A write that shrinks a bag already past it still goes.
+    const tooBig = bagGrowthRefusal(bag, current)
+    if (tooBig) throw new Refusal(`${tooBig} The bag at this place already holds ${carried.length} entr${carried.length === 1 ? 'y' : 'ies'}; hide this at another height or place, or make it smaller.`)
+    // Items forged now (an item, or items forged into a chest) are held once their bag fits (B1 3.1).
+    hold?.()
     // A door's secret is kept the moment its bag is signed, before it is sent: this device sealed it, and nothing else knows it.
     if (door) this.doors.add({ ...door, createdAt })
     // Recorded whole before it is sent, so no later rewrite builds on an older copy, whichever relays take it.

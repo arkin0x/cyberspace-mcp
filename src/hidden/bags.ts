@@ -78,6 +78,27 @@ export const REFERENCE_THRESHOLD_BYTES = 16_384
 export const MAX_MESSAGE_LENGTH = 10_000
 /** Longest riddle a bag carries in its content (spec 7.7 "Riddles"). */
 export const MAX_RIDDLE_LENGTH = 280
+
+/**
+ * The most a bag may grow to, in bytes as signed (ONOSENDAI lib/bagSize.ts
+ * BAG_SAFE_BYTES): under the canonical relay's 262,200-byte limit on one
+ * event, with a margin. A chest of up to 131,072 bytes (DECK-0004 3.2) can
+ * bring a bag near it, and this server writes every entry inline.
+ */
+export const BAG_SAFE_BYTES = 240_000
+
+/**
+ * Why a signed bag is not sent, or null: past BAG_SAFE_BYTES and larger than
+ * the bag it replaces (`current`), so a write that shrinks a bag already past
+ * it still goes (ONOSENDAI bagFit.ts growthRefusal). Counted in UTF-8 bytes,
+ * as a relay counts.
+ */
+export function bagGrowthRefusal(bag: NostrEvent, current: NostrEvent | null): string | null {
+  const bytes = (ev: NostrEvent): number => new TextEncoder().encode(JSON.stringify(ev)).length
+  const size = bytes(bag)
+  if (size <= BAG_SAFE_BYTES || (current && size <= bytes(current))) return null
+  return `Too large for one bag: ${size} of ${BAG_SAFE_BYTES} bytes. Nothing was sent.`
+}
 /** The most references one bag may make this server fetch, and how many at once. */
 const MAX_REFERENCES_PER_BAG = 64
 const REFERENCE_CONCURRENCY = 4

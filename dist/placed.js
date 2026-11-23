@@ -40,7 +40,7 @@
 // because writing over a bag it cannot see whole is how things get lost.
 // One bag is changed by one call at a time (withBags).
 import { coordToXyz, hexToCoord } from 'cyberspace-core';
-import { HIDDEN_KIND, OBJECT_KIND, PROTECTED_TAG, SHARD_KIND, bagSettingsOf, bagTemplate, ciphertextOf, editedTemplate, entryKey, hintPlaneFor, isReference, itemLineage, messagePreview, namesNoPlane, planeOfEntry, resealedObject, rumorOf, sealedAsRumor, unbag, } from './hidden/bags.js';
+import { HIDDEN_KIND, OBJECT_KIND, bagGrowthRefusal, PROTECTED_TAG, SHARD_KIND, bagSettingsOf, bagTemplate, ciphertextOf, editedTemplate, entryKey, hintPlaneFor, isReference, itemLineage, messagePreview, namesNoPlane, planeOfEntry, resealedObject, rumorOf, sealedAsRumor, unbag, } from './hidden/bags.js';
 import { decryptForRegion } from './hidden/crypto.js';
 import { hintFits } from './hidden/hint.js';
 import { attributed, hexToBytes, nowSeconds } from './nostr/event.js';
@@ -836,6 +836,10 @@ export class Placements {
             const settings0 = toRoom ? { heightTag: false, hint: null, riddle: '', contents: false, money: false } : dst.current ? bagSettingsOf(dst.current, height) : { heightTag: true, hint: null, riddle: '', contents: false, money: false };
             const settings = { ...settings0, hint: settings0.hint && hintFits(settings0.hint, height) ? settings0.hint : null };
             const newBag = await this.signBag(entries, newKey, settings, dest, dst.current);
+            // Refused before anything goes out when the move would bring the destination's bag past BAG_SAFE_BYTES (a large chest, DECK-0004 3.2). An object moves as a reference of some 280 bytes, and its rollback is already prepared, so only an inline entry is checked here.
+            const tooBig = object && rollback ? null : bagGrowthRefusal(newBag, dst.current);
+            if (tooBig)
+                throw new Refusal(`${tooBig} The bag at the new place already holds ${dst.entries.length} thing(s). Nothing was moved; it stays where it was.`);
             const canonical = this.canonical;
             if (object && rollback) {
                 // On disk before anything is published, so a server stopped mid-move puts the old object back at its next start.
