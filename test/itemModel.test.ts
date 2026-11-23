@@ -17,7 +17,7 @@ import { KEY_KIND, MAX_CARRIED_BYTES, MAX_CARRIED_TAGS, carriedTags, keyInnerTem
 import { forgeKey, openWithSecret, readContents, sealEntries } from '../src/hidden/chests.js'
 import { animationOf, isModelAddress, lookOf, modelOf, modelTags } from '../src/hidden/itemModel.js'
 import { itemRow } from '../src/items.js'
-import { hexToBytes, signEvent } from '../src/nostr/event.js'
+import { CLIENT_TAG, hexToBytes, signEvent } from '../src/nostr/event.js'
 import { KeyStore, keyItemOfHeld, type HeldItem } from '../src/space/regionKeys.js'
 import { StateDir } from '../src/state/dir.js'
 
@@ -133,7 +133,7 @@ describe('holding an item keeps its look, and so does a copy sealed into a chest
     // Signed, it gains this server's client tag last, as every item it signs does.
     const sk = generateSecretKey()
     const copy = signEvent(template, sk)
-    expect(copy.tags.slice(5)).toEqual([...ONOSENDAI_TEMPLATE.tags.slice(5), ['client', 'cyberspace-mcp']])
+    expect(copy.tags.slice(5)).toEqual([...ONOSENDAI_TEMPLATE.tags.slice(5), [...CLIENT_TAG]])
     const lock = forgeKey('lock')
     const { payload, senderPubkey } = sealEntries([copy], lock.itemPubkey)
     const contents = readContents(openWithSecret({ senderPubkey, payload }, lock.secretHex), getPublicKey(sk))

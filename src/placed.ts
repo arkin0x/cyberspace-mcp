@@ -134,6 +134,8 @@ interface Reading {
 /** What the agent hands this module: its key's signature and the parts of itself a bag change touches. */
 export interface PlacedHost {
   pubkey: string
+  /** listenTo "operator" (listenTo.ts): an entry another author wrote (a public object placed by reference), its words withheld. */
+  quiet?: (h: Hidden) => Hidden
   relays: Relays
   outbox: Outbox
   keys: KeyStore
@@ -412,7 +414,7 @@ export class Placements {
       }
       if (!own && held) this.host.keys.noteOwnBag(held, ev.created_at, { bagId: ev.id })
       const origin = { at: { x: BigInt(base.x), y: BigInt(base.y), z: BigInt(base.z) }, plane: 0 as Plane }
-      const opened = await unbag(ev, hexToBytes(keyHex), (ref) => this.host.resolveReference(ref), origin, height)
+      const opened = (await unbag(ev, hexToBytes(keyHex), (ref) => this.host.resolveReference(ref), origin, height)).map((h) => this.host.quiet?.(h) ?? h)
       for (const e of raw) bag.rows.push(this.rowOf(e, opened, bag))
       bag.entries = bag.rows.map(Placements.publicRow)
       bags.push(bag)

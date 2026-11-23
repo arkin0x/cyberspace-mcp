@@ -110,6 +110,22 @@ export function addressesMe(text, me) {
     // ONOSENDAI's @mention writes, or its key in the text as NIP-27 writes it.
     return false;
 }
+/** Every pubkey a line names: npub and nprofile (nostr: or bare). Not 64-hex: coordinates and ids are 64-hex too (review of #106). */
+export function mentionedPubkeys(text) {
+    const out = new Set();
+    const lower = text.toLowerCase();
+    for (const m of lower.matchAll(/(npub1|nprofile1)[02-9ac-hj-np-z]+/g)) {
+        try {
+            const d = nip19.decode(m[0]);
+            if (d.type === 'npub')
+                out.add(d.data);
+            else if (d.type === 'nprofile')
+                out.add(d.data.pubkey);
+        }
+        catch { /* not a whole bech32 string: names nobody */ }
+    }
+    return [...out];
+}
 /** Whether an inner chat event mentions the agent: a p tag naming it (ONOSENDAI's @mention), or the text rules of addressesMe. */
 export function mentionsMe(inner, me) {
     if (inner.tags.some((t) => t[0] === 'p' && t[1] === me.pubkey))
@@ -152,7 +168,9 @@ export class Chat extends EventEmitter {
         const saved = dir.readJson(FILE, null);
         if (saved?.version === 1) {
             // A line saved before the clamp below may be dated in the future; it is read as heard when it was heard (security review, 2026-11-23).
-            this.lines = (Array.isArray(saved.lines) ? saved.lines : []).map((l) => (typeof l.at === 'number' && typeof l.heardAt === 'number' && l.at > l.heardAt + 60 ? { ...l, at: l.heardAt } : l));
+            this.lines = (Array.isArray(saved.lines) ? saved.lines : []).map((l) => (typeof l.at === 'number' && typeof l.heardAt === 'number' && l.at > l.heardAt + 60 ? { ...l, at: l.heardAt } : l))
+                // Lines kept before listenTo became "operator" are dropped with the rest of what is not heard.
+                .filter((l) => this.isHeard(l));
             this.lastSaidAt = saved.lastSaidAt ?? null;
             this.unpromptedAllowance = typeof saved.unpromptedAllowance === 'number' ? saved.unpromptedAllowance : 1;
             this.lastListenAt = saved.lastListenAt ?? null;
@@ -203,9 +221,20 @@ export class Chat extends EventEmitter {
         return this.listeningPromise;
     }
     /** Someone arrived: one more unprompted line may be said. */
-    arrival() {
+    arrival(pubkey) {
+        // listenTo "operator": only the operator's arrival gives the agent an unprompted line; strangers get no greeting.
+        if (this.selective && pubkey !== undefined && !this.me.hears(pubkey))
+            return;
         this.unpromptedAllowance = 1;
         this.save();
+    }
+    /** Whether a line's words may reach the model (listenTo.ts): the agent's own, and anyone's the server hears. */
+    isHeard(l) {
+        return !!l.mine || l.from === this.me.pubkey || (this.me.hears?.(l.from) ?? true);
+    }
+    /** Whether only some pubkeys are heard (listenTo "operator"). */
+    get selective() {
+        return this.me.operatorOnly === true && !!this.me.hears;
     }
     /** Why a line may not be said now, or null. `replyTo` is the id of a heard line this one answers. */
     refusal(text, replyTo, now = nowSeconds()) {
@@ -216,6 +245,12 @@ export class Chat extends EventEmitter {
             return 'That line holds a Cashu token, which is money anyone who reads it can spend. Nothing was said.';
         if (text.length > MAX_CHAT_LENGTH)
             return `The line is ${text.length} characters; a chat line is at most ${MAX_CHAT_LENGTH}.`;
+        // listenTo "operator": the agent names nobody but its operator and itself (arkinox, 2026-11-23: "No interaction").
+        if (this.selective) {
+            const other = mentionedPubkeys(text).find((p) => p !== this.me.pubkey && !this.me.hears(p));
+            if (other)
+                return 'Not said: that line names someone other than your operator, and you answer only your operator.';
+        }
         if (this.lastSaidAt !== null && now - this.lastSaidAt < SAY_INTERVAL_S) {
             return `Too soon: one line per ${SAY_INTERVAL_S} seconds, and the last was ${now - this.lastSaidAt} s ago.`;
         }
@@ -270,6 +305,9 @@ export class Chat extends EventEmitter {
         // plane it was said in, and only lines of this plane are heard. A line
         // with no C names no plane, and is heard in both (spec §7.6 Planes).
         const inners = (await chatInners(outer, hexToBytes(key.keyHex))).filter((e) => {
+            // listenTo "operator": a line anyone else said is dropped here, before it is kept, counted or woken for.
+            if (!this.isHeard({ from: e.pubkey }))
+                return false;
             const p = planeOfC(e.tags);
             return p === null || this.plane === null || p === this.plane;
         });
@@ -300,7 +338,7 @@ export class Chat extends EventEmitter {
      * in both.
      */
     linesHere() {
-        return this.lines.filter((l) => l.plane === undefined || this.plane === null || l.plane === this.plane);
+        return this.lines.filter((l) => this.isHeard(l) && (l.plane === undefined || this.plane === null || l.plane === this.plane));
     }
     /** Lines heard since a time (inclusive), or since the last call with "last", in the plane the agent stands in. */
     heard(since, now = nowSeconds()) {

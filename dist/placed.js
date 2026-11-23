@@ -334,7 +334,7 @@ export class Placements {
             if (!own && held)
                 this.host.keys.noteOwnBag(held, ev.created_at, { bagId: ev.id });
             const origin = { at: { x: BigInt(base.x), y: BigInt(base.y), z: BigInt(base.z) }, plane: 0 };
-            const opened = await unbag(ev, hexToBytes(keyHex), (ref) => this.host.resolveReference(ref), origin, height);
+            const opened = (await unbag(ev, hexToBytes(keyHex), (ref) => this.host.resolveReference(ref), origin, height)).map((h) => this.host.quiet?.(h) ?? h);
             for (const e of raw)
                 bag.rows.push(this.rowOf(e, opened, bag));
             bag.entries = bag.rows.map(Placements.publicRow);

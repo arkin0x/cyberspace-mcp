@@ -89,11 +89,16 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
   --kits-dir <dir>              Where the building kits are (one folder per kit, each with a
                                 catalog.json; docs/kits.md). Default <state>/kits, else
                                 <state>/../kits. Kits are local data and never published.
+  --listen-to <who>             Whose words reach the model: everyone (default) or operator. With
+                                operator, text from any other pubkey (chat, DMs, mentions, comments,
+                                profile text, messages and names in bags and objects) is dropped
+                                where it comes in: never stored, shown or a reason to wake. Places,
+                                bags and objects still show. Needs an operator.
   --help                        This text.
 
 The same keys may live in <state>/config.json: relays, operator, name, about,
 capCallSeconds, capSessionSeconds, capDailySeconds, threads, maxSidestepHeight, allowRespawn, hosakaUrl,
-nwc, maxPaymentSats, maxDailySats, paymentApproval, chatWakeMinutes, publishMaxPerDay, avatarMaxPerDay, kitsDir, and travelLog: { "enabled": true,
+nwc, maxPaymentSats, maxDailySats, paymentApproval, chatWakeMinutes, publishMaxPerDay, avatarMaxPerDay, kitsDir, listenTo, and travelLog: { "enabled": true,
 "maxPerDay": 6, "tagOperator": false }. The wallet string may also be the "nwc" key
 of <state>/wallet.json, which the server only reads.`;
 /** An http(s) URL without a trailing slash, or a thrown sentence. */
@@ -211,6 +216,9 @@ export function parseArgs(argv) {
             case '--payment-approval':
                 out.paymentApproval = paymentApprovalSetting(a, next());
                 break;
+            case '--listen-to':
+                out.listenTo = listenToSetting(a, next());
+                break;
             case '--publish-max-per-day':
                 out.publishMaxPerDay = Math.max(1, Math.floor(num(a, next())));
                 break;
@@ -316,6 +324,7 @@ export function settingsFrom(args, file, walletFile = {}) {
         ...(args.machineId ? { machineId: args.machineId } : {}),
         ...(tools !== undefined ? { tools } : {}),
         ...((args.kitsDir ?? str(file.kitsDir)) ? { kitsDir: args.kitsDir ?? expandHome(str(file.kitsDir)) } : {}),
+        listenTo: args.listenTo ?? (file.listenTo !== undefined ? listenToSetting('config.json listenTo', file.listenTo) : 'everyone'),
     };
 }
 /** "operator" or "none", or a thrown sentence: a typo must never quietly drop the approval the human asked for. */
@@ -323,6 +332,12 @@ function paymentApprovalSetting(where, raw) {
     if (raw === 'operator' || raw === 'none')
         return raw;
     throw new Error(`${where} must be "operator" or "none"; got ${JSON.stringify(raw)}`);
+}
+/** "everyone" or "operator", or a thrown sentence: a typo here must not quietly let everyone in. */
+function listenToSetting(where, raw) {
+    if (raw === 'everyone' || raw === 'operator')
+        return raw;
+    throw new Error(`${where} must be "everyone" or "operator"; got ${JSON.stringify(raw)}`);
 }
 /** "all", "starter", or tool names (a comma-separated string or, in config.json, a list); the names are checked against the tools when the server starts. */
 function toolsSetting(where, raw) {

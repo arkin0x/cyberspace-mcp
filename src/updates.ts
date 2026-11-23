@@ -34,12 +34,12 @@
 //   - Privacy. No GitHub call, no HTTP at all: the releases come over the
 //     relays this server already talks to, plus the notice relay.
 
-import { readFileSync } from 'node:fs'
 import { verifyEvent } from 'nostr-tools/pure'
 import type { Filter } from 'nostr-tools/filter'
 import type { NostrEvent } from './nostr/event.js'
 import { DEFAULT_RELAY } from './nostr/relays.js'
 import type { StateDir } from './state/dir.js'
+import { readVersion } from './version.js'
 
 /** The cyberspace-mcp release key (npub1ttlpyy4r6lrsvgtxmny8wny2pakp8xwpurvuc3a6pae2jnv8wpestxy4ks), the only author of notices. */
 export const RELEASE_PUBKEY = '5afe1212a3d7c7062166dcc8774c8a0f6c1399c1e0d9cc47ba0f72a94d877073'
@@ -111,14 +111,10 @@ export function parseRunning(s: unknown): { v: Semver; pre: boolean } | null {
   return v ? { v, pre: !!m![2] } : null
 }
 
-/** This copy's version, from its package.json (one folder above src/ and dist/); 0.0.0 when it cannot be read, which every minimum is above. */
+/** This copy's version, from its package.json (version.ts); 0.0.0 when it cannot be read, which every minimum is above. */
 export function runningVersion(): string {
-  try {
-    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { name?: unknown; version?: unknown }
-    return pkg.name === 'cyberspace-mcp' && parseRunning(pkg.version) ? String(pkg.version) : '0.0.0'
-  } catch {
-    return '0.0.0'
-  }
+  const v = readVersion()
+  return v !== null && parseRunning(v) ? v : '0.0.0'
 }
 
 export const VERSION = runningVersion()

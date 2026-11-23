@@ -19,7 +19,7 @@ import * as nip59 from 'nostr-tools/nip59'
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { Agent, Refusal } from '../src/agent.js'
 import { parseArgs, settingsFrom } from '../src/config.js'
-import { bytesToHex, nowSeconds, type NostrEvent } from '../src/nostr/event.js'
+import { CLIENT_TAG, bytesToHex, nowSeconds, type NostrEvent } from '../src/nostr/event.js'
 import { sectorTags, placeFromHex } from '../src/space/coords.js'
 import type { Calibration } from '../src/space/calibration.js'
 import { KEY_GENERATED_BY, StateDir } from '../src/state/dir.js'
@@ -138,7 +138,7 @@ describe('the travel log', () => {
     expect(framesOf(w.mine, 1)).toEqual([])
     const note = framesOf(w.general, 1)[0]
     expect(note.tags).toContainEqual(['t', 'cyberspace'])
-    expect(note.tags).toContainEqual(['client', 'cyberspace-mcp'])
+    expect(note.tags).toContainEqual([...CLIENT_TAG])
     // The place as the spec writes it: C (the plane is its low bit) and the sector tags from it.
     const here = a.here()
     expect(note.tags).toContainEqual(['C', here.hex])

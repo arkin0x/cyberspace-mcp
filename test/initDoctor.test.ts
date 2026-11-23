@@ -247,6 +247,18 @@ describe('doctor', () => {
     expect(on.out).toMatch(/payments: approval on, but there is no operator to approve/)
   })
 
+  it('says whose words reach the model: everyone by default; the operator only with listenTo, and warns when there is none (arkinox, 2026-11-23)', async () => {
+    const w = world()
+    const state = tmp()
+    expect((await init(w, ['--state', state, '--name', 'stranger', '--client', 'none', '--relay', CANONICAL, '--yes'])).code).toBe(0)
+    expect(check((await doctor(w, state)).checks, 'listening to')).toMatchObject({ verdict: 'info' })
+    const cfg = JSON.parse(readFileSync(join(state, 'config.json'), 'utf8')) as Record<string, unknown>
+    writeFileSync(join(state, 'config.json'), JSON.stringify({ ...cfg, listenTo: 'operator' }))
+    const closed = await doctor(w, state)
+    expect(check(closed.checks, 'listening to')).toMatchObject({ verdict: 'warn' })
+    expect(closed.out).toMatch(/listening to: the operator only, but there is no operator/)
+  })
+
   it('fails an operator that is not an npub, and warns when the profile names an operator config.json no longer does', async () => {
     const w = world()
     const state = tmp()
