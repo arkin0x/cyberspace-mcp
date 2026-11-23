@@ -587,7 +587,8 @@ ${halt}` : line;
                 droppedStopped.push(rumor);
                 continue;
             }
-            orders.push({ id: rumor.id, at: rumor.created_at, text: rumor.content, strategy: isStrategy(rumor), continue: isContinue(rumor) });
+            // An approval code in an order (a reply that named it but did not answer it) is blanked: a model never sees one (approvals.ts).
+            orders.push({ id: rumor.id, at: rumor.created_at, text: withoutCodes(rumor.content), strategy: isStrategy(rumor), continue: isContinue(rumor) });
         }
         // A STOP read in this same batch drops the orders it covers, wherever they came in it.
         for (const o of orders.filter((m) => this.stoppedOrder({ id: m.id, created_at: m.at }, cut)))

@@ -260,7 +260,10 @@ describe('a HOSAKA ride under paymentApproval "operator"', () => {
     expect(service.payments()).toHaveLength(1)
     // Only what answered no request is an ordinary message: the wrong code, the unclear reply and the code sent again. The approval itself is not an order.
     expect((await call(s, 'orders_waiting')).data.orders).toBe(3)
-    await call(s, 'inbox')
+    // Read as orders, they show the code blanked: the unclear reply named the live code, and the model never sees it (review of #107).
+    const read = await call(s, 'inbox')
+    expect(read.text).toContain('Do not pay PAY-******')
+    expect(JSON.stringify(read)).not.toContain(code)
     hosaka.complete([...hosaka.jobs.values()].at(-1)!.id)
     await until(() => state() === 'ready', 'ready')
     expect((await call(s, 'ride', { to })).data.action).toBe('hyperjump')
