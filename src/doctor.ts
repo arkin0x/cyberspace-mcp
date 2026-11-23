@@ -169,6 +169,15 @@ export async function runDoctor(argv: string[], deps: DoctorDeps): Promise<{ cod
   if (settings.operator && !operator) add({ name: 'operator', verdict: 'fail', detail: `not an npub: ${JSON.stringify(settings.operator)}`, fix: 'cyberspace-mcp init --operator <your npub>' })
   else if (!operator) add({ name: 'operator', verdict: 'info', detail: 'none: the agent answers only to its MCP client, and operator DMs are off', fix: 'to take orders from a human by nostr DM: cyberspace-mcp init --operator <their npub>' })
   else add({ name: 'operator', verdict: 'ok', detail: nip19.npubEncode(operator) })
+  // Whose words reach the model (listenTo.ts).
+  if (settings.listenTo === 'operator') {
+    const profileOperator = StateDir.open(stateDir).readJson<{ tags?: string[][] } | null>('profile.json', null)?.tags?.find((t) => t[0] === 'p' && t[3] === 'operator')?.[1]
+    add(operator || profileOperator
+      ? { name: 'listening to', verdict: 'ok', detail: 'the operator only: every other pubkey\'s words (chat, DMs, mentions, profile text, what they hid or published) are dropped where they come in' }
+      : { name: 'listening to', verdict: 'warn', detail: 'the operator only, but there is no operator: no one\'s words reach the model but its own', fix: 'cyberspace-mcp init --operator <their npub>' })
+  } else {
+    add({ name: 'listening to', verdict: 'info', detail: 'everyone: strangers\' chat, profile text and what they hid reach the model as untrusted text', fix: operator ? 'to hear only your operator: "listenTo": "operator" in config.json (or --listen-to operator)' : undefined })
+  }
 
   // The building kits are local files: say which, or that there are none (an agent without them builds from its own objects).
   {

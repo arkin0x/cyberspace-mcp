@@ -1,0 +1,157 @@
+// listenTo.ts: whose words reach the model (arkinox, 2026-11-23: "XOR should
+// ignore all input from any pubkey that isn't the operator, full stop. No
+// interaction. No banter. Nothing. Totally drop it unless the operator/owner
+// sends it.").
+//
+// With listenTo "operator", text authored by any pubkey but the agent's own
+// and its operator's is dropped where it comes in, so no tool shows it and no
+// turn wakes for it:
+//   - chat lines (chat.ts): not stored, not listened to, not counted, no wake;
+//     say names nobody else;
+//   - DMs and gift wraps (operator.ts): never orders already; not even counted;
+//   - profile text (presence.ts): a stranger has no name, only a pubkey;
+//   - what strangers hid or published (bags, chests, doors, objects, comments,
+//     riddles and hints): where it is, its kind and ids still show (the world),
+//     its words (names, messages, descriptions, riddles, comments) never do.
+// "everyone" (the default) is the old behavior. The operator may be the one
+// the profile names or the one the human configured; with neither, only the
+// agent's own words remain.
+
+import type { ListenTo } from './config.js'
+import type { KeyStore } from './space/regionKeys.js'
+
+/** What stands in for a stranger's words in a tool's answer. */
+export const WITHHELD = '(withheld: written by someone other than your operator)'
+
+export class Listener {
+  constructor(
+    readonly mode: ListenTo,
+    private readonly me: string,
+    /** The operators the human chose (the profile's and the configured one), any of them null. */
+    private readonly operators: () => Array<string | null | undefined>,
+  ) {}
+
+  /** Only the operator's words (and the agent's own) reach the model. */
+  get operatorOnly(): boolean {
+    return this.mode === 'operator'
+  }
+
+  /** Whether words this pubkey wrote may reach the model. */
+  hears(pubkey: string | null | undefined): boolean {
+    if (this.mode === 'everyone') return true
+    if (!pubkey) return false
+    const p = pubkey.toLowerCase()
+    if (p === this.me) return true
+    return this.operators().some((o) => !!o && o.toLowerCase() === p)
+  }
+
+  /** The text as written when its author is heard; WITHHELD (or the fallback) when not. */
+  text<T extends string | null | undefined>(author: string | null | undefined, value: T, fallback: string = WITHHELD): T | string {
+    if (value === null || value === undefined || value === '') return value
+    return this.hears(author) ? value : fallback
+  }
+}
+
+/** The name a withheld object goes out under when the agent publishes a copy of it (place by id, set_avatar by address): the placeholder never leaves the server. */
+export const UNNAMED = 'untitled'
+
+/** A shard (or payload) to be signed by the agent: a withheld name becomes UNNAMED. */
+export function publishable<T extends { name?: unknown }>(shard: T): T {
+  return shard.name === WITHHELD ? { ...shard, name: UNNAMED } : shard
+}
+
+/** Everyone is heard: the default, and what the parts of the server built without a Listener use. */
+export const EVERYONE = new Listener('everyone', '', () => [])
+
+/** The parts of an item (a bag's entry, a chest's content) that carry its author's words. */
+interface Worded {
+  text?: string
+  shard?: { name: string }
+  key?: { name: string; about: string; model?: unknown }
+  chest?: { name: string; requires: string }
+  audio?: { title: string; about: string }
+}
+
+/**
+ * The item with its author's words withheld: a message's text, a shard's
+ * name, a key's name, about and model address, a chest's name and what it
+ * says it requires, an audio's title and about. Everything else (ids, kinds,
+ * keys, geometry, places) is the world and is kept. Never changes the object
+ * it is given.
+ */
+export function withholdWords<T extends Worded>(item: T): T {
+  const out: T = { ...item }
+  if (out.text !== undefined) out.text = WITHHELD
+  if (out.shard) out.shard = { ...out.shard, name: WITHHELD }
+  if (out.key) {
+    const { model: _model, ...key } = out.key
+    out.key = { ...key, name: WITHHELD, about: '' } as T['key']
+  }
+  if (out.chest) out.chest = { ...out.chest, name: WITHHELD, requires: out.chest.requires ? WITHHELD : out.chest.requires }
+  if (out.audio) out.audio = { ...out.audio, title: WITHHELD, about: '' }
+  return out
+}
+
+/**
+ * What the state directory kept from before listenTo became "operator", with
+ * every word another author wrote withheld, in memory: bags read by find
+ * (riddles, labels, key sentences, chest words), held items, contents taken
+ * from chests and chests seen. Each record is replaced only when it changes,
+ * and the store writes it as it is the next time it saves that file, so a
+ * stranger's words are dropped from the state too, never brought back.
+ */
+export function scrubSaved(keys: KeyStore, l: Listener): void {
+  if (!l.operatorOnly) return
+  const chestHeard = (id: string | undefined): boolean => {
+    const c = id ? keys.chests.get(id) : undefined
+    return !!c && l.hears(c.author)
+  }
+  for (const [id, b] of keys.bags) {
+    const entries = b.entries.map((e) => {
+      if (l.hears(e.author) && !e.chest?.contents?.some((c) => !(c.verified && l.hears(c.author)))) return e
+      const heard = l.hears(e.author)
+      return {
+        ...e,
+        label: heard ? e.label : WITHHELD,
+        ...(e.key ? { key: { ...e.key, about: heard ? e.key.about : '' } } : {}),
+        ...(e.chest ? {
+          chest: {
+            ...e.chest,
+            requires: heard ? e.chest.requires : (e.chest.requires ? WITHHELD : e.chest.requires),
+            ...(e.chest.contents ? { contents: e.chest.contents.map((c) => (c.verified && l.hears(c.author) ? c : { ...c, label: WITHHELD })) } : {}),
+          },
+        } : {}),
+      }
+    })
+    const riddle = l.hears(b.author) ? b.riddle : (b.riddle ? WITHHELD : b.riddle)
+    if (riddle !== b.riddle || entries.some((e, i) => e !== b.entries[i])) keys.bags.set(id, { ...b, riddle, entries })
+  }
+  for (const [id, i] of keys.items) {
+    const fromHeard = !i.from || chestHeard(i.from.chestId)
+    // An item out of a chest has only a claimed maker unless the chest is heard: its words count only then (review of #106).
+    const heard = l.hears(i.hider) && fromHeard
+    if (heard && fromHeard) continue
+    const { model: _m, animation: _a, carried: _c, ...rest } = i
+    keys.items.set(id, {
+      ...(heard ? i : { ...rest, name: WITHHELD, about: '' }),
+      ...(i.from ? { from: { ...i.from, chestName: fromHeard ? i.from.chestName : WITHHELD } } : {}),
+    })
+  }
+  for (const [id, t] of keys.taken) {
+    const fromHeard = chestHeard(t.from.chestId)
+    const heard = t.verified && l.hears(t.author) && fromHeard
+    if (heard) continue
+    // A taken object's payload keeps its name for render and place by id: withheld there too (review of #106).
+    const payload = t.payload && typeof t.payload === 'object' && !Array.isArray(t.payload) && 'name' in (t.payload as object) ? { ...(t.payload as Record<string, unknown>), name: WITHHELD } : t.payload
+    keys.taken.set(id, {
+      ...t,
+      name: WITHHELD, ...(t.text !== undefined ? { text: WITHHELD } : {}), ...(t.payload !== undefined ? { payload } : {}),
+      from: { ...t.from, chestName: fromHeard ? t.from.chestName : WITHHELD },
+    })
+  }
+  for (const [id, c] of keys.chests) {
+    // A chest found inside another counts as its author's only when that chest vouched for it.
+    if (l.hears(c.author) && (!c.inChest || c.vouches)) continue
+    keys.chests.set(id, { ...c, name: WITHHELD, requires: c.requires ? WITHHELD : c.requires })
+  }
+}

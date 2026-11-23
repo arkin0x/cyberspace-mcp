@@ -42,6 +42,8 @@ export class AvatarSizes {
     private readonly relays: { query(filter: Filter): Promise<NostrEvent[]> },
     private readonly log: (line: string) => void = () => {},
     private readonly now: () => number = Date.now,
+    /** Whose words reach the model (listenTo.ts): anyone else's avatar keeps its size, never its name. */
+    private readonly hears: (pubkey: string) => boolean = () => true,
   ) {}
 
   /** How far this pubkey's avatar reaches from its center, in gibsons: from memory, the default until read. Starts a read in the background when due. */
@@ -99,7 +101,7 @@ export class AvatarSizes {
           const ev = newest.get(pk)
           // A shape that has not paid is drawn as the default, so it is the default's size.
           const shard = ev ? paidShard(ev) : null
-          this.known.set(pk, { radius: avatarRadius(shard), name: shard?.name ?? null, at })
+          this.known.set(pk, { radius: avatarRadius(shard), name: this.hears(pk) ? shard?.name ?? null : null, at })
         }
       } catch (err) {
         this.log(`avatar read failed: ${err instanceof Error ? err.message : String(err)}`)

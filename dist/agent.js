@@ -73,6 +73,7 @@ import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS, Wallet } from './wall
 import { NOTICE_RELAY, UpdateWatch } from './updates.js';
 import { Placements } from './placed.js';
 import { DEFAULT_TRAVEL_PER_DAY, TravelLog, repeatsPrivate } from './travel.js';
+import { Listener, WITHHELD, publishable, scrubSaved, withholdWords } from './listenTo.js';
 export { Refusal } from './tool.js';
 /** Where publish_object counts what it published, so the daily limit survives a restart. */
 const PUBLISHED_FILE = 'published.json';
@@ -188,6 +189,8 @@ export class Agent {
     keys;
     chat;
     presence;
+    /** Whose words reach the model (listenTo.ts). */
+    listener;
     /** How far each nearby person's avatar reaches, read in the background (avatarSizes.ts). */
     avatars;
     budget;
@@ -296,18 +299,27 @@ export class Agent {
             // The operator channel is built below; these are called only from tool calls and the background, long after.
             undeliverable: () => this.operatorChannel.undeliverable(), messageOperator: (text) => this.operatorChannel.message(text), wallet: this.wallet,
         }, { manifestUrl: config.manifestUrl, fetch: config.lineFetch, threads: config.rideThreads ?? config.threads, now: config.rideClock, hosakaUrl: config.hosakaUrl, hosakaFetch: config.hosakaFetch, hosakaPollMs: config.hosakaPollMs, hosakaQuoteWaitMs: config.hosakaQuoteWaitMs });
+        // The operator the human configured, when there is one, else the one the profile names (identity refuses to name another).
+        this.listener = new Listener(config.listenTo ?? 'everyone', this.pubkey, () => {
+            const configured = this.config.operator ? parsePubkey(this.config.operator) : null;
+            return [configured ?? this.operatorOfProfile()];
+        });
+        // Words strangers wrote that the state kept from before are withheld too (listenTo.ts scrubSaved).
+        scrubSaved(this.keys, this.listener);
         this.chat = new Chat(dir, this.relays, this.keys, {
+            hears: (pubkey) => this.listener.hears(pubkey), operatorOnly: this.listener.operatorOnly,
             pubkey: this.pubkey, name: () => this.name, sign: (t) => this.sign(t), log: this.log,
             // The same operator DMs answer to: the one the profile names, unless the human configured another.
             operator: () => (this.operatorProblem() ? null : this.operatorOfProfile()),
             wakeMinutes: config.chatWakeMinutes,
         });
-        this.presence = new Presence(this.relays, this.pubkey, this.log);
-        this.presence.on('arrival', () => this.chat.arrival());
-        this.avatars = new AvatarSizes(this.relays, this.log);
+        this.presence = new Presence(this.relays, this.pubkey, this.log, (pubkey) => this.listener.hears(pubkey));
+        this.presence.on('arrival', (p) => this.chat.arrival(p.pubkey));
+        this.avatars = new AvatarSizes(this.relays, this.log, Date.now, (pubkey) => this.listener.hears(pubkey));
         // Someone arrives: their avatar is read now, so its size is known before the agent plans a landing near them.
         this.presence.on('arrival', (p) => this.avatars.want([p.pubkey]));
         this.operatorChannel = new OperatorChannel({
+            operatorOnly: this.listener.operatorOnly,
             pubkey: this.pubkey, relays: this.relays, dir, operator: () => this.operatorOfProfile(), operatorProblem: () => this.operatorProblem(), lookupRelays: config.lookupRelays ?? GENERAL_RELAYS,
             sign: (t) => this.sign(t),
             wrap: (recipient, text) => this.assertLock('seal a DM') ?? wrapMessage({ senderSk: this.sk, recipient, text, now: nowSeconds() }),
@@ -371,6 +383,7 @@ export class Agent {
                 return { key, ms };
             },
             summarize: (h, lookupId) => this.summarize(h, lookupId),
+            quiet: (h) => this.quietHidden(h),
             here: () => this.keeper.place(),
             maxHeight: MAX_KEY_HEIGHT, minHeight: SCAN_MIN_HEIGHT, log: this.log,
             // Locked rooms (DECK-0004 §3.7): a move into a room goes into its room bag; the last door of a room that holds things stays.
@@ -1464,6 +1477,9 @@ export class Agent {
             throw new Refusal(`pubkey must be an npub, an nprofile or a 64-hex pubkey; got ${JSON.stringify(input.pubkey)}.`);
         if (who === this.pubkey)
             throw new Refusal('That is your own pubkey. To leave something where you stand, use hide.');
+        // listenTo "operator" (arkinox, 2026-11-23: "No interaction"): a note is left for the operator only.
+        if (!this.listener.hears(who))
+            throw new Refusal('Not left: you interact only with your operator, so a note is for them alone.');
         const note = String(input.note ?? '');
         if (!note.trim())
             throw new Refusal('The note is empty: write what you want them to find.');
@@ -1685,7 +1701,19 @@ export class Agent {
      * later with an item found since, and one sealed to the agent or to an
      * item it holds is opened now.
      */
-    summarize(h, foundIn) {
+    /** listenTo "operator": a found item whose author is not heard, with its words withheld (listenTo.ts). */
+    quietHidden(h) {
+        return this.listener.hears(h.inner.pubkey) ? h : withholdWords(h);
+    }
+    /** listenTo "operator": a chest's contents, each item's words withheld unless its author is heard and verified (an unsigned item's author is only a claim). */
+    quietContents(contents) {
+        if (!this.listener.operatorOnly)
+            return contents;
+        return contents.map((c) => (c.verified && this.listener.hears(c.event.pubkey) ? c : { ...c, body: withholdWords(c.body) }));
+    }
+    summarize(given, foundIn) {
+        // Every bag read anywhere (find, hide, place, placed) is summarized here: another author's words are withheld first.
+        const h = this.quietHidden(given);
         const label = h.type === 'message' ? messagePreview(h.text ?? '', 80) : h.type === 'shard' ? (h.shard?.name ?? 'shard') : h.type === 'key' ? (h.key?.name ?? 'key') : h.type === 'audio' ? (h.audio ? audioLabel(h.audio) : 'audio') : (h.chest?.name ?? 'chest');
         const summary = {
             type: h.type, eventId: h.eventId, author: h.inner.pubkey, at: { x: h.at.x.toString(), y: h.at.y.toString(), z: h.at.z.toString() }, plane: h.plane, createdAt: h.createdAt, label,
@@ -1701,7 +1729,7 @@ export class Agent {
         if (h.key) {
             this.keys.holdItem({
                 itemPubkey: h.key.itemPubkey, secretHex: h.key.secretHex, name: h.key.name, about: h.key.about, foundIn, at: nowSeconds(),
-                source: h.inner.pubkey === this.pubkey ? 'forged' : 'found', hider: h.inner.pubkey, eventId: h.eventId, place, ...lookOf(h.key), carried: carriedTags(h.inner.tags),
+                source: h.inner.pubkey === this.pubkey ? 'forged' : 'found', hider: h.inner.pubkey, eventId: h.eventId, place, ...lookOf(h.key), carried: this.listener.hears(h.inner.pubkey) ? carriedTags(h.inner.tags) : [],
             });
             summary.key = { itemPubkey: h.key.itemPubkey, about: h.key.about };
         }
@@ -1716,7 +1744,7 @@ export class Agent {
                 try {
                     const secret = opener.by === 'key' ? opener.key.secretHex : bytesToHex(this.sk);
                     // Found in a bag, the chest was checked against the bag's signer: it vouches for its rumors.
-                    const contents = readContents(openWithSecret(h.chest, secret), h.inner.pubkey);
+                    const contents = this.quietContents(readContents(openWithSecret(h.chest, secret), h.inner.pubkey));
                     summary.chest = {
                         lock: h.chest.lockPubkey, requires: requiresLabel(h.chest), opened: true, openedWith: opener.by === 'key' ? 'held item' : 'own key',
                         contents: contents.map((c) => ({
@@ -1749,7 +1777,7 @@ export class Agent {
             if (c.body.key) {
                 this.keys.holdItem({
                     itemPubkey: c.body.key.itemPubkey, secretHex: c.body.key.secretHex, name: c.body.key.name, about: c.body.key.about, foundIn: chest.place.lookupId, at: nowSeconds(),
-                    source: 'found', hider: c.event.pubkey, eventId: c.id, place: chest.place, from, ...lookOf(c.body.key), carried: carriedTags(c.event.tags),
+                    source: 'found', hider: c.event.pubkey, eventId: c.id, place: chest.place, from, ...lookOf(c.body.key), carried: !this.listener.operatorOnly || (c.verified && this.listener.hears(c.event.pubkey)) ? carriedTags(c.event.tags) : [],
                 });
             }
             if (c.body.chest) {
@@ -1783,14 +1811,15 @@ export class Agent {
                 // Planes): only what stands in this plane is found here. An entry with
                 // no C took this plane from unbag's origin. What the other plane holds
                 // is counted, never summarized, so no item there is held from here.
-                const here = items.filter((h) => h.plane === plane || namesNoPlane(h));
+                // listenTo "operator": what anyone else wrote (names, messages, riddles) is withheld before it is summarized, held or kept.
+                const here = items.filter((h) => h.plane === plane || namesNoPlane(h)).map((h) => this.quietHidden(h));
                 // Not retrieved, counted as find counts what it lists: the references
                 // in this plane, or naming none, that did not resolve.
                 const refsHere = (await bagEntries(ev, regionKey)).filter((e) => isReference(e) && [null, plane].includes(planeOfEntry(e))).length;
                 const missingHere = Math.max(0, refsHere - here.filter((h) => h.ref).length);
                 const bag = {
                     lookupId: key.lookupId, bagId: ev.id, author: ev.pubkey, createdAt: ev.created_at, height: key.height, base: key.base,
-                    entries: here.map((h) => this.summarize(h, key.lookupId)), missing: missingHere, riddle: settings.riddle, hint: settings.hint, at: nowSeconds(),
+                    entries: here.map((h) => this.summarize(h, key.lookupId)), missing: missingHere, riddle: this.listener.text(ev.pubkey, settings.riddle), hint: settings.hint, at: nowSeconds(),
                     plane, elsewhere: items.length - here.length,
                 };
                 this.keys.noteBag(bag);
@@ -2160,7 +2189,7 @@ export class Agent {
             throw new Refusal('turn and scale go with kit (a kit piece); a payload you give is placed as it is.');
         // An object find or open_chest listed, or one taken from a chest, by its id: its payload is placed as given.
         if (input.id !== undefined && input.object === undefined && input.address === undefined) {
-            return this.hide({ contents: { object: toPayload(this.objectById(input.id).shard) }, coordinate: input.coordinate, height: input.height });
+            return this.hide({ contents: { object: publishable(toPayload(this.objectById(input.id).shard)) }, coordinate: input.coordinate, height: input.height });
         }
         if (input.object !== undefined) {
             const v = validateSnoPayload(input.object);
@@ -2172,9 +2201,17 @@ export class Agent {
             const { address, object } = await this.publicObject(input.address);
             if (object.tags.some((t) => t[0] === 'encrypted'))
                 throw new Refusal('That object is sealed to a place of its own; it cannot be placed elsewhere by reference. Place its payload instead.');
-            const check = validateSnoPayload(JSON.parse(object.content || 'null'));
+            let raw;
+            // Not JSON: refused in words of our own, never the parser's, which quote the content (review of #106).
+            try {
+                raw = JSON.parse(object.content || 'null');
+            }
+            catch {
+                raw = null;
+            }
+            const check = validateSnoPayload(raw);
             if (!check.ok)
-                throw new Refusal(`The object at ${address} is not valid SNO: ${check.errors.join(' ')}`);
+                throw new Refusal(`The object at ${address} is not valid SNO: ${this.snoErrors(object.pubkey, check.errors)}`);
             const here = this.keeper.place();
             const at = this.target(input.coordinate, here);
             // Placing another author's public object is a placement (DECK-0003 3.2): a reference entry, carried in the bag.
@@ -2203,7 +2240,21 @@ export class Agent {
         const object = await this.resolveReference(ref);
         if (!object)
             throw new Refusal(`No event at ${address} on the configured relays.`);
-        return { address, object };
+        if (this.listener.hears(object.pubkey))
+            return { address, object };
+        // listenTo "operator": another author's object is drawn, placed or worn, but its name never reaches the model.
+        let content = object.content;
+        try {
+            const raw = JSON.parse(object.content || 'null');
+            if (raw && typeof raw === 'object' && !Array.isArray(raw) && 'name' in raw)
+                content = JSON.stringify({ ...raw, name: WITHHELD });
+        }
+        catch { /* not JSON: validation says so, in words of its own */ }
+        return { address, object: { ...object, content } };
+    }
+    /** Why a payload is not valid SNO, in words: the validator quotes the payload, so another author's (listenTo "operator") gets one plain sentence. */
+    snoErrors(author, errors) {
+        return this.listener.hears(author) ? errors.join(' ') : 'it does not follow DECK-0003 section 1.9 (details withheld: it was written by someone other than your operator).';
     }
     /** Hide a reference entry in the agent's bag at a cube: the same read-before-write as hide. */
     async hideReference(ref, at, height, what) {
@@ -2318,7 +2369,7 @@ export class Agent {
             throw new Refusal(`The chest "${c.name}" (${handle(c.id)}) does not open for you: ${chestStatus(c, this.keys, this.pubkey).words}. A chest opens only with the item whose public key it is locked to (${c.lockPubkey}), or for the person it was sealed to. Find that item (find, or a chest you can open), and open_chest works.`);
         let contents;
         try {
-            contents = readContents(openWithSecret(c, opener.by === 'key' ? opener.key.secretHex : bytesToHex(this.sk)), sealerOfSeen(c));
+            contents = this.quietContents(readContents(openWithSecret(c, opener.by === 'key' ? opener.key.secretHex : bytesToHex(this.sk)), sealerOfSeen(c)));
         }
         catch (err) {
             throw new Refusal(`The chest "${c.name}" (${handle(c.id)}) did not open: ${err instanceof Error ? err.message : String(err)}`);
@@ -2406,7 +2457,7 @@ export class Agent {
                 ...(b.shard ? { payload: toPayload(b.shard) } : {}), ...(b.key ? { itemPubkey: b.key.itemPubkey } : {}),
             });
             if (b.key)
-                fresh = this.keys.holdItem({ itemPubkey: b.key.itemPubkey, secretHex: b.key.secretHex, name: b.key.name, about: b.key.about, foundIn: c.place.lookupId, at: now, source: 'taken', hider: e.event.pubkey, eventId: e.id, place: c.place, from, ...lookOf(b.key), carried: carriedTags(e.event.tags) }) || fresh;
+                fresh = this.keys.holdItem({ itemPubkey: b.key.itemPubkey, secretHex: b.key.secretHex, name: b.key.name, about: b.key.about, foundIn: c.place.lookupId, at: now, source: 'taken', hider: e.event.pubkey, eventId: e.id, place: c.place, from, ...lookOf(b.key), carried: !this.listener.operatorOnly || (e.verified && this.listener.hears(e.event.pubkey)) ? carriedTags(e.event.tags) : [] }) || fresh;
             (fresh ? took : already).push(row);
         }
         const text = [
@@ -2626,7 +2677,7 @@ export class Agent {
             }
             const check = validateSnoPayload(raw);
             if (!check.ok)
-                throw new Refusal(`The object at ${address} is not valid SNO, so it is not drawn: ${check.errors.join(' ')}`);
+                throw new Refusal(`The object at ${address} is not valid SNO, so it is not drawn: ${this.snoErrors(object.pubkey, check.errors)}`);
             shard = check.shard;
             source = `address ${address}`;
         }
@@ -2771,11 +2822,11 @@ export class Agent {
             }
             const v = validateSnoPayload(withWanted(raw));
             if (!v.ok)
-                throw new Refusal(`The object at ${address} is not valid SNO: ${v.errors.join(' ')}`);
+                throw new Refusal(`The object at ${address} is not valid SNO: ${this.snoErrors(object.pubkey, v.errors)}`);
             if (avatarTooLarge(v.bytes))
                 throw new Refusal(`Not set: the object at ${address} is too large for an avatar: ${avatarTooLargeWords(v.bytes)}.`);
-            shard = v.shard;
-            source = `address ${address} (payload copied: an avatar carries its shape, not a reference${v.repaired.includes(EYE_FIELD) ? '; its malformed eye is left out, so the eye is AUTO' : ''}${v.repaired.includes(FACE_FIELD) ? '; its malformed face is left out, so it faces along its path' : ''}${v.unknownFace !== undefined ? `; its face ${JSON.stringify(v.unknownFace)} is a facing this version does not know, carried as found and read as path` : ''})`;
+            shard = publishable(v.shard);
+            source = `address ${address} (payload copied: an avatar carries its shape, not a reference${v.repaired.includes(EYE_FIELD) ? '; its malformed eye is left out, so the eye is AUTO' : ''}${v.repaired.includes(FACE_FIELD) ? '; its malformed face is left out, so it faces along its path' : ''}${v.unknownFace !== undefined ? `; its face ${this.listener.hears(object.pubkey) ? JSON.stringify(v.unknownFace) : '(withheld)'} is a facing this version does not know, carried as found and read as path` : ''})`;
         }
         // A later second than the last avatar signed here, by waiting (at most a second), never by dating it ahead.
         while (nowSeconds() <= this.lastAvatarAt)

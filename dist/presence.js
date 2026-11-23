@@ -53,6 +53,7 @@ export class Presence extends EventEmitter {
     relays;
     me;
     log;
+    hears;
     people = new Map();
     sector = null;
     loading = false;
@@ -60,11 +61,14 @@ export class Presence extends EventEmitter {
     here = null;
     stopLive = null;
     profiles = new Map();
-    constructor(relays, me, log = () => { }) {
+    constructor(relays, me, log = () => { }, 
+    /** Whose words reach the model (listenTo.ts): a kind 0 of anyone else is read for its bot flag and operator, never its name. */
+    hears = () => true) {
         super();
         this.relays = relays;
         this.me = me;
         this.log = log;
+        this.hears = hears;
     }
     /** Enter the neighborhood around `at`: forget the old one, listen, then fetch. */
     async enter(at, now = Math.floor(Date.now() / 1000)) {
@@ -188,7 +192,8 @@ export class Presence extends EventEmitter {
                     newest.set(ev.pubkey, ev);
             }
             for (const pubkey of missing) {
-                const profile = readProfile(newest.get(pubkey));
+                const read = readProfile(newest.get(pubkey));
+                const profile = this.hears(pubkey) ? read : { ...read, name: null };
                 this.profiles.set(pubkey, profile);
                 const person = this.people.get(pubkey);
                 if (person)
