@@ -12,7 +12,9 @@
 //
 // `eye` (DECK-0003 1.17: where an avatar's own first-person viewer looks
 // from), which sno-core 0.1.31 reads, is kept in `extra` like `constrain`
-// when it is three whole numbers of ticks from -7680 to 7680. A malformed one
+// when it is three whole numbers of ticks within the position bound, from
+// -EYE_REACH to EYE_REACH (-491520 to 491520 since sno-core 0.1.34, which
+// moved the bound from 64 units to 4,096: DECK-0003 1.8). A malformed one
 // is left out and named in `repaired` (a reader takes it as the automatic eye,
 // and a publisher never writes one); set_avatar refuses it instead.
 //
@@ -32,7 +34,7 @@
 // in `ignored`, as every unknown field was before: this tool writes no table
 // until the spec section is merged (arkin0x/cyberspace#81), and then only with
 // keys under the agent's own pubkey and never into a public event.
-import { blankName, fromPayload, readOpacity, toPayload } from 'sno-core/shards';
+import { PART_REACH, blankName, fromPayload, readOpacity, toPayload } from 'sno-core/shards';
 import { EYE_FIELD, readEye } from 'sno-core/eye';
 import { DEFAULT_FACE, FACE_FIELD, readFace } from 'sno-core/face';
 import { faceNameShaped } from './faceName.js';
@@ -158,10 +160,10 @@ export function validateSnoPayload(raw) {
             p.parts.forEach((part, i) => {
                 const ok = Array.isArray(part) && part.length === 8 && part.every(isInt) &&
                     part[0] >= 0 && part[0] < refs &&
-                    [1, 2, 3].every((k) => part[k] >= -7680 && part[k] <= 7680) &&
+                    [1, 2, 3].every((k) => part[k] >= -PART_REACH && part[k] <= PART_REACH) &&
                     [4, 5, 6].every((k) => part[k] >= 0 && part[k] <= 359);
                 if (!ok)
-                    errors.push(`part ${i} must be eight integers: a refs index in range, three tick offsets in -7680..7680, three whole degrees 0..359, and a scale step (1.9 rule 12).`);
+                    errors.push(`part ${i} must be eight integers: a refs index in range, three tick offsets in ${-PART_REACH}..${PART_REACH}, three whole degrees 0..359, and a scale step (1.9 rule 12).`);
             });
         }
     }

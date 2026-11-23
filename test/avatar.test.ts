@@ -316,8 +316,8 @@ describe('set_avatar and the eye', () => {
     const sign = vi.spyOn(a as unknown as { sign: (t: unknown) => unknown }, 'sign')
     const before = sent()
     const pending = a.outbox.state().pending.length
-    for (const eye of [[0, 159], [0, 159, 0, 0], [0, 1.5, 0], [0, 7681, 0], [-7681, 0, 0], '0, 159, 0', true]) {
-      await expect(a.setAvatar({ object: { ...wedge, eye } })).rejects.toThrow(/Not set: "eye" must be three whole numbers of ticks \(120 a unit\), each from -7680 to 7680 \(DECK-0003 1\.17\); got .*Leave eye out \(or null\) for the automatic eye\. Nothing was signed or published\./)
+    for (const eye of [[0, 159], [0, 159, 0, 0], [0, 1.5, 0], [0, 491521, 0], [-491521, 0, 0], '0, 159, 0', true]) {
+      await expect(a.setAvatar({ object: { ...wedge, eye } })).rejects.toThrow(/Not set: "eye" must be three whole numbers of ticks \(120 a unit\), each from -491520 to 491520 \(DECK-0003 1\.17\); got .*Leave eye out \(or null\) for the automatic eye\. Nothing was signed or published\./)
       // As a JSON string, too.
       await expect(a.setAvatar({ object: JSON.stringify({ ...wedge, eye }) })).rejects.toThrow(/Not set: "eye" must be/)
     }
@@ -397,6 +397,16 @@ describe('set_avatar and the eye', () => {
     expect(both.text).toContain('the shape reaches 8 gibsons, so it is drawn at 0.5 of true scale and the eye with it, and the eye is then brought straight in toward your origin, to 0, 0, 4 gibsons from your origin.')
   }, 30_000)
 
+  it('takes an eye out to the 4,096-unit bound (DECK-0003 1.8): 7681 ticks, once past the 64-unit bound, and 491520 itself', async () => {
+    const a = await start()
+    const past64 = await a.setAvatar({ object: { ...wedge2, eye: [0, 7681, 0] } })
+    expect(past64.text).toContain('eye CHOSEN 0, 7681, 0 ticks')
+    expect(JSON.parse(avatarsOf(a.pubkey).at(-1)!.content).eye).toEqual([0, 7681, 0])
+    const edge = await a.setAvatar({ object: { ...wedge2, eye: [-491520, 0, 491520] } })
+    expect(edge.text).toContain('eye CHOSEN -491520, 0, 491520 ticks')
+    expect(JSON.parse(avatarsOf(a.pubkey).at(-1)!.content).eye).toEqual([-491520, 0, 491520])
+  }, 30_000)
+
   it('leaves out a malformed eye in an object copied by address, so the eye is AUTO', async () => {
     const a = await start()
     const author = generateSecretKey()
@@ -433,7 +443,7 @@ describe('set_avatar and the eye', () => {
     expect(JSON.parse(ev.content).eye).toEqual([0, 159, -60])
     const bad = await a.publishObject({ object: { ...wedge2, eye: [0, 159] } })
     expect(JSON.parse(canonical.published.find((e) => e.id === bad.data.eventId)!.content)).not.toHaveProperty('eye')
-    expect(bad.text).toContain('"eye" was not three whole numbers of ticks from -7680 to 7680, so it is left out')
+    expect(bad.text).toContain('"eye" was not three whole numbers of ticks from -491520 to 491520, so it is left out')
   }, 30_000)
 
   it('validate_object names an eye it finds in one line, a malformed one as left out, and opacity 0 in one line', async () => {
@@ -444,7 +454,7 @@ describe('set_avatar and the eye', () => {
     const bad = a.validateObject({ payload: { ...wedge, eye: [0, 159] } })
     expect(bad.data.valid).toBe(true)
     expect(bad.data.repaired).toEqual(['eye'])
-    expect(bad.text).toContain('"eye" was not three whole numbers of ticks from -7680 to 7680, so it is left out')
+    expect(bad.text).toContain('"eye" was not three whole numbers of ticks from -491520 to 491520, so it is left out')
     expect(a.validateObject({ payload: wedge }).text).not.toMatch(/eye|opacity/i)
     expect(a.validateObject({ payload: { ...wedge, opacity: 0 } }).text).toContain('Opacity 0: a reader draws nothing of this object\'s own (DECK-0003 1.11; a glow still shows).')
   }, 30_000)
