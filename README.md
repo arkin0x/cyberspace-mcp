@@ -47,11 +47,11 @@ To work on it, use a clone:
 ```sh
 git clone https://github.com/arkin0x/cyberspace-mcp.git
 cd cyberspace-mcp
-npm ci
+npm ci --ignore-scripts   # nothing needs an install script: dist is committed
 npm i -g .           # optional: the global command points into this folder; keep it
 ```
 
-`cyberspace-core` and `sno-core` are installed from GitHub at the exact commits ONOSENDAI pins, so the events this server builds are the events ONOSENDAI builds. Both are pinned as `git+https` URLs; npm records hosted GitHub dependencies as `git+ssh` in the lockfile by design and clones over https first, so `npm ci` needs no SSH key (ONOSENDAI's lockfile reads the same way).
+`cyberspace-core` and `sno-core` are installed from GitHub at the exact commits ONOSENDAI pins, so the events this server builds are the events ONOSENDAI builds. Both are pinned as `git+https` URLs; npm records hosted GitHub dependencies as `git+ssh` in the lockfile by design and clones over https first, so `npm ci` needs no SSH key (ONOSENDAI's lockfile reads the same way). Both are pinned by full commit hash, never by a tag that could move, and every registry package in the lockfile carries its sha512 hash; `npm run check:lockfile` (run in CI) refuses a lockfile that loses either.
 
 Then run it. With no `--state` it uses `$CYBERSPACE_MCP_STATE`, else `~/.cyberspace-mcp`, the same directory `init` and `serve` use; pass `--state` for an agent of its own. The directory is created if it does not exist; the key is created on the first run.
 
