@@ -167,23 +167,25 @@ describe('the waker', () => {
   // Security review 2026-11-23: chat text is anyone's. Before, a stranger's turn could call any tool (hop, a paid HOSAKA
   // ride, publish_object, identity, message_operator) and wake_again, which bought up to maxContinuations work turns on the
   // full model; only the prompt said not to.
-  it('holds a turn woken by a stranger to reading and say, and gives it no continuation', async () => {
+  // Spending, publishing, the profile, the operator's DMs (inbox), the STRATEGY (whereami), coins taken from chests (items),
+  // kit payloads (kit_piece) and the work budget (look, find) are all out of a stranger's reach.
+  const REFUSED = ['ride', 'hop', 'board', 'publish_object', 'set_avatar', 'identity', 'message_operator', 'log_travel', 'hide', 'place', 'comment', 'visit',
+    'follow_operator', 'roam', 'wallet', 'wait_for', 'inbox', 'whereami', 'items', 'kit_piece', 'kit', 'look', 'find', 'render', 'orders_waiting', 'work_done']
+  it('holds a turn woken by a stranger to listen and say, and gives it no continuation', async () => {
     const t = setup('slow', { chatStrangerMinutes: 5 }, 'slow')
     t.set({ orders: 0, chatHeard: { wake: 'stranger', addressed: 1 } })
     const seen: Record<string, string | null> = {}
     let again: unknown = null
     const during = setTimeout(() => {
-      for (const name of ['ride', 'hop', 'board', 'publish_object', 'set_avatar', 'identity', 'message_operator', 'log_travel', 'hide', 'place', 'comment', 'visit', 'follow_operator', 'roam', 'wallet', 'wait_for', 'say', 'inbox', 'listen', 'look', 'whereami']) seen[name] = t.waker.gate(name, false)
+      for (const name of [...REFUSED, 'say', 'listen']) seen[name] = t.waker.gate(name, false)
       try { t.waker.requestAgain() } catch (err) { again = err }
       // A model with a shell could leave the file instead of calling the tool.
       writeFileSync(join(t.dir, AGAIN_FILE), '')
     }, 100)
     await t.waker.tick()
     clearTimeout(during)
-    for (const name of ['ride', 'hop', 'board', 'publish_object', 'set_avatar', 'identity', 'message_operator', 'log_travel', 'hide', 'place', 'comment', 'visit', 'follow_operator', 'roam', 'wallet', 'wait_for']) {
-      expect(seen[name], name).toMatch(/woken by a stranger's chat line/)
-    }
-    for (const name of ['say', 'inbox', 'listen', 'look', 'whereami']) expect(seen[name], name).toBeNull()
+    for (const name of REFUSED) expect(seen[name], name).toMatch(/woken by a stranger's chat line/)
+    for (const name of ['say', 'listen']) expect(seen[name], name).toBeNull()
     expect(String(again)).toMatch(/asks for no more turns/)
     expect(existsSync(join(t.dir, AGAIN_FILE))).toBe(false)
     // No continuation follows, and the gate is open again once the turn is over.
@@ -433,6 +435,25 @@ describe('open work (arkinox, 2026-10-22: a long STRATEGY stalled after "On it")
     for (let i = 0; i < 3; i++) { t.advance(10 * 60_000); await t.waker.tick() }
     expect(t.turns()).toHaveLength(2)
     expect(t.dms).toHaveLength(1)
+    t.cleanup()
+  })
+
+  it('never counts a stranger\'s turn as a work turn on open orders, even with no reply command', async () => {
+    const t = setup('slow', { chatStrangerMinutes: 5 })
+    t.waker.onInbox(inboxWith(ORDER))
+    await t.waker.tick()
+    const before = t.waker.openWork?.workTurns
+    const idle = t.waker.openWork?.idleTurns
+    t.advance(10 * 60_000)
+    t.set({ orders: 0, chatHeard: { wake: 'stranger', addressed: 1 } })
+    // Mid-turn the model (with a shell) leaves a wake.again; it must not stand in for a resume.
+    const during = setTimeout(() => writeFileSync(join(t.dir, AGAIN_FILE), ''), 100)
+    await t.waker.tick()
+    clearTimeout(during)
+    expect(t.turns().at(-1)?.reason).toBe('chat: stranger (1 addressed)')
+    expect(t.waker.openWork?.workTurns).toBe(before)
+    expect(t.waker.openWork?.idleTurns).toBe(idle)
+    expect(existsSync(join(t.dir, AGAIN_FILE))).toBe(false)
     t.cleanup()
   })
 
