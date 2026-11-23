@@ -39,9 +39,13 @@ export const RENDER_MAX_FACES = 100_000;
  * The most supersampled pixels the faces' bounding boxes may cover between
  * them (security review, 2026-11-23): a few kilobytes of anyone's object,
  * thousands of faces each filling the picture, held the server for minutes.
- * About a second of drawing; an ordinary object covers a small part of it.
+ * About three seconds of drawing, as long as a large real kit layout takes
+ * (32 of the landscape kit's heaviest tiles in iso at 1024 cover about 107
+ * pictures); an ordinary object covers a small part of it.
  */
-export const RENDER_MAX_FILL = 400_000_000;
+export const RENDER_MAX_FILL = 1_200_000_000;
+/** What one pixel of a line or a point costs against RENDER_MAX_FILL, in face pixels. */
+const LINE_PIXEL_WEIGHT = 10;
 /**
  * The hex handle find and look print for an object, and render takes: its
  * event id when it has one of its own, or for a public object placed by
@@ -224,6 +228,20 @@ export function renderShard(shard, opts = {}) {
         if (w > 0 && h > 0)
             fill += (w + 1) * (h + 1);
     }
+    // Lines and points count too (review of #101: a lines-mode object drew every edge outside the budget): each step of a
+    // line paints a square of (2 reach + 1)^2 pixels, each point a square of (2 r + 1)^2, wherever the frame is. Such a
+    // pixel costs about LINE_PIXEL_WEIGHT times a face's (measured: 7,140 edges, 2.3e8 pixels, 5 s).
+    const lineReach = Math.max(0, Math.ceil((SS * Math.max(1, view.size / 512)) / 2 - 0.5));
+    if (shard.mode === 'lines') {
+        const edges = shard.faces.length > 0 ? faceEdges(shard.faces) : Array.from({ length: Math.max(0, nv - 1) }, (_, i) => [i, i + 1]).flat();
+        for (let i = 0; i + 1 < edges.length && fill <= RENDER_MAX_FILL; i += 2) {
+            const a = edges[i], b = edges[i + 1];
+            const steps = Math.max(1, Math.ceil(Math.max(Math.abs(X[b] - X[a]), Math.abs(Y[b] - Y[a]))));
+            fill += (steps + 1) * (2 * lineReach + 1) ** 2 * LINE_PIXEL_WEIGHT;
+        }
+    }
+    if (shard.mode !== 'solid' || faces.length === 0)
+        fill += nv * (2 * Math.ceil(SS * Math.max(1.5, view.size / 170)) + 1) ** 2 * LINE_PIXEL_WEIGHT;
     if (fill > RENDER_MAX_FILL)
         throw new Error(`The object's faces would cover the picture ${Math.round(fill / (W * W))} times over; render draws at most ${Math.floor(RENDER_MAX_FILL / (W * W))}. Try a smaller size, or look at it in ONOSENDAI.`);
     const normals = new Float32Array(faces.length * 3);

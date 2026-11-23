@@ -170,3 +170,32 @@ describe('render of anyone\'s object', () => {
     if (one.ok) expect(() => renderShard(one.shard, { view: 'front', size: 1024 })).not.toThrow()
   })
 })
+
+describe('render of anyone\'s object, lines mode (review of #101)', () => {
+  it('counts every edge a lines-mode object draws against the same budget', async () => {
+    const { renderShard } = await import('../src/render.js')
+    const { validateSnoPayload } = await import('../src/sno.js')
+    const n = 120
+    const vertices = Array.from({ length: n }, (_, i) => [Math.round(1000 * Math.cos((2 * Math.PI * i) / n)), Math.round(1000 * Math.sin((2 * Math.PI * i) / n)), 0])
+    const faces: number[][] = []
+    for (let a = 0; a < n && faces.length < 7140; a++) for (let b = a + 1; b < n && faces.length < 7140; b++) { const c = (b + 1) % n; if (c !== a) faces.push([a, b, c]) }
+    const v = validateSnoPayload({ v: 2, name: 'x', unit: 0, mode: 'lines', vertices, colors: vertices.map(() => 7), faces })
+    expect(v.ok).toBe(true)
+    if (!v.ok) return
+    const t = performance.now()
+    // Before: 2.7 s of drawing at size 1024 (the solid twin was refused in 9 ms).
+    expect(() => renderShard(v.shard, { view: 'front', size: 1024 })).toThrow(/cover the picture/)
+    expect(performance.now() - t).toBeLessThan(1500)
+  })
+})
+
+describe('chat history saved before the fix', () => {
+  it('reads a saved line dated in the future as heard when it was heard', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sec-chat-load-'))
+    const now = nowSeconds()
+    StateDir.open(dir)
+    writeFileSync(join(dir, 'chat.json'), JSON.stringify({ version: 1, lines: [{ id: 'a'.repeat(64), from: 'b'.repeat(64), text: 'x', at: 9_999_999_999, region: lookupId, height: 12, mine: false, addressed: false, heardAt: now - 100 }], lastSaidAt: null, unpromptedAllowance: 1, lastListenAt: null }))
+    const chat = room(dir, 'c'.repeat(64), 'd'.repeat(64))
+    expect(chat.lines[0].at).toBe(now - 100)
+  })
+})

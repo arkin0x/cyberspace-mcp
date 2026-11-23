@@ -150,7 +150,8 @@ export class Chat extends EventEmitter {
         this.npub = nip19.npubEncode(me.pubkey);
         const saved = dir.readJson(FILE, null);
         if (saved?.version === 1) {
-            this.lines = Array.isArray(saved.lines) ? saved.lines : [];
+            // A line saved before the clamp below may be dated in the future; it is read as heard when it was heard (security review, 2026-11-23).
+            this.lines = (Array.isArray(saved.lines) ? saved.lines : []).map((l) => (typeof l.at === 'number' && typeof l.heardAt === 'number' && l.at > l.heardAt + 60 ? { ...l, at: l.heardAt } : l));
             this.lastSaidAt = saved.lastSaidAt ?? null;
             this.unpromptedAllowance = typeof saved.unpromptedAllowance === 'number' ? saved.unpromptedAllowance : 1;
             this.lastListenAt = saved.lastListenAt ?? null;
@@ -247,7 +248,8 @@ export class Chat extends EventEmitter {
         if (!replyTo)
             this.unpromptedAllowance--;
         const line = { id: inner.id, from: inner.pubkey, text: inner.content, at: inner.created_at, region: key.lookupId, height: key.height, mine: true, addressed: false, heardAt: now, plane: place.plane };
-        this.lines = mergeLines(this.lines, [line]);
+        const operator = this.operator();
+        this.lines = mergeLines(this.lines, [line], (l) => !!l.unread && operator !== null && l.from === operator);
         this.save();
         return { id: inner.id, region: key.lookupId, accepted: result.accepted, reasons: result.reasons };
     }
