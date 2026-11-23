@@ -9,6 +9,27 @@ import { validateSnoPayload } from '../src/sno.js'
 
 const tri = { v: 2, name: 'Tri', unit: 0, mode: 'solid', vertices: [[0, 0, 0], [1, 0, 0], [0, 1, 0]], colors: [238, 238, 238], faces: [[0, 1, 2]] }
 
+describe('placements (DECK-0003 1.9 rule 12) within the 4,096-unit position bound', () => {
+  const address = `33331:${'ab'.repeat(32)}:water`
+  const placed = (x: number, y: number, z: number) => validateSnoPayload({ ...tri, refs: [['a', address]], parts: [[0, x, y, z, 0, 0, 0, 0]] })
+
+  it('accept an offset of 491520 ticks (4,096 units) on any axis, either way, and 7681 ticks, past the old 64-unit bound', () => {
+    for (const at of [[491520, 0, 0], [0, -491520, 0], [0, 0, 491520], [-491520, 491520, -491520], [7681, -7681, 7681]] as Array<[number, number, number]>) {
+      const v = placed(...at)
+      expect(v.ok).toBe(true)
+      expect(v.ok && v.payload.parts).toEqual([[0, ...at, 0, 0, 0, 0]])
+    }
+  })
+
+  it('refuse an offset of 491521 ticks, one past the bound, naming the range', () => {
+    for (const at of [[491521, 0, 0], [0, -491521, 0], [0, 0, 491521]] as Array<[number, number, number]>) {
+      const v = placed(...at)
+      expect(v.ok).toBe(false)
+      expect(!v.ok && v.errors).toEqual(['part 0 must be eight integers: a refs index in range, three tick offsets in -491520..491520, three whole degrees 0..359, and a scale step (1.9 rule 12).'])
+    }
+  })
+})
+
 describe('fields this tool does not know', () => {
   it('are left out of the payload and named', () => {
     const v = validateSnoPayload({ ...tri, description: 'a note', blob: 'x'.repeat(40), type: 'shard' })
@@ -39,11 +60,19 @@ describe('fields this tool does not know', () => {
     // A version 1 payload's eye is read into the version 2 frame with its vertices.
     const v1 = validateSnoPayload({ ...tri, v: 1, colors: [[1, 1, 1], [1, 1, 1], [1, 1, 1]], eye: [0, 159, -60] })
     expect(v1.ok && (v1.payload as unknown as Record<string, unknown>).eye).toEqual([0, 159, 60])
-    for (const eye of [[0, 159], [0, 1.5, 0], [0, 7681, 0], 'up', null]) {
+    for (const eye of [[0, 159], [0, 1.5, 0], [0, 491521, 0], [-491521, 0, 0], 'up', null]) {
       const bad = validateSnoPayload({ ...tri, eye })
       expect(bad.ok && bad.repaired).toEqual(['eye'])
       expect(bad.ok && bad.ignored).toEqual([])
       expect(bad.ok && bad.payload).not.toHaveProperty('eye')
+    }
+  })
+
+  it('keep an `eye` anywhere within the 4,096-unit bound (DECK-0003 1.8): 7681 ticks, once out of range, and 491520 ticks itself', () => {
+    for (const eye of [[0, 7681, 0], [491520, -491520, 0]]) {
+      const v = validateSnoPayload({ ...tri, eye })
+      expect(v.ok && v.repaired).toEqual([])
+      expect(v.ok && (v.payload as unknown as Record<string, unknown>).eye).toEqual(eye)
     }
   })
 
