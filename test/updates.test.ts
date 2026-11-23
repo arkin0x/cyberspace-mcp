@@ -8,9 +8,11 @@
 // says so, keeps moving and looking, and an upgrade clears it. The operator
 // hears once by DM.
 
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { Agent } from '../src/agent.js'
@@ -437,4 +439,53 @@ describe('doctor', () => {
     // A forged one is not believed.
     expect(await doctorWith('0.1.0', [release(generateSecretKey(), { version: '0.2.0', minSafe: '0.2.0' }, nowSeconds() - 60)])).toMatchObject({ verdict: 'info' })
   }, 60_000)
+})
+
+describe('scripts/publish-update-notice.mjs', () => {
+  const script = fileURLToPath(new URL('../scripts/publish-update-notice.mjs', import.meta.url))
+
+  function setup(): { key: string; sha: string; secret: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'cyberspace-mcp-publish-'))
+    const secret = Buffer.from(generateSecretKey()).toString('hex')
+    const key = join(dir, 'release.key')
+    writeFileSync(key, `${secret}\n`, { mode: 0o600 })
+    const sha = join(dir, 'cyberspace-mcp-0.1.0.tar.gz.sha256')
+    writeFileSync(sha, `${'f'.repeat(64)}  cyberspace-mcp-0.1.0.tar.gz\n`)
+    return { key, sha, secret }
+  }
+
+  const run = (args: string[]): { code: number; out: string; err: string } => {
+    const r = spawnSync(process.execPath, [script, ...args], { encoding: 'utf8' })
+    return { code: r.status ?? -1, out: r.stdout, err: r.stderr }
+  }
+
+  it('dry run: builds the 32267, 3063 and 30063, reads the release back with the server\'s parser, withholds the signatures and never prints the secret', () => {
+    const { key, sha, secret } = setup()
+    const r = run(['--key', key, '--version', '0.1.0', '--sha256-file', sha, '--note', 'First signed release.', '--security', '--min-safe', '0.1.0', '--commit', 'a'.repeat(40)])
+    expect(r.code).toBe(0)
+    expect(r.out + r.err).not.toContain(secret)
+    const d = JSON.parse(r.out) as { dryRun: boolean; events: Record<string, NostrEvent>; readsAs: Record<string, unknown> }
+    expect(d.dryRun).toBe(true)
+    expect(Object.values(d.events).map((e) => e.kind)).toEqual([APP_KIND, 3063, RELEASE_KIND])
+    for (const e of Object.values(d.events)) expect(e.sig).toMatch(/withheld/)
+    const rel = d.events.release
+    expect(rel.tags).toContainEqual(['d', 'cyberspace-mcp@0.1.0'])
+    expect(rel.tags).toContainEqual(['e', d.events.asset.id, 'wss://relay.onosendai.tech'])
+    expect(rel.tags).toContainEqual(['a', `${APP_KIND}:${rel.pubkey}:${APP_ID}`, 'wss://relay.onosendai.tech'])
+    expect(d.events.asset.tags).toContainEqual(['x', 'f'.repeat(64)])
+    expect(d.events.asset.tags).toContainEqual(['min_allowed_version', '0.1.0'])
+    expect(d.readsAs).toMatchObject({ version: '0.1.0', minSafe: '0.1.0', security: true, note: 'First signed release.' })
+    expect(r.err).toContain('not the release key')
+  })
+
+  it('refuses to publish with any key but the release key, a note with a link, a minimum above the version, and unknown flags', () => {
+    const { key, sha } = setup()
+    const base = ['--key', key, '--version', '0.1.0', '--sha256-file', sha, '--commit', 'a'.repeat(40)]
+    const pub = run([...base, '--note', 'x', '--publish'])
+    expect(pub.code).toBe(1)
+    expect(pub.err).toMatch(/not the release key/)
+    expect(run([...base, '--note', 'see https://example.com']).err).toMatch(/no link/)
+    expect(run([...base, '--note', 'x', '--min-safe', '0.2.0']).err).toMatch(/cannot be above/)
+    expect(run([...base, '--note', 'x', '--yes']).err).toMatch(/unknown argument/)
+  })
 })
