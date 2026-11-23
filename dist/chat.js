@@ -110,12 +110,10 @@ export function addressesMe(text, me) {
     // ONOSENDAI's @mention writes, or its key in the text as NIP-27 writes it.
     return false;
 }
-/** Every pubkey a line names: npub, nprofile (nostr: or bare) and 64-hex, lowercased. */
+/** Every pubkey a line names: npub and nprofile (nostr: or bare). Not 64-hex: coordinates and ids are 64-hex too (review of #106). */
 export function mentionedPubkeys(text) {
     const out = new Set();
     const lower = text.toLowerCase();
-    for (const m of lower.matchAll(/\b[0-9a-f]{64}\b/g))
-        out.add(m[0]);
     for (const m of lower.matchAll(/(npub1|nprofile1)[02-9ac-hj-np-z]+/g)) {
         try {
             const d = nip19.decode(m[0]);

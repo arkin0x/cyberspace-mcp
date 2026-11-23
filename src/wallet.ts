@@ -93,6 +93,8 @@ export interface WalletOptions {
   now?: () => number
   /** Tests: how long a pay_invoice answer is waited for. */
   payTimeoutMs?: number
+  /** Why paying is switched off right now (a copy below the update notice's min_safe, updates.ts), or null. */
+  refuse?: () => string | null
 }
 
 /** What the server may do with one invoice: pay it, or say why not. */
@@ -126,6 +128,7 @@ export class Wallet {
   private readonly client: NwcClient | null
   private readonly now: () => number
   private readonly payTimeoutMs: number | undefined
+  private readonly refuse: () => string | null
   private ledger: Ledger
   private info: NwcInfo | null = null
 
@@ -134,6 +137,7 @@ export class Wallet {
     this.maxDailySats = opts.maxDailySats
     this.now = opts.now ?? Date.now
     this.payTimeoutMs = opts.payTimeoutMs
+    this.refuse = opts.refuse ?? (() => null)
     this.client = opts.nwc ? new NwcClient(parseNwc(opts.nwc, opts.source), { websocketImplementation: opts.websocketImplementation, maxWaitMs: opts.maxWaitMs, log: opts.log, beforePublish: opts.beforePublish }) : null
     const saved = dir.readJson<Ledger | null>(LEDGER_FILE, null)
     this.ledger = saved?.version === 1 && Array.isArray(saved.payments) ? saved : { version: 1, payments: [] }
@@ -191,6 +195,8 @@ export class Wallet {
     const no = (reason: string): PayDecision => ({ pay: false, reason, invoice })
     if (!this.client) return no('no wallet is connected to this server')
     if (this.maxPaymentSats <= 0 || this.maxDailySats <= 0) return no('your operator set a limit of 0, which turns paying off')
+    const off = this.refuse()
+    if (off) return no(off)
     const earlier = this.attemptFor(ctx.depositId) ?? this.ledger.payments.find((p) => p.paymentHash === invoice.paymentHash)
     if (earlier) return no(`a payment of this invoice was already attempted (${earlier.state}), and an invoice is never paid twice`)
     const ride = this.attemptsFor(ctx.rideKey).find((p) => p.state !== 'failed')
@@ -269,12 +275,13 @@ export class Wallet {
       `A Nostr Wallet Connect wallet is connected${reachable ? '' : ', but it could not be reached just now'}.${problem ? ` (${problem})` : ''}`,
       balanceSats !== null ? `Balance: ${balanceSats} sats.` : reachable ? 'The wallet does not report its balance.' : '',
       reachable && !canPay ? 'The wallet does not offer pay_invoice, so nothing can be paid from it.' : '',
+      this.refuse() ? `Paying is switched off: ${this.refuse()}.` : '',
       `Spent in the last 24 hours: ${spent} of ${this.maxDailySats} sats; one payment may be at most ${this.maxPaymentSats} sats.`,
       rules,
     ].filter(Boolean).join(' ')
     return {
       text,
-      data: { connected: true, reachable, canPay, encryption: this.info?.encryption ?? null, balanceSats, spentLast24hSats: spent, remainingTodaySats: Math.max(0, this.maxDailySats - spent), limits, payments: recent, problem },
+      data: { connected: true, reachable, canPay, paymentsOff: this.refuse(), encryption: this.info?.encryption ?? null, balanceSats, spentLast24hSats: spent, remainingTodaySats: Math.max(0, this.maxDailySats - spent), limits, payments: recent, problem },
     }
   }
 

@@ -51,6 +51,12 @@ export class Listener {
         return this.hears(author) ? value : fallback;
     }
 }
+/** The name a withheld object goes out under when the agent publishes a copy of it (place by id, set_avatar by address): the placeholder never leaves the server. */
+export const UNNAMED = 'untitled';
+/** A shard (or payload) to be signed by the agent: a withheld name becomes UNNAMED. */
+export function publishable(shard) {
+    return shard.name === WITHHELD ? { ...shard, name: UNNAMED } : shard;
+}
 /** Everyone is heard: the default, and what the parts of the server built without a Listener use. */
 export const EVERYONE = new Listener('everyone', '', () => []);
 /**
@@ -114,8 +120,9 @@ export function scrubSaved(keys, l) {
             keys.bags.set(id, { ...b, riddle, entries });
     }
     for (const [id, i] of keys.items) {
-        const heard = l.hears(i.hider);
         const fromHeard = !i.from || chestHeard(i.from.chestId);
+        // An item out of a chest has only a claimed maker unless the chest is heard: its words count only then (review of #106).
+        const heard = l.hears(i.hider) && fromHeard;
         if (heard && fromHeard)
             continue;
         const { model: _m, animation: _a, carried: _c, ...rest } = i;
@@ -125,18 +132,21 @@ export function scrubSaved(keys, l) {
         });
     }
     for (const [id, t] of keys.taken) {
-        const heard = t.verified && l.hears(t.author);
         const fromHeard = chestHeard(t.from.chestId);
-        if (heard && fromHeard)
+        const heard = t.verified && l.hears(t.author) && fromHeard;
+        if (heard)
             continue;
+        // A taken object's payload keeps its name for render and place by id: withheld there too (review of #106).
+        const payload = t.payload && typeof t.payload === 'object' && !Array.isArray(t.payload) && 'name' in t.payload ? { ...t.payload, name: WITHHELD } : t.payload;
         keys.taken.set(id, {
             ...t,
-            ...(heard ? {} : { name: WITHHELD, ...(t.text !== undefined ? { text: WITHHELD } : {}) }),
+            name: WITHHELD, ...(t.text !== undefined ? { text: WITHHELD } : {}), ...(t.payload !== undefined ? { payload } : {}),
             from: { ...t.from, chestName: fromHeard ? t.from.chestName : WITHHELD },
         });
     }
     for (const [id, c] of keys.chests) {
-        if (l.hears(c.author))
+        // A chest found inside another counts as its author's only when that chest vouched for it.
+        if (l.hears(c.author) && (!c.inChest || c.vouches))
             continue;
         keys.chests.set(id, { ...c, name: WITHHELD, requires: c.requires ? WITHHELD : c.requires });
     }
