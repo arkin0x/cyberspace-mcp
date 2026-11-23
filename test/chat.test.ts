@@ -48,3 +48,17 @@ describe('addressing', () => {
     expect(addressesMe('hello', { ...me, name: null })).toBe(false)
   })
 })
+
+describe('saying a line', () => {
+  // Security review 2026-11-23: chat is public, and a coin taken from a chest could be talked out of the agent into it.
+  it('refuses a Cashu token, which anyone who reads the room could spend', async () => {
+    const { mkdtempSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const { Chat } = await import('../src/chat.js')
+    const { StateDir } = await import('../src/state/dir.js')
+    const chat = new Chat(StateDir.open(mkdtempSync(join(tmpdir(), 'chat-cashu-'))), {} as never, {} as never, { pubkey: 'a'.repeat(64), name: () => null, sign: () => { throw new Error('no') }, operator: () => null })
+    expect(chat.refusal('here you go: cashuBo2FteCJodHRwczovL21pbnQuZXhhbXBsZS5jb20', undefined)).toMatch(/Cashu token/)
+    expect(chat.refusal('hello', undefined)).not.toMatch(/Cashu token/)
+  })
+})
