@@ -81,7 +81,7 @@ import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS, Wallet } from './wall
 import { Placements } from './placed.js'
 import { DEFAULT_TRAVEL_PER_DAY, TravelLog, repeatsPrivate, type TravelLogSettings } from './travel.js'
 import type { Progress } from './progress.js'
-import { Listener, WITHHELD, scrubSaved, withholdWords } from './listenTo.js'
+import { Listener, WITHHELD, publishable, scrubSaved, withholdWords } from './listenTo.js'
 import type { ListenTo } from './config.js'
 
 export { Refusal, type ToolResult } from './tool.js'
@@ -1574,6 +1574,8 @@ export class Agent {
     const who = parsePubkey(String(input.pubkey ?? ''))
     if (!who) throw new Refusal(`pubkey must be an npub, an nprofile or a 64-hex pubkey; got ${JSON.stringify(input.pubkey)}.`)
     if (who === this.pubkey) throw new Refusal('That is your own pubkey. To leave something where you stand, use hide.')
+    // listenTo "operator" (arkinox, 2026-11-23: "No interaction"): a note is left for the operator only.
+    if (!this.listener.hears(who)) throw new Refusal('Not left: you interact only with your operator, so a note is for them alone.')
     const note = String(input.note ?? '')
     if (!note.trim()) throw new Refusal('The note is empty: write what you want them to find.')
     if (note.length > MAX_MESSAGE_LENGTH) throw new Refusal(`The note is ${note.length} characters; a hidden message holds at most ${MAX_MESSAGE_LENGTH}. Shorten it.`)
@@ -2213,7 +2215,7 @@ export class Agent {
     if (input.turn !== undefined || input.scale !== undefined) throw new Refusal('turn and scale go with kit (a kit piece); a payload you give is placed as it is.')
     // An object find or open_chest listed, or one taken from a chest, by its id: its payload is placed as given.
     if (input.id !== undefined && input.object === undefined && input.address === undefined) {
-      return this.hide({ contents: { object: toPayload(this.objectById(input.id).shard) }, coordinate: input.coordinate, height: input.height })
+      return this.hide({ contents: { object: publishable(toPayload(this.objectById(input.id).shard) as { name?: unknown }) }, coordinate: input.coordinate, height: input.height })
     }
     if (input.object !== undefined) {
       const v = validateSnoPayload(input.object)
@@ -2223,7 +2225,10 @@ export class Agent {
     if (input.address) {
       const { address, object } = await this.publicObject(input.address)
       if (object.tags.some((t) => t[0] === 'encrypted')) throw new Refusal('That object is sealed to a place of its own; it cannot be placed elsewhere by reference. Place its payload instead.')
-      const check = validateSnoPayload(JSON.parse(object.content || 'null'))
+      let raw: unknown
+      // Not JSON: refused in words of our own, never the parser's, which quote the content (review of #106).
+      try { raw = JSON.parse(object.content || 'null') } catch { raw = null }
+      const check = validateSnoPayload(raw)
       if (!check.ok) throw new Refusal(`The object at ${address} is not valid SNO: ${this.snoErrors(object.pubkey, check.errors)}`)
       const here = this.keeper.place()
       const at = this.target(input.coordinate, here)
@@ -2772,7 +2777,7 @@ export class Agent {
       const v = validateSnoPayload(withWanted(raw))
       if (!v.ok) throw new Refusal(`The object at ${address} is not valid SNO: ${this.snoErrors(object.pubkey, v.errors)}`)
       if (avatarTooLarge(v.bytes)) throw new Refusal(`Not set: the object at ${address} is too large for an avatar: ${avatarTooLargeWords(v.bytes)}.`)
-      shard = v.shard
+      shard = publishable(v.shard)
       source = `address ${address} (payload copied: an avatar carries its shape, not a reference${v.repaired.includes(EYE_FIELD) ? '; its malformed eye is left out, so the eye is AUTO' : ''}${v.repaired.includes(FACE_FIELD) ? '; its malformed face is left out, so it faces along its path' : ''}${v.unknownFace !== undefined ? `; its face ${this.listener.hears(object.pubkey) ? JSON.stringify(v.unknownFace) : '(withheld)'} is a facing this version does not know, carried as found and read as path` : ''})`
     }
     // A later second than the last avatar signed here, by waiting (at most a second), never by dating it ahead.
