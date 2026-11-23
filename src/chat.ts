@@ -39,6 +39,7 @@ import type { Relays } from './nostr/relays.js'
 import { AXIS_LIMIT, type Place, type Position } from './space/coords.js'
 import { SCAN_MAX_HEIGHT, type HeldKey, type KeyStore } from './space/regionKeys.js'
 import type { StateDir } from './state/dir.js'
+import { CASHU_TOKEN } from './items.js'
 
 /** The least time between two lines the agent says. */
 export const SAY_INTERVAL_S = 5
@@ -275,6 +276,8 @@ export class Chat extends EventEmitter {
   /** Why a line may not be said now, or null. `replyTo` is the id of a heard line this one answers. */
   refusal(text: string, replyTo: string | undefined, now: number = nowSeconds()): string | null {
     if (!text.trim()) return 'Nothing to say: the line is empty.'
+    // Chat is public: a Cashu token in it is money anyone who reads it can spend (security review, 2026-11-23; comment refuses it too).
+    if (CASHU_TOKEN.test(text)) return 'That line holds a Cashu token, which is money anyone who reads it can spend. Nothing was said.'
     if (text.length > MAX_CHAT_LENGTH) return `The line is ${text.length} characters; a chat line is at most ${MAX_CHAT_LENGTH}.`
     if (this.lastSaidAt !== null && now - this.lastSaidAt < SAY_INTERVAL_S) {
       return `Too soon: one line per ${SAY_INTERVAL_S} seconds, and the last was ${now - this.lastSaidAt} s ago.`

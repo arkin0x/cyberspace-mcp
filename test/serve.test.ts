@@ -53,10 +53,11 @@ const sign = (sk: Uint8Array, kind: number, tags: string[][]): NostrEvent => fin
 const running: Serving[] = []
 afterEach(async () => { for (const s of running.splice(0)) await s.stop() })
 
-async function serve(w: World, argv: string[], printed: string[] = [], logs: string[] = []): Promise<Serving> {
+async function serve(w: World, argv: string[], printed: string[] = [], logs: string[] = [], interactive?: boolean): Promise<Serving> {
   const s = await startServe(['--port', '0', '--relay', CANONICAL, ...argv], {
     log: (l) => logs.push(l),
     print: (l) => printed.push(l),
+    ...(interactive === undefined ? {} : { interactive }),
     agent: { websocketImplementation: w.network.WebSocket, calibration: cal, relayMaxWaitMs: 1500, lookupRelays: [GENERAL], ordersPollMs: 0 },
     waker: { watchdogMs: 50 },
   })
@@ -123,6 +124,19 @@ describe('serve', () => {
     await b.close()
     // One key, one mover: a second serve on the same state directory refuses.
     await expect(serve(w, ['--state', dir, '--no-wake'])).rejects.toBeInstanceOf(LockHeldError)
+  })
+
+  // Security review 2026-11-23: under a supervisor stdout is a log file (XOR's was mode 644), so the token went into it.
+  it('never prints the token when its output is not a terminal, only where it is kept', async () => {
+    const w = world()
+    const dir = dirWithKey(generateSecretKey())
+    const printed: string[] = []
+    const logs: string[] = []
+    await serve(w, ['--state', dir, '--token', '--no-wake'], printed, logs, false)
+    const token = readFileSync(join(dir, 'http-token'), 'utf8').trim()
+    expect(token.length).toBeGreaterThanOrEqual(16)
+    expect([...printed, ...logs].some((l) => l.includes(token))).toBe(false)
+    expect(printed.some((l) => l.includes(join(dir, 'http-token')))).toBe(true)
   })
 
   it('requires the token when asked, printing it only when it is made, and answers only to this machine', async () => {

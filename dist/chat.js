@@ -34,6 +34,7 @@ import { CHAT_BAG_KIND, MAX_CHAT_LENGTH, bagTemplate, chatInnerTemplate, chatInn
 import { hexToBytes, nowSeconds } from './nostr/event.js';
 import { AXIS_LIMIT } from './space/coords.js';
 import { SCAN_MAX_HEIGHT } from './space/regionKeys.js';
+import { CASHU_TOKEN } from './items.js';
 /** The least time between two lines the agent says. */
 export const SAY_INTERVAL_S = 5;
 /** Lines kept, oldest dropped first. */
@@ -210,6 +211,9 @@ export class Chat extends EventEmitter {
     refusal(text, replyTo, now = nowSeconds()) {
         if (!text.trim())
             return 'Nothing to say: the line is empty.';
+        // Chat is public: a Cashu token in it is money anyone who reads it can spend (security review, 2026-11-23; comment refuses it too).
+        if (CASHU_TOKEN.test(text))
+            return 'That line holds a Cashu token, which is money anyone who reads it can spend. Nothing was said.';
         if (text.length > MAX_CHAT_LENGTH)
             return `The line is ${text.length} characters; a chat line is at most ${MAX_CHAT_LENGTH}.`;
         if (this.lastSaidAt !== null && now - this.lastSaidAt < SAY_INTERVAL_S) {
