@@ -164,6 +164,48 @@ describe('the waker', () => {
     t.cleanup()
   })
 
+  // Security review 2026-11-23: chat text is anyone's. Before, a stranger's turn could call any tool (hop, a paid HOSAKA
+  // ride, publish_object, identity, message_operator) and wake_again, which bought up to maxContinuations work turns on the
+  // full model; only the prompt said not to.
+  it('holds a turn woken by a stranger to reading and say, and gives it no continuation', async () => {
+    const t = setup('slow', { chatStrangerMinutes: 5 }, 'slow')
+    t.set({ orders: 0, chatHeard: { wake: 'stranger', addressed: 1 } })
+    const seen: Record<string, string | null> = {}
+    let again: unknown = null
+    const during = setTimeout(() => {
+      for (const name of ['ride', 'hop', 'board', 'publish_object', 'set_avatar', 'identity', 'message_operator', 'log_travel', 'hide', 'place', 'comment', 'visit', 'follow_operator', 'roam', 'wallet', 'wait_for', 'say', 'inbox', 'listen', 'look', 'whereami']) seen[name] = t.waker.gate(name, false)
+      try { t.waker.requestAgain() } catch (err) { again = err }
+      // A model with a shell could leave the file instead of calling the tool.
+      writeFileSync(join(t.dir, AGAIN_FILE), '')
+    }, 100)
+    await t.waker.tick()
+    clearTimeout(during)
+    for (const name of ['ride', 'hop', 'board', 'publish_object', 'set_avatar', 'identity', 'message_operator', 'log_travel', 'hide', 'place', 'comment', 'visit', 'follow_operator', 'roam', 'wallet', 'wait_for']) {
+      expect(seen[name], name).toMatch(/woken by a stranger's chat line/)
+    }
+    for (const name of ['say', 'inbox', 'listen', 'look', 'whereami']) expect(seen[name], name).toBeNull()
+    expect(String(again)).toMatch(/asks for no more turns/)
+    expect(existsSync(join(t.dir, AGAIN_FILE))).toBe(false)
+    // No continuation follows, and the gate is open again once the turn is over.
+    t.set({ orders: 0, chatHeard: { wake: null, addressed: 0 } })
+    await t.waker.tick()
+    expect(t.turns()).toHaveLength(1)
+    expect(t.waker.gate('hop', false)).toBeNull()
+    t.cleanup()
+  })
+
+  it('leaves an operator\'s chat turn its tools', async () => {
+    const t = setup('slow', {}, 'slow')
+    t.set({ orders: 0, chatHeard: { wake: 'operator', addressed: 1 } })
+    let ride: string | null | undefined
+    const during = setTimeout(() => { ride = t.waker.gate('ride', false) }, 100)
+    await t.waker.tick()
+    clearTimeout(during)
+    expect(t.turns()).toHaveLength(1)
+    expect(ride).toBeNull()
+    t.cleanup()
+  })
+
   it('keeps a stranger\'s chat wake pending through polls until the window opens', async () => {
     const t = setup('log', { chatStrangerMinutes: 5 })
     t.set({ chatHeard: { wake: 'stranger', addressed: 1 } })
