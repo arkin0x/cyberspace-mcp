@@ -77,6 +77,7 @@ node dist/bin.js --state ~/cyberspace-agent --operator npub1...
 | `--nwc <uri>` | A Nostr Wallet Connect string (`nostr+walletconnect://...`) the server pays its own HOSAKA rides from, within the two limits below. It is a spending key: prefer `wallet.json` (below), because a command line can be read by other users of the machine. | none: invoices go to the operator by DM |
 | `--max-payment-sats <n>` | The most one payment may be, in sats. `0` turns paying off. | `2000` |
 | `--max-daily-sats <n>` | The most the payments of the last 24 hours (rolling) may add up to, in sats, routing fees included once the wallet reports them. `0` turns paying off. | `5000` |
+| `--payment-approval <who>` | `operator`: every payment is held until the operator approves it by DM with the code the server sends them (one code, one payment, 30 minutes); the limits still apply. `none`: the limits alone. config.json `"paymentApproval"`. Anything else is refused. | `none` |
 | `--travel-log` | Turn on the travel log: `log_travel` may post public kind 1 notes about the agent's travels. Only the human turns it on; no tool can. | off |
 | `--travel-log-max-per-day <n>` | The most travel log notes in any 24 hours (counted across restarts). | `6` |
 | `--chat-wake-minutes <n>` | A stranger's chat line that addresses the agent sets `wake` at most once per this many minutes, in total and per speaker; the operator's always. | `5` |
@@ -313,6 +314,24 @@ The human may connect a Nostr Wallet Connect wallet (NIP-47) so the agent's HOSA
 - **What is paid.** Only the invoice HOSAKA answered this server's own submit or `/start` with, for this ride's job, at the HOSAKA the human configured. No tool takes an invoice, an amount or a destination; an invoice in a DM, a chat line, a hidden message or a tool argument never reaches the wallet.
 - **The limits.** On the invoice's own amount, decoded from the bolt11 (`src/bolt11.ts`), which must equal what HOSAKA's JSON says and carry the payment hash HOSAKA reported: `maxPaymentSats` per payment and `maxDailySats` per rolling 24 hours, routing fees included once the wallet reports them. An invoice within a minute of its expiry is not paid.
 - **Never twice.** One attempt per invoice and at most one paid (or possibly paid) invoice per ride, ever. The attempt is written to `payments.json` as `sending` before `pay_invoice` goes out. An answer that says no money moved (`PAYMENT_FAILED`, `INSUFFICIENT_BALANCE` and the like, or every relay refusing the request) is `failed`; anything else, including no answer within 60 s and a preimage that does not hash to the invoice's payment hash, is `unknown`: never retried, counted against the daily limit as if paid, and the operator is sent the invoice with a warning to check their wallet first. A `sending` attempt found at startup is `unknown`.
+- **Asking first** (`"paymentApproval": "operator"`, arkinox, 2026-11-23: "I'd want xor to ask before spending every time"). A payment the limits allow is held, never paid on the spot. The server, not the model, DMs the operator:
+  - what the payment is for;
+  - the amount in sats;
+  - who is paid;
+  - what is left of the day;
+  - a code such as `PAY-7KQ2XM`.
+
+  The rules (`src/approvals.ts`):
+  - It is paid only when the operator answers with that code. The answer must be a DM sealed by the operator's own key, newer than the request; `no PAY-7KQ2XM` refuses it.
+  - Each approval covers exactly one payment, of that amount and that invoice's payment hash, and is used once. There is no "approve all".
+  - A wrong code, anyone else's DM, an answer after the request expired (30 minutes), and a code already used all pay nothing. When a request lapses or is refused, the invoice goes to the operator to pay or not, as above the limits.
+  - The wallet itself refuses `pay_invoice` without an approval for exactly that payment, whatever called it.
+  - The code is never in a tool's answer.
+  - An answer to a request is never an order. The background poll reads it, so the payment does not wait for a turn.
+  - Requests are kept in `approvals.json`.
+
+  `wallet` and `ride_status` say a payment waits for the operator, and `doctor` says the mode is on.
+- **Telling after.** After every payment the operator gets a DM: the receipt when it was paid, or how much it was for, what it was for, that it failed (or that its outcome is unknown) and why, with the day's total. `payments.log` in the state directory (mode 600) gets one line per outcome: when, how much, what for, the result, the approval code and the day's total. It holds no invoice and no preimage.
 - **The secret.** The connection string is held in a `Secret` that prints, logs and serializes as `[redacted]`; parse errors describe what is wrong without quoting it; no tool returns it, no event carries it, and the server writes it nowhere.
 
 ## The state directory

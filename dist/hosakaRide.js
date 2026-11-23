@@ -52,6 +52,7 @@
 import { HosakaError, honorsKeys, rideIdempotencyKey, rideResultOf, rideService } from './hosaka.js';
 import { verifyRideLevel1 } from './hyperspace/ride.js';
 import { Refusal } from './tool.js';
+import { requestWords } from './approvals.js';
 const HOLDS_HEAD = new Set(['submitting', 'awaiting_payment', 'computing', 'done', 'ready']);
 /** The states the background keeps asking HOSAKA about. */
 const POLLED = new Set(['submitting', 'awaiting_payment', 'computing', 'done']);
@@ -280,6 +281,23 @@ export class HosakaRides {
             await toOperator(first.reason);
             return;
         }
+        // paymentApproval "operator" (arkinox, 2026-11-23: "I'd want xor to ask before spending every time"): held until the operator answers the code.
+        let approvalCode;
+        if (wallet.approvals.required) {
+            const v = wallet.approvals.verdict(inv.depositId, first.sats, first.invoice.paymentHash);
+            if (v.state === 'none') {
+                await this.askApproval(rec, inv, first.sats, first.invoice.paymentHash);
+                return;
+            }
+            if (v.state === 'pending')
+                return;
+            if (v.state !== 'approved') {
+                this.notes.push(`Not paid: ${v.reason}.`);
+                await toOperator(v.reason);
+                return;
+            }
+            approvalCode = v.request.code;
+        }
         // The proof will be bound to this head: do not pay for one that could never be signed.
         const unconfirmed = await keeper.confirmHead();
         if (unconfirmed) {
@@ -301,7 +319,7 @@ export class HosakaRides {
         rec.payDecidedFor = inv.depositId;
         rec.payment = { depositId: inv.depositId, state: 'sending', sats: decision.sats, reason: null };
         this.save();
-        const outcome = await wallet.pay(inv.bolt11, this.payContext(rec, inv));
+        const outcome = await wallet.pay(inv.bolt11, { ...this.payContext(rec, inv), ...(approvalCode ? { approvalCode } : {}), purpose: this.purpose(rec) });
         rec.payment = { depositId: inv.depositId, state: outcome.state, sats: decision.sats, reason: outcome.state === 'paid' ? null : outcome.reason };
         this.save();
         if (outcome.state === 'paid') {
@@ -316,7 +334,41 @@ export class HosakaRides {
             return;
         }
         this.notes.push(`The server could not pay HOSAKA's invoice (${outcome.reason}); it went to your operator instead.`);
+        await this.afterFailure(rec, decision.sats, outcome.state, outcome.reason);
         await this.deliverInvoice(rec);
+    }
+    /** What a payment for this ride is for, in words the operator reads. */
+    purpose(rec) {
+        return `It pays HOSAKA to compute the proof for my hyperspace ride from block ${rec.fromHeight} to block ${rec.toHeight} (${rec.blocks} blocks), job ${rec.jobId ?? '(unknown)'}.`;
+    }
+    /** Hold the payment and ask the operator, by DM, sent by the server: what for, how much, to whom, what is left today, and the code. */
+    async askApproval(rec, inv, sats, paymentHash) {
+        const { wallet } = this.host;
+        const request = wallet.approvals.request({ depositId: inv.depositId, paymentHash, sats, purpose: this.purpose(rec), payee: `HOSAKA at ${rec.apiUrl} (a Lightning invoice for exactly ${sats} sats)` });
+        rec.payment = { depositId: inv.depositId, state: 'approval', sats, reason: null };
+        this.save();
+        try {
+            await this.host.messageOperator(requestWords(request, { spentSats: wallet.spentLast24hSats(), maxDailySats: wallet.maxDailySats, maxPaymentSats: wallet.maxPaymentSats }));
+            this.notes.push(`The payment (${sats} sats) waits for your operator's approval: the server asked them by DM. Nothing is paid unless they approve within 30 minutes.`);
+        }
+        catch (err) {
+            this.notes.push(`The approval request (${sats} sats) could NOT be sent to your operator: ${words(err)}. Nothing is paid without their approval; it lapses in 30 minutes.`);
+        }
+    }
+    /** After a payment that did not go through: the operator hears how much, what for, the result and today's total. */
+    async afterFailure(rec, sats, state, reason) {
+        const { wallet } = this.host;
+        const text = [
+            `Payment ${state === 'failed' ? 'FAILED (no money moved)' : 'OUTCOME UNKNOWN (it may have gone through; check your wallet)'}: ${sats} sats to HOSAKA. ${this.purpose(rec)}`,
+            `Reason: ${reason}.`,
+            `Spent in the last 24 hours: ${wallet.spentLast24hSats()} of ${wallet.maxDailySats} sats.`,
+        ].join('\n');
+        try {
+            await this.host.messageOperator(text);
+        }
+        catch (err) {
+            this.notes.push(`The payment notice could NOT be sent to your operator: ${words(err)}. Tell them with message_operator.`);
+        }
     }
     /** A receipt to the operator for a payment the server made. */
     async receipt(rec, sats, feesSats, paymentHash) {
@@ -793,6 +845,7 @@ export class HosakaRides {
             case 'failed': return `the wallet could not pay it (${p.reason}); it went to your operator`;
             case 'unknown': return `the wallet's payment has an unknown outcome (${p.reason}); never paid again by the server, and your operator was told`;
             case 'operator': return `the server did not pay it (${p.reason}); it ${rec.dm?.depositId === p.depositId ? 'was sent' : 'is being sent'} to your operator`;
+            case 'approval': return `the server holds it until your operator approves it by DM (${p.sats} sats); nothing is paid otherwise, and the request lapses after 30 minutes`;
         }
     }
     stateWords(rec) {
@@ -830,7 +883,7 @@ export class HosakaRides {
             expired: `Call ride with to: ${rec.toHeight} for a fresh invoice, or cancel: true.`,
         };
         const inv = rec.invoice;
-        const showInvoice = rec.state === 'awaiting_payment' && inv && inv.status === 'pending' && rec.payment !== null && rec.payment.state !== 'paid' && rec.payment.state !== 'sending' && rec.dm?.depositId !== inv.depositId;
+        const showInvoice = rec.state === 'awaiting_payment' && inv && inv.status === 'pending' && rec.payment !== null && rec.payment.state !== 'paid' && rec.payment.state !== 'sending' && rec.payment.state !== 'approval' && rec.dm?.depositId !== inv.depositId;
         const text = [
             `HOSAKA ride to block ${rec.toHeight} from block ${rec.fromHeight} (${rec.blocks} block(s)${rec.asOf !== null ? `, as_of ${rec.asOf}` : ''}), job ${rec.jobId ?? '(not known yet)'}: ${this.stateWords(rec)}.`,
             ...notes.filter(Boolean),

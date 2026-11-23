@@ -152,6 +152,19 @@ export async function runDoctor(argv, deps) {
         add({ name: 'operator', verdict: 'info', detail: 'none: the agent answers only to its MCP client, and operator DMs are off', fix: 'to take orders from a human by nostr DM: cyberspace-mcp init --operator <their npub>' });
     else
         add({ name: 'operator', verdict: 'ok', detail: nip19.npubEncode(operator) });
+    // Payments: the limits, and whether the operator approves each one first (approvals.ts).
+    {
+        const limits = `at most ${settings.maxPaymentSats} sats a payment and ${settings.maxDailySats} sats a day`;
+        const wallet = settings.nwc ? 'a wallet is connected' : 'no wallet is connected (invoices go to the operator)';
+        if (settings.paymentApproval === 'operator') {
+            add(operator
+                ? { name: 'payments', verdict: 'ok', detail: `approval on: every payment waits for your operator's code by DM (30 minutes, one payment each), and they are told after; ${limits}; ${wallet}` }
+                : { name: 'payments', verdict: 'warn', detail: `approval on, but there is no operator to approve, so nothing is ever paid; ${limits}; ${wallet}`, fix: 'cyberspace-mcp init --operator <their npub>' });
+        }
+        else {
+            add({ name: 'payments', verdict: 'info', detail: `approval off: the server pays HOSAKA invoices within the limits alone; ${limits}; ${wallet}`, fix: settings.nwc ? 'to approve each payment first: "paymentApproval": "operator" in config.json (or --payment-approval operator)' : undefined });
+        }
+    }
     // The building kits are local files: say which, or that there are none (an agent without them builds from its own objects).
     {
         const lib = new KitLibrary(kitsDirCandidates(stateDir, settings.kitsDir));

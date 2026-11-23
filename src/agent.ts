@@ -81,6 +81,7 @@ import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS, Wallet } from './wall
 import { Placements } from './placed.js'
 import { DEFAULT_TRAVEL_PER_DAY, TravelLog, repeatsPrivate, type TravelLogSettings } from './travel.js'
 import type { Progress } from './progress.js'
+import type { PaymentApproval } from './approvals.js'
 
 export { Refusal, type ToolResult } from './tool.js'
 
@@ -92,6 +93,10 @@ export interface AgentConfig {
   relays: string[]
   /** The operator's pubkey, npub or hex. */
   operator?: string
+  /** "operator": every payment waits for the operator's approval by DM (approvals.ts). */
+  paymentApproval?: PaymentApproval
+  /** Tests: how long an approval request waits. */
+  approvalTtlMs?: number
   name?: string
   about?: string
   capCallSeconds: number
@@ -404,6 +409,7 @@ export class Agent {
     // The wallet talks to its own relays with the connection's own key; nothing of it reaches the agent's relays (wallet.ts, nwc.ts).
     this.wallet = new Wallet(dir, {
       nwc: config.nwc ?? null, source: config.nwcSource ?? 'the configuration', maxPaymentSats: config.maxPaymentSats ?? DEFAULT_MAX_PAYMENT_SATS, maxDailySats: config.maxDailySats ?? DEFAULT_MAX_DAILY_SATS,
+      paymentApproval: config.paymentApproval ?? 'none', approvalTtlMs: config.approvalTtlMs,
       websocketImplementation: config.websocketImplementation, maxWaitMs: config.relayMaxWaitMs, log: this.log, now: config.walletClock, payTimeoutMs: config.walletPayTimeoutMs,
       beforePublish: () => held.assert('send a request to the wallet'),
     })
@@ -426,6 +432,8 @@ export class Agent {
     // Someone arrives: their avatar is read now, so its size is known before the agent plans a landing near them.
     this.presence.on('arrival', (p: Person) => this.avatars.want([p.pubkey]))
     this.operatorChannel = new OperatorChannel({
+      // The operator's answers to payment approval requests, checked by the operator channel's seal rules before they get here.
+      answerApproval: (text, createdAt, id) => this.wallet.approvals.answer(text, createdAt, id) !== null,
       pubkey: this.pubkey, relays: this.relays, dir, operator: () => this.operatorOfProfile(), operatorProblem: () => this.operatorProblem(), lookupRelays: config.lookupRelays ?? GENERAL_RELAYS,
       sign: (t) => this.sign(t),
       wrap: (recipient, text) => this.assertLock('seal a DM') ?? wrapMessage({ senderSk: this.sk, recipient, text, now: nowSeconds() }),

@@ -200,6 +200,11 @@ interface OperatorFacts {
 }
 
 export interface OperatorChannelDeps {
+  /**
+   * A DM from the operator, sealed by their key and addressed to the agent, offered first to the payment approvals (approvals.ts):
+   * true when it answered an approval request, and is then read and never an order.
+   */
+  answerApproval?: (text: string, createdAt: number, id: string) => boolean
   pubkey: string
   relays: Relays
   dir: StateDir
@@ -649,6 +654,8 @@ ${halt}` : line
       if (rumor.pubkey !== operator || !toMe) { this.state.seen[wrap.id] = wrap.created_at; ignored++; continue }
       // The operator's reaction to one of the agent's messages: read, and never an order.
       if (rumor.kind !== RUMOR_KIND) { this.state.seen[wrap.id] = wrap.created_at; continue }
+      // An answer to a payment approval request: read, and never an order (whether or not the operator follows the agent).
+      if (this.approves(rumor)) { this.state.seen[wrap.id] = wrap.created_at; continue }
       if (!following) { this.state.waiting[wrap.id] = wrap.created_at; if (!wasWaiting) waiting++; continue }
       this.state.seen[wrap.id] = wrap.created_at
       if (this.claimReaction(rumor, now)) reactTo.push(rumor.id)
@@ -806,6 +813,8 @@ ${halt}` : line
         continue
       }
       if (rumor.kind !== RUMOR_KIND) continue
+      // An answer to a payment approval request, taken by the background poll so the payment does not wait for a turn: read, never an order.
+      if (this.approves(rumor)) { this.state.seen[wrap.id] = wrap.created_at; marked = true; continue }
       // A STOP from the operator is carried out at once and read here: it is never an order, so nothing counts it or wakes a turn for it.
       if (isStop(rumor)) {
         if (!following) continue
@@ -844,6 +853,11 @@ ${halt}` : line
     const unread = this.unreadOrders()
     if (unread > 0) for (const fn of [...this.ordersListeners]) fn(unread)
     return result
+  }
+
+  /** Whether an operator's message answered a payment approval request (approvals.ts). Never throws: an approval store that fails leaves the message an ordinary one. */
+  private approves(rumor: Rumor): boolean {
+    try { return this.deps.answerApproval?.(rumor.content, rumor.created_at, rumor.id) ?? false } catch { return false }
   }
 
   /** Forget the wraps that fall before the next read's window. */

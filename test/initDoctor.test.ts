@@ -235,6 +235,18 @@ describe('doctor', () => {
     expect(r.code).toBe(0)
   })
 
+  it('says whether the operator approves each payment: off by default; on with paymentApproval, and warns when there is no operator to approve (arkinox, 2026-11-23)', async () => {
+    const w = world()
+    const state = tmp()
+    expect((await init(w, ['--state', state, '--name', 'stranger', '--client', 'none', '--relay', CANONICAL, '--yes'])).code).toBe(0)
+    expect(check((await doctor(w, state)).checks, 'payments')).toMatchObject({ verdict: 'info' })
+    const cfg = JSON.parse(readFileSync(join(state, 'config.json'), 'utf8')) as Record<string, unknown>
+    writeFileSync(join(state, 'config.json'), JSON.stringify({ ...cfg, paymentApproval: 'operator' }))
+    const on = await doctor(w, state)
+    expect(check(on.checks, 'payments')).toMatchObject({ verdict: 'warn' })
+    expect(on.out).toMatch(/payments: approval on, but there is no operator to approve/)
+  })
+
   it('fails an operator that is not an npub, and warns when the profile names an operator config.json no longer does', async () => {
     const w = world()
     const state = tmp()
