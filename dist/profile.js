@@ -21,7 +21,9 @@ export function readProfile(ev) {
         return { name: null, bot: null, operator: null };
     let content = {};
     try {
-        content = JSON.parse(ev.content);
+        const parsed = JSON.parse(ev.content);
+        // Anyone's kind 0: "null", a number or a list is not a profile (security review, 2026-11-23: null threw and lost every name nearby).
+        content = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
     }
     catch {
         content = {};

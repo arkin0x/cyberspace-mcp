@@ -66,13 +66,31 @@ function cubeKey(at, h) {
     const s = BigInt(h);
     return `${at.x >> s},${at.y >> s},${at.z >> s}`;
 }
-/** Newest last, no repeats: one line per inner event id. */
-export function mergeLines(have, add) {
+/**
+ * Newest last, no repeats: one line per inner event id, at most CHAT_MAX.
+ * Past the cap the oldest lines go first, but those `keep` holds (the
+ * operator's unread lines) go only when nothing else is left to drop, so a
+ * flood of strangers' lines cannot push an order out before it is read
+ * (security review, 2026-11-23).
+ */
+export function mergeLines(have, add, keep = () => false) {
     const seen = new Set(have.map((l) => l.id));
     const fresh = add.filter((l) => !seen.has(l.id));
     if (fresh.length === 0)
         return have;
-    return [...have, ...fresh].sort((a, b) => a.at - b.at).slice(-CHAT_MAX);
+    const all = [...have, ...fresh].sort((a, b) => a.at - b.at);
+    let over = all.length - CHAT_MAX;
+    if (over <= 0)
+        return all;
+    const out = [];
+    for (const l of all) {
+        if (over > 0 && !keep(l)) {
+            over--;
+            continue;
+        }
+        out.push(l);
+    }
+    return over > 0 ? out.slice(over) : out;
 }
 /** Whether a line's text mentions the agent: its npub (bare or nostr:), a nostr:nprofile of it, or its hex pubkey. Its plain name does not count. */
 export function addressesMe(text, me) {
@@ -133,7 +151,8 @@ export class Chat extends EventEmitter {
         this.npub = nip19.npubEncode(me.pubkey);
         const saved = dir.readJson(FILE, null);
         if (saved?.version === 1) {
-            this.lines = Array.isArray(saved.lines) ? saved.lines : [];
+            // A line saved before the clamp below may be dated in the future; it is read as heard when it was heard (security review, 2026-11-23).
+            this.lines = (Array.isArray(saved.lines) ? saved.lines : []).map((l) => (typeof l.at === 'number' && typeof l.heardAt === 'number' && l.at > l.heardAt + 60 ? { ...l, at: l.heardAt } : l));
             this.lastSaidAt = saved.lastSaidAt ?? null;
             this.unpromptedAllowance = typeof saved.unpromptedAllowance === 'number' ? saved.unpromptedAllowance : 1;
             this.lastListenAt = saved.lastListenAt ?? null;
@@ -233,7 +252,8 @@ export class Chat extends EventEmitter {
         if (!replyTo)
             this.unpromptedAllowance--;
         const line = { id: inner.id, from: inner.pubkey, text: inner.content, at: inner.created_at, region: key.lookupId, height: key.height, mine: true, addressed: false, heardAt: now, plane: place.plane };
-        this.lines = mergeLines(this.lines, [line]);
+        const operator = this.operator();
+        this.lines = mergeLines(this.lines, [line], (l) => !!l.unread && operator !== null && l.from === operator);
         this.save();
         return { id: inner.id, region: key.lookupId, accepted: result.accepted, reasons: result.reasons };
     }
@@ -256,12 +276,15 @@ export class Chat extends EventEmitter {
         if (inners.length === 0)
             return [];
         const me = { pubkey: this.me.pubkey, npub: this.npub, name: this.me.name() };
+        // A line is never heard before it was said: the rumor's created_at is sealed, so no relay's time window checks it,
+        // and a line dated in the future would sort after every real line and outlive them all (security review, 2026-11-23).
         const add = inners.map((e) => ({
-            id: e.id, from: e.pubkey, text: e.content.slice(0, MAX_CHAT_LENGTH), at: e.created_at, region, height: key.height, ...planeOf(e),
+            id: e.id, from: e.pubkey, text: e.content.slice(0, MAX_CHAT_LENGTH), at: Math.min(e.created_at, now), region, height: key.height, ...planeOf(e),
             mine: e.pubkey === this.me.pubkey, addressed: e.pubkey !== this.me.pubkey && mentionsMe(e, me), heardAt: now, unread: e.pubkey !== this.me.pubkey,
         }));
         const before = this.lines;
-        this.lines = mergeLines(before, add);
+        const operator = this.operator();
+        this.lines = mergeLines(before, add, (l) => !!l.unread && operator !== null && l.from === operator);
         if (this.lines === before)
             return [];
         const fresh = add.filter((l) => !before.some((b) => b.id === l.id));

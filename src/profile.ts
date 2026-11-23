@@ -34,7 +34,11 @@ export interface ReadProfile {
 export function readProfile(ev: NostrEvent | undefined): ReadProfile {
   if (!ev || ev.kind !== 0) return { name: null, bot: null, operator: null }
   let content: Record<string, unknown> = {}
-  try { content = JSON.parse(ev.content) as Record<string, unknown> } catch { content = {} }
+  try {
+    const parsed = JSON.parse(ev.content) as unknown
+    // Anyone's kind 0: "null", a number or a list is not a profile (security review, 2026-11-23: null threw and lost every name nearby).
+    content = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}
+  } catch { content = {} }
   const name = typeof content.display_name === 'string' && content.display_name.trim() ? content.display_name.trim()
     : typeof content.name === 'string' && content.name.trim() ? content.name.trim() : null
   const bot = typeof content.bot === 'boolean' ? content.bot : null

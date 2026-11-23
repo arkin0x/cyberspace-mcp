@@ -93,7 +93,9 @@ export class LiveRegistry {
             if (live.closed) return
             live.events++
             live.attempts = 0
-            if (live.lastSeen === null || ev.created_at > live.lastSeen) live.lastSeen = ev.created_at
+            // Never past now: one event dated in the future would move the resumed since past every real event (security review, 2026-11-23).
+            const at = Math.min(ev.created_at, Math.floor(Date.now() / 1000))
+            if (live.lastSeen === null || at > live.lastSeen) live.lastSeen = at
             live.handlers.onEvent(ev)
           },
           onEose: live.handlers.onEose,
