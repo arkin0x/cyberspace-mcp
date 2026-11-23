@@ -38,6 +38,13 @@ export const RENDER_MAX_SIZE = 1024
 
 /** More faces than any object a relay will carry; past it a picture is refused rather than slow. */
 export const RENDER_MAX_FACES = 100_000
+/**
+ * The most supersampled pixels the faces' bounding boxes may cover between
+ * them (security review, 2026-11-23): a few kilobytes of anyone's object,
+ * thousands of faces each filling the picture, held the server for minutes.
+ * About a second of drawing; an ordinary object covers a small part of it.
+ */
+export const RENDER_MAX_FILL = 400_000_000
 
 /**
  * The hex handle find and look print for an object, and render takes: its
@@ -248,6 +255,13 @@ export function renderShard(shard: ShardModel, opts: RenderOptions = {}): Render
   const { depth, color, id, edge } = frame
 
   // ---- faces ---------------------------------------------------------------
+  let fill = 0
+  for (const [a, b, c] of faces) {
+    const w = Math.min(W, Math.max(X[a], X[b], X[c])) - Math.max(0, Math.min(X[a], X[b], X[c]))
+    const h = Math.min(W, Math.max(Y[a], Y[b], Y[c])) - Math.max(0, Math.min(Y[a], Y[b], Y[c]))
+    if (w > 0 && h > 0) fill += (w + 1) * (h + 1)
+  }
+  if (fill > RENDER_MAX_FILL) throw new Error(`The object's faces would cover the picture ${Math.round(fill / (W * W))} times over; render draws at most ${Math.floor(RENDER_MAX_FILL / (W * W))}. Try a smaller size, or look at it in ONOSENDAI.`)
   const normals = new Float32Array(faces.length * 3)
   const back = new Uint8Array(faces.length)
   for (let f = 0; f < faces.length; f++) {

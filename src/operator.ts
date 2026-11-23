@@ -253,6 +253,8 @@ export class OperatorChannel {
   private checking: Promise<OrdersCheck> | null = null
   /** What the newest check found; the notice counts what of it is still unread. */
   private lastCheck: OrdersCheck | null = null
+  /** Wraps the background poll marked read as never orders (a stranger's, unreadable), not yet reported by inbox's ignored count. */
+  private ignoredByPoll = 0
   private pollTimer: ReturnType<typeof setInterval> | null = null
   /** The last poll failure logged, so a relay that stays down is logged once, not every 15 s. */
   private pollError: string | null = null
@@ -630,7 +632,9 @@ ${halt}` : line
     const droppedStopped: Rumor[] = []
     const seenBefore = this.seenUnread()
     const cut: { at: number | null } = { at: null }
-    let ignored = 0
+    // What the background poll already marked read as never orders is reported here, once.
+    let ignored = this.ignoredByPoll
+    this.ignoredByPoll = 0
     let waiting = 0
     for (const wrap of mergeAnswers(answers)) {
       if (wrap.kind !== WRAP_KIND || this.state.seen[wrap.id] !== undefined) continue
@@ -790,10 +794,18 @@ ${halt}` : line
     for (const wrap of mergeAnswers(answers)) {
       if (wrap.kind !== WRAP_KIND || this.state.seen[wrap.id] !== undefined) continue
       const opened = this.deps.unwrap(wrap)
-      if (!opened.ok) continue
+      // What can never be an order is marked read here, as inbox marks it, so a flood of wraps to the agent is
+      // unwrapped once, not again at every poll (security review, 2026-11-23: 500 junk wraps cost seconds per poll).
+      if (!opened.ok) { this.state.seen[wrap.id] = wrap.created_at; this.ignoredByPoll++; marked = true; continue }
       const { rumor } = opened
       // The agent's own copies are history, never orders, as in inbox.
-      if (rumor.pubkey === this.deps.pubkey || rumor.pubkey !== operator || rumor.kind !== RUMOR_KIND || !rumor.tags.some((t) => t[0] === 'p' && t[1] === this.deps.pubkey)) continue
+      if (rumor.pubkey === this.deps.pubkey || rumor.pubkey !== operator || !rumor.tags.some((t) => t[0] === 'p' && t[1] === this.deps.pubkey)) {
+        this.state.seen[wrap.id] = wrap.created_at
+        if (rumor.pubkey !== this.deps.pubkey) this.ignoredByPoll++
+        marked = true
+        continue
+      }
+      if (rumor.kind !== RUMOR_KIND) continue
       // A STOP from the operator is carried out at once and read here: it is never an order, so nothing counts it or wakes a turn for it.
       if (isStop(rumor)) {
         if (!following) continue
