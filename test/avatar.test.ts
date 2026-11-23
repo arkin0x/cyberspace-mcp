@@ -16,7 +16,7 @@ import { generateSecretKey } from 'nostr-tools/pure'
 import { Agent } from '../src/agent.js'
 import { toPayload } from 'sno-core/shards'
 import { AVATAR_CONTENT_MAX, AVATAR_CONTENT_WARN, AVATAR_KIND, DEFAULT_AVATAR_PER_DAY, avatarFromEvent, avatarTemplate, paidShard, verifyAvatar } from '../src/avatar.js'
-import { signEvent, type NostrEvent } from '../src/nostr/event.js'
+import { CLIENT_TAG, signEvent, type NostrEvent } from '../src/nostr/event.js'
 import { validateSnoPayload } from '../src/sno.js'
 import type { Calibration } from '../src/space/calibration.js'
 import { parseArgs, settingsFrom } from '../src/config.js'
@@ -89,9 +89,9 @@ describe('ONOSENDAI\'s avatar, read here', () => {
     const theirs = fixture.avatar.event
     expect(mine.kind).toBe(theirs.kind)
     expect(mine.content).toBe(theirs.content)
-    expect(mine.tags).toEqual([['name', 'Wedge'], ['client', 'cyberspace-mcp']])
+    expect(mine.tags).toEqual([['name', 'Wedge'], [...CLIENT_TAG]])
     expect(theirs.tags.slice(0, 2).map((t) => t[0])).toEqual(mine.tags.map((t) => t[0]))
-    expect(avatarTemplate(null, 1)).toMatchObject({ content: '', tags: [['client', 'cyberspace-mcp']] })
+    expect(avatarTemplate(null, 1)).toMatchObject({ content: '', tags: [[...CLIENT_TAG]] })
   })
 
   it('work is not read: without its nonce tag, or with an id of no zeros, the shape is the same', () => {
@@ -126,7 +126,7 @@ describe('set_avatar', () => {
     const r = await a.setAvatar({ object: wedge })
     const ev = avatarsOf(a.pubkey).at(-1)!
     expect(ev.id).toBe(r.data.eventId)
-    expect(ev.tags).toEqual([['name', 'Wedge'], ['client', 'cyberspace-mcp']])
+    expect(ev.tags).toEqual([['name', 'Wedge'], [...CLIENT_TAG]])
     expect(ev.tags.some((t) => t[0] === 'd')).toBe(false)
     // ONOSENDAI's reading rules: accepted, and the shape back.
     expect(verifyAvatar(ev).ok).toBe(true)
@@ -158,7 +158,7 @@ describe('set_avatar', () => {
     expect(last.content).toBe('')
     // Signed after the avatar it replaces, never in the same second: a tie would go to the lower id, by chance.
     expect(last.created_at).toBeGreaterThan(ev.created_at)
-    expect(last.tags).toEqual([['client', 'cyberspace-mcp']])
+    expect(last.tags).toEqual([[...CLIENT_TAG]])
     expect(paidShard(last)).toBeNull()
   }, 60_000)
 

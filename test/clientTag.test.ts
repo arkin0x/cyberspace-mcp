@@ -1,8 +1,10 @@
 // clientTag.test.ts: the NIP-89 client tag (D5, 2026-11-09). The kind 0
-// profile carries ["client", "cyberspace-mcp"], so arrivals of
-// cyberspace-mcp agents can be counted apart from ONOSENDAI's (which signs
-// ["client", "ONOSENDAI"]); by name only, as ONOSENDAI writes its own, since
-// NIP-89's third element is a kind 31990 handler address and there is none.
+// profile carries ["client", "cyberspace-mcp", "", "", "<version>"], so
+// arrivals of cyberspace-mcp agents can be counted apart from ONOSENDAI's
+// (which signs ["client", "ONOSENDAI"]). NIP-89's third and fourth elements
+// are a kind 31990 handler address and its relay hint; there is none, so both
+// are empty, and the fifth is this copy's version (2026-11-23), so ONOSENDAI's
+// AGENTS panel can tell an operator their agent runs an old copy.
 // Every event the agent signs gets it in one place, signEvent (event.ts), so
 // this also scans the source for a way around it, as ONOSENDAI's
 // clientTagGuard.test.ts does: a raw finalizeEvent anywhere else must be one
@@ -16,7 +18,9 @@ import { join, relative } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { generateSecretKey } from 'nostr-tools/pure'
 import { Agent } from '../src/agent.js'
-import { attributed, bytesToHex, CLIENT_NAME } from '../src/nostr/event.js'
+import { attributed, bytesToHex, CLIENT_NAME, CLIENT_TAG, clientTag } from '../src/nostr/event.js'
+import { readVersion } from '../src/version.js'
+import { runningVersion } from '../src/updates.js'
 import type { Calibration } from '../src/space/calibration.js'
 import { KEY_GENERATED_BY, StateDir } from '../src/state/dir.js'
 import { FakeNetwork } from './fakeRelay.js'
@@ -39,11 +43,24 @@ describe('the client tag', () => {
   const running: Agent[] = []
   afterAll(async () => { for (const a of running) await a.stop() })
 
-  it('is ["client", "cyberspace-mcp"], added once, and never to an auth event', () => {
+  it('is ["client", "cyberspace-mcp", "", "", <version>], added once, and never to an auth event', () => {
+    const version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version as string
     expect(CLIENT_NAME).toBe('cyberspace-mcp')
-    expect(attributed({ kind: 0, created_at: 1, tags: [], content: '{}' }).tags).toEqual([['client', 'cyberspace-mcp']])
+    expect(CLIENT_TAG).toEqual(['client', 'cyberspace-mcp', '', '', version])
+    expect(attributed({ kind: 0, created_at: 1, tags: [], content: '{}' }).tags).toEqual([['client', 'cyberspace-mcp', '', '', version]])
+    // A template that already names a client (one mined over its own tags) is left as it is.
     expect(attributed({ kind: 0, created_at: 1, tags: [['client', 'cyberspace-mcp']], content: '{}' }).tags).toEqual([['client', 'cyberspace-mcp']])
     expect(attributed({ kind: 22242, created_at: 1, tags: [], content: '' }).tags).toEqual([])
+  })
+
+  it('carries just the version, the one update notices compare, and by name only when there is none', () => {
+    expect(readVersion()).toBe(runningVersion())
+    expect(clientTag('1.2.3')).toEqual(['client', 'cyberspace-mcp', '', '', '1.2.3'])
+    expect(clientTag(null)).toEqual(['client', 'cyberspace-mcp'])
+    // NIP-89 readers skip an empty handler address: nothing there to fetch.
+    expect(CLIENT_TAG[2]).toBe('')
+    expect(CLIENT_TAG[3]).toBe('')
+    expect(CLIENT_TAG).toHaveLength(5)
   })
 
   it('is on the kind 0 profile identity publishes, exactly once', async () => {
@@ -60,7 +77,7 @@ describe('the client tag', () => {
     await a.identity({})
     const profile = canonical.published.find((e) => e.kind === 0 && e.pubkey === a.pubkey)
     expect(profile).toBeDefined()
-    expect(profile!.tags.filter((t) => t[0] === 'client')).toEqual([['client', 'cyberspace-mcp']])
+    expect(profile!.tags.filter((t) => t[0] === 'client')).toEqual([[...CLIENT_TAG]])
   }, 30_000)
 
   it('cannot be signed around: a raw finalizeEvent outside signEvent is only for events that are never attributed', () => {

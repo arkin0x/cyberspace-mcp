@@ -24,7 +24,7 @@ import { finalizeEvent, generateSecretKey } from 'nostr-tools/pure'
 import { bagTemplate, chestInnerTemplate, chestItemOf, keyInnerTemplate, keyItemOf, unbag, type KeyItem } from '../src/hidden/bags.js'
 import { forgeKey, openWithSecret, readContents } from '../src/hidden/chests.js'
 import { commentTemplate, readComment } from '../src/hidden/comments.js'
-import { hexToBytes, type NostrEvent } from '../src/nostr/event.js'
+import { CLIENT_TAG, hexToBytes, type NostrEvent } from '../src/nostr/event.js'
 import { createServer } from '../src/server.js'
 import type { Calibration } from '../src/space/calibration.js'
 import { positionHex } from '../src/space/coords.js'
@@ -114,7 +114,7 @@ describe('comments, against ONOSENDAI (b615675)', () => {
   it('a comment on an item, a chest and a thing inside a chest is ONOSENDAI\'s template, tag for tag (the client named as this server)', () => {
     for (const c of fx.comments.cases) {
       const ours = commentTemplate(fx.comments.subject, c.parent, 'CIPHERTEXT', c.template.created_at)
-      const theirs = { ...c.template, tags: c.template.tags.map((t) => (t[0] === 'client' ? ['client', 'cyberspace-mcp'] : t)) }
+      const theirs = { ...c.template, tags: c.template.tags.map((t) => (t[0] === 'client' ? [...CLIENT_TAG] : t)) }
       expect(ours).toEqual(theirs)
       expect(ours.tags.map((t) => t[0])).toEqual(['A', 'K', 'P', 'e', 'k', 'p', 'client', 'encrypted'])
     }
@@ -386,7 +386,7 @@ describe('a held item copied into a chest is the item as it was (ONOSENDAI#439)'
     const copy = contents[0].event
     expect(copy.pubkey).toBe(a.pubkey)
     // The fixed tags, then the item's own in their order, then this server's client tag; no p, no t, no second model.
-    expect(copy.tags.slice(5)).toEqual([imeta, model, animate, flavor, ['client', 'cyberspace-mcp']])
+    expect(copy.tags.slice(5)).toEqual([imeta, model, animate, flavor, [...CLIENT_TAG]])
     expect(copy.tags.filter((t) => t[0] === 'model')).toHaveLength(1)
     expect(contents[0].body.key).toMatchObject({ itemPubkey: lamp.itemPubkey, model: { address: model[1], relay: model[2] }, animation: ['bob', 'spin-x'] })
   }, 60_000)
