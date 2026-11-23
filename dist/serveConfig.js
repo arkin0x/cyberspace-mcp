@@ -252,7 +252,7 @@ Usage: cyberspace-mcp serve [--state <dir>] [options] [agent options]
 
   --state <dir>                 The state directory. Default $CYBERSPACE_MCP_STATE, else ~/.cyberspace-mcp
   --port <n>                    The port, on 127.0.0.1 only. Default ${DEFAULT_PORT}; the URL is http://127.0.0.1:<port>${MCP_PATH}
-  --token                       Require a bearer token, kept in <state>/http-token (made and printed once when absent).
+  --token                       Require a bearer token, kept in <state>/http-token (made when absent; printed then, to a terminal only).
   --no-token                    Do not require it, even when config.json says serve.token: true.
   --wake-command <cmd>          The command that runs one model turn; {prompt} is replaced by the prompt,
                                 as one argument (no shell). Example: claude -p {prompt} --mcp-config ...

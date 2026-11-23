@@ -106,7 +106,7 @@ const print = (line: string): void => { process.stdout.write(`${line}\n`) }
 async function serve(argv: string[]): Promise<void> {
   let serving
   try {
-    serving = await startServe(argv, { log, print })
+    serving = await startServe(argv, { log, print, interactive: process.stdout.isTTY === true })
   } catch (err) {
     if (err instanceof HelpRequested) {
       print(SERVE_USAGE)
