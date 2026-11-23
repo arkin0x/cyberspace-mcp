@@ -27,7 +27,7 @@ The protocol does not know that an identity is an agent. It costs the same work 
 
 These seven rules have no undo. Breaking one kills a chain, leaks a key, or spends what was not yours to spend. The server enforces every one it can enforce; the rest are for the agent to keep.
 
-1. **Never share a key between two running agents, or between an agent and a human.** The server creates its own key in its state directory. There is no way to import a human's key, by design. A key file that is not one the server generated (an nsec, a bare hex secret) is refused.
+1. **Never share a key between two running agents, and never hold a human's secret key.** The server creates its own key in its state directory. There is no way to import a human's key, by design. A key file that is not one the server generated (an nsec, a bare hex secret) is refused. A human may still let a server move their own chain through their remote signer, which keeps the secret on their device and asks them to approve every move (section 3, "A human's chain, through their signer"): the server holds no secret key then, and the rule holds only while the human really approves each move.
 2. **Before every move, confirm the live head.** The tools do this; never bypass them. Signing from a stale head forks the chain, and a fork kills it (§8.7.3 rule 4: a chain may have only one next action after each event, and a fork ends the whole chain, whichever branch came first).
 3. **Never publish a spawn after your first, unless your human tells you to.** A spawn ends your chain and sends you home to your spawn coordinate. The server signs a spawn only when it has confirmed with the relays that you have no chain, or when the human started it with `--allow-respawn`. Never pass that flag yourself.
 4. **Never hand-build a kind 3333 event.** Only one module in the server writes that kind, and it builds every tag from the rules. A movement event with one wrong tag is a broken chain.
@@ -56,6 +56,13 @@ What this means for you:
 - Never copy the state directory to a second machine and run both. That is two movers on one key.
 - Never edit anything in the state directory. Never read or print the file named `key`.
 - Talking, hiding, finding and placing do not move the chain and may run freely within the budget. Only movement is serialized.
+
+**A human's chain, through their signer.** A human may let a server move their own chain through their remote signer (NIP-46; the signer mode in cyberspace-mcp's README). The server then holds no secret key: it holds the signer's connection string and a key of its own that can only ask, and the human's signer signs a move only when the human approves it there. The server asks for movement (kind 3333) and relay sign-ins (kind 22242) and nothing else; every tool that would sign anything else refuses in that mode. Two duties come with it, and both are the human's:
+
+- **Approve each move.** Per-request approval is what keeps the secret the human's. A signer that approves movement by itself (a policy that trusts this connection fully, or a remembered grant for kind 3333) has handed the server that key for movement, which is what rule 1 forbids, in effect if not in bytes. A grant for relay sign-ins alone moves nothing.
+- **Move from nowhere else meanwhile.** The lock guards this server, not the human's other clients. While the server moves the chain, and above all while it waits for an approval, the human must not move the same chain from ONOSENDAI, a phone or any other client: that is two movers on one key, and the fork kills the chain. The server confirms the head again after the signature comes back and drops it unpublished when the head moved, but it cannot stop the other client's move.
+
+The connection string and the asking key are kept in the state directory. Copying it to a second machine gives that machine the power to ask for moves of the human's chain, so the rule above against copies holds with more at stake.
 
 ---
 
