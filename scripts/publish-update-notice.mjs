@@ -22,11 +22,14 @@
 // and prints all three with their signatures withheld (a signed event printed
 // is a notice anyone could publish early). Nothing is sent. With --publish it
 // sends them, refusing unless the key is the release key, then reads the
-// release back from each relay. The secret is never printed.
+// release back from each relay. Before sending it checks that the tag
+// v<version> is in this clone, matches --commit and carries that version in
+// package.json, and asks for the version typed. The secret is never printed.
 
 import { finalizeEvent, getPublicKey, nip19 } from 'nostr-tools'
 import { Relay } from 'nostr-tools/relay'
 import { execFileSync } from 'node:child_process'
+import { createInterface } from 'node:readline/promises'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -46,7 +49,7 @@ function fail(msg) {
 function readKey(path) {
   if (!path) fail('--key <keyfile> is required')
   const st = statSync(path)
-  if ((st.mode & 0o077) !== 0) fail(`${path} is readable by others (mode ${(st.mode & 0o777).toString(8)}); chmod 600 it`)
+  if (process.platform !== 'win32' && (st.mode & 0o077) !== 0) fail(`${path} is readable by others (mode ${(st.mode & 0o777).toString(8)}); chmod 600 it`)
   const hex = readFileSync(path, 'utf8').trim()
   if (!/^[0-9a-f]{64}$/.test(hex)) fail(`${path} does not hold a 64-hex-character secret key`)
   return Uint8Array.from(Buffer.from(hex, 'hex'))
@@ -55,16 +58,28 @@ function readKey(path) {
 /** The arguments, strictly: an unknown flag stops the script rather than being ignored. */
 function parseArgs(argv) {
   const out = { relays: [], publish: false, security: false }
+  const flags = new Set()
   const takes = new Set(['--key', '--version', '--sha256-file', '--note', '--min-safe', '--commit', '--relay', '--created-at'])
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
-    if (a === '--publish') { out.publish = true; continue }
-    if (a === '--security') { out.security = true; continue }
+    if (a === '--publish' || a === '--security') {
+      if (flags.has(a)) fail(`${a} was given twice`)
+      flags.add(a)
+      out[a.slice(2)] = true
+      continue
+    }
     if (!takes.has(a)) fail(`unknown argument ${a}`)
     const v = argv[++i]
     if (v === undefined) fail(`${a} needs a value`)
-    if (a === '--relay') out.relays.push(v)
-    else out[a.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = v
+    if (a === '--relay') {
+      if (!/^wss:\/\/[^\s/]+/.test(v)) fail(`--relay ${v} is not a wss:// URL`)
+      out.relays.push(v)
+      continue
+    }
+    const name = a.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase())
+    // Given twice is a mistake to stop at, never a choice to make quietly: what is published stays on every copy.
+    if (name in out) fail(`${a} was given twice`)
+    out[name] = v
   }
   return out
 }
@@ -114,6 +129,12 @@ async function main() {
   if (args.note === undefined) fail('--note "<one line>" is required (say what the release fixes; it may be empty only if you pass --note "")')
   if (args.note && noteOf(args.note) !== args.note.trim()) fail('--note must be one plain line of at most 280 characters with no link: copies show nothing else (src/updates.ts noteOf)')
 
+  const sk = readKey(args.key)
+  const pubkey = getPublicKey(sk)
+  if (pubkey !== RELEASE_PUBKEY) {
+    if (args.publish) fail(`the key in ${args.key} is ${nip19.npubEncode(pubkey)}, not the release key ${nip19.npubEncode(RELEASE_PUBKEY)}; every copy would ignore these events`)
+    console.error(`publish-update-notice: this key is not the release key; a dry run only (every copy would ignore these events)`)
+  }
   // The bundle, by its .sha256 (the file the release workflow wrote and the signer checked).
   if (!args.sha256File) fail('--sha256-file <cyberspace-mcp-X.Y.Z.tar.gz.sha256> is required: a NIP-82 release points at its bundle')
   const m = /^([0-9a-f]{64}) [ *]?(\S+)\n?$/.exec(readFileSync(args.sha256File, 'utf8'))
@@ -124,21 +145,21 @@ async function main() {
   const size = existsSync(tarball) ? statSync(tarball).size : null
 
   // The commit: given, or the tag's.
-  let commit = args.commit ?? null
-  if (commit === null) {
-    try {
-      commit = execFileSync('git', ['-C', fileURLToPath(new URL('..', import.meta.url)), 'rev-parse', `v${version}^{commit}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
-    } catch { commit = null }
-  }
+  const repo = fileURLToPath(new URL('..', import.meta.url))
+  const git = (...a) => { try { return execFileSync('git', ['-C', repo, ...a], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() } catch { return null } }
+  const tagCommit = git('rev-parse', `v${version}^{commit}`)
+  let commit = args.commit ?? tagCommit
   if (commit !== null && !/^[0-9a-f]{40}$/.test(commit)) fail('--commit must be a full 40-hex commit id')
+  if (args.publish) {
+    // Publishing cannot be undone (every copy keeps the highest version and minimum it sees): the tag must be here, agree with --commit, and carry this version.
+    if (!tagCommit) fail(`there is no tag v${version} in this clone; fetch the tags first (git fetch --tags)`)
+    if (commit !== tagCommit) fail(`--commit ${commit} is not the commit of tag v${version} (${tagCommit})`)
+    let tagged = null
+    try { tagged = JSON.parse(git('show', `v${version}:package.json`) ?? 'null')?.version ?? null } catch { tagged = null }
+    if (tagged !== version) fail(`package.json at tag v${version} says ${tagged ?? 'nothing readable'}, not ${version}`)
+  }
   if (commit === null) console.error(`publish-update-notice: no tag v${version} here and no --commit: the events carry no commit`)
 
-  const sk = readKey(args.key)
-  const pubkey = getPublicKey(sk)
-  if (pubkey !== RELEASE_PUBKEY) {
-    if (args.publish) fail(`the key in ${args.key} is ${nip19.npubEncode(pubkey)}, not the release key ${nip19.npubEncode(RELEASE_PUBKEY)}; every copy would ignore these events`)
-    console.error(`publish-update-notice: this key is not the release key; a dry run only (every copy would ignore these events)`)
-  }
   const relays = [...new Set([NOTICE_RELAY, ...args.relays])]
   const createdAt = args.createdAt !== undefined ? Number(args.createdAt) : Math.floor(Date.now() / 1000)
   if (!Number.isSafeInteger(createdAt) || createdAt <= 0) fail('--created-at must be unix seconds')
@@ -158,6 +179,13 @@ async function main() {
     console.error('Dry run: nothing was sent. Add --publish to send these three events.')
     return
   }
+
+  // The last word is the key holder's: the version, typed.
+  console.log(JSON.stringify({ summary, relays, readsAs: read }, null, 2))
+  const rl = createInterface({ input: process.stdin, output: process.stderr })
+  const typed = (await rl.question(`Publish ${summary} to ${relays.join(', ')}? Type the version (${version}) to go on: `)).trim()
+  rl.close()
+  if (typed !== version) fail('not confirmed; nothing was sent')
 
   let failed = 0
   for (const url of relays) {

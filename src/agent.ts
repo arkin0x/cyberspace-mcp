@@ -1348,7 +1348,7 @@ export class Agent {
     const heard = this.chat.unreadSummary()
     // Below the update notice's min_safe, a stranger's line wakes nothing and is not counted (updates.ts GATED_FEATURES).
     const chatHeard = this.strangersOff()
-      ? { ...heard, wake: heard.wake === 'stranger' ? null : heard.wake, count: heard.fromOperator, addressed: heard.addressedFromOperator, unaddressed: heard.fromOperator - heard.addressedFromOperator }
+      ? { ...heard, wake: heard.wake === 'stranger' ? null : heard.wake, count: heard.fromOperator, addressed: heard.addressedFromOperator, unaddressed: heard.fromOperator - heard.addressedFromOperator, latestAt: heard.fromOperator ? heard.latestAt : null, strangersOff: true }
       : heard
     const chatWords = chatHeard.addressed > 0
       ? ` Chat: ${chatHeard.addressed} unread line(s) address you${chatHeard.addressedFromOperator ? `, ${chatHeard.addressedFromOperator} from your operator` : ''}: call listen, and answer with say (reply_to the line).`

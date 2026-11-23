@@ -198,7 +198,7 @@ export async function runDoctor(argv, deps) {
                     ? { name: 'relay', verdict: 'ok', detail: `${a.url} answers` }
                     : { name: 'relay', verdict: 'fail', detail: `${a.url}: ${a.outcome}${'reason' in a && a.reason ? ` (${a.reason})` : ''}`, fix: 'check the network, or the relays in config.json' });
             }
-            notices = await relays.query(noticeFilter(deps.releasePubkey ?? RELEASE_PUBKEY), deps.relayMaxWaitMs ?? 6000, deps.noticeRelays ?? [...new Set([...settings.relays, NOTICE_RELAY])]).catch(() => []);
+            notices = await relays.query(noticeFilter(deps.releasePubkey ?? RELEASE_PUBKEY), deps.relayMaxWaitMs ?? 6000, deps.noticeRelays ?? [...new Set([...settings.relays, NOTICE_RELAY])]).catch(() => null);
             if (operator) {
                 const where = [...new Set([...settings.relays, ...(deps.lookupRelays ?? GENERAL_RELAYS)])];
                 const lists = await relays.queryEach({ kinds: [3, 10050], authors: [operator, pubkey] }, deps.relayMaxWaitMs ?? 6000, where);
@@ -304,7 +304,7 @@ function updateCheck(stateDir, live, deps) {
     } })();
     const s = judge(seenWith(kept, live, deps.releasePubkey ?? RELEASE_PUBKEY, Math.floor(Date.now() / 1000)), running);
     const n = s.latest;
-    const asked = live === null ? ' (the relays were not asked: no key yet)' : '';
+    const asked = live === null ? ' (the relays could not be asked)' : '';
     const fix = n ? `${updateCommands(n.version).join(' ')} Nothing installs by itself.` : undefined;
     const when = n ? `, released ${new Date(n.created_at * 1000).toISOString().slice(0, 10)}` : '';
     const note = n?.note ? `: ${n.note}` : '';

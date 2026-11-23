@@ -49,6 +49,12 @@ export const AVAILABLE_LINE_EVERY_MS = 6 * 60 * 60_000;
 export const UNSAFE_LINE_EVERY_MS = 15 * 60_000;
 /** How often an undelivered DM is tried again. */
 const RETELL_MS = 30 * 60_000;
+/** How long a DM waits for the other releases a relay sends at once. */
+const SETTLE_MS = 5_000;
+/** The least time between two DMs about updates, in seconds. */
+const TELL_EVERY_S = 60 * 60;
+/** The least time between a DM and one saying a minimum newly switched features off. */
+const URGENT_TELL_EVERY_S = 10 * 60;
 const FILE = 'update.json';
 /**
  * What a copy below the notice's min_safe switches off until it is updated
@@ -56,7 +62,7 @@ const FILE = 'update.json';
  * words in doctor and the tool replies come from this list.
  */
 export const GATED_FEATURES = {
-    /** Strangers' words: listen, look and wait_for leave out chat lines by anyone but the operator and the agent, and no stranger's line wakes a turn, as listenTo "operator" does. */
+    /** Strangers' chat: listen, look and wait_for leave out chat lines by anyone but the operator and the agent, and no stranger's line wakes a turn. Other text strangers wrote (bag labels, profiles) is not gated here; operator-only mode covers it once it lands. */
     strangerWords: 'strangers\' chat lines are not shown and wake nothing (operator only)',
     /** Wallet payments: the wallet pays nothing; a HOSAKA invoice goes to the operator by DM instead. */
     payments: 'the wallet pays nothing (HOSAKA invoices go to your operator)',
@@ -83,11 +89,19 @@ export function parseSemver(s) {
 export function compareSemver(a, b) {
     return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 }
-/** This copy's version, from its package.json (one folder above src/ and dist/); 0.0.0 when it cannot be read, which every min_safe is above. */
+/** A running version: X.Y.Z, or X.Y.Z-<pre-release>, which is below X.Y.Z (semver precedence). Null when it is neither. */
+export function parseRunning(s) {
+    if (typeof s !== 'string')
+        return null;
+    const m = /^([^-+]+)(-[0-9A-Za-z.-]+)?$/.exec(s);
+    const v = m ? parseSemver(m[1]) : null;
+    return v ? { v, pre: !!m[2] } : null;
+}
+/** This copy's version, from its package.json (one folder above src/ and dist/); 0.0.0 when it cannot be read, which every minimum is above. */
 export function runningVersion() {
     try {
         const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-        return pkg.name === 'cyberspace-mcp' && parseSemver(pkg.version) ? String(pkg.version) : '0.0.0';
+        return pkg.name === 'cyberspace-mcp' && parseRunning(pkg.version) ? String(pkg.version) : '0.0.0';
     }
     catch {
         return '0.0.0';
@@ -130,6 +144,10 @@ const HEX40 = /^[0-9a-f]{40}$/;
 const HEX128 = /^[0-9a-f]{128}$/;
 /** Control characters (newlines included), and the bidirectional overrides that make text read other than it is. */
 const UNSAFE_TEXT = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+/** What a shown note may hold: letters, digits, plain spaces and ordinary punctuation. No backtick, pipe, dollar, angle bracket, line separator, zero-width or format character. */
+const NOTE_CHARS = /^[\p{L}\p{M}\p{N} .,;:!?'"()&%/+#*=@\[\]-]*$/u;
+/** A link or a command target by another name: a URI scheme (nostr:npub..., magnet:...) or a domain (evil.example/fix.sh). */
+const LINKISH = /[a-z][a-z0-9+.-]*:[^\s]|[a-z0-9-]+\.[a-z][a-z0-9-]*[a-z](\/|\b)/i;
 /** Single-valued tags whose meaning parseNotice knows; each may appear once at most. */
 const ONCE = new Set(['d', 'i', 'version', 'c', 'min_allowed_version', 'security', 'commit']);
 /**
@@ -139,10 +157,11 @@ const ONCE = new Set(['d', 'i', 'version', 'c', 'min_allowed_version', 'security
  * must not be able to put a "run this" link in front of every operator.
  */
 export function noteOf(content) {
-    const first = (content.split(/\r?\n/).find((l) => l.trim() !== '') ?? '').trim().replace(/^#+\s*/, '');
-    if (!first || first.includes('://') || UNSAFE_TEXT.test(first))
+    const first = (content.split(/\r?\n/).find((l) => l.trim() !== '') ?? '').replace(/^[\s#]+/, '').trim();
+    if (!first || first.includes('://') || UNSAFE_TEXT.test(first) || !NOTE_CHARS.test(first) || LINKISH.test(first))
         return '';
-    return first.length > MAX_NOTE ? `${first.slice(0, MAX_NOTE - 3)}...` : first;
+    const chars = Array.from(first);
+    return chars.length > MAX_NOTE ? `${chars.slice(0, MAX_NOTE - 3).join('').trimEnd()}...` : first;
 }
 /**
  * The release an event carries, or null when it is not one this copy trusts
@@ -202,7 +221,7 @@ export function parseNotice(raw, trustedPubkey, nowS) {
             one[t[0]] = t[1];
         }
         else if (t[0] === 'a') {
-            if (t[1].startsWith(`${APP_KIND}:`))
+            if ((t[1] ?? '').startsWith(`${APP_KIND}:`))
                 apps.push(t[1]);
         }
         else if (t[0] === 'e') {
@@ -290,8 +309,14 @@ export function absorbAll(seen, events, trustedPubkey, nowS) {
 }
 /** What the releases seen mean for a copy at `running` (0.0.0 when it cannot be read, below every minimum). */
 export function judge(seen, running) {
-    const r = parseSemver(running) ?? [0, 0, 0];
-    const behind = (v) => v !== null && compareSemver(r, parseSemver(v)) < 0;
+    const r = parseRunning(running) ?? { v: [0, 0, 0], pre: false };
+    // A pre-release of X.Y.Z is below X.Y.Z.
+    const behind = (v) => {
+        if (v === null)
+            return false;
+        const c = compareSemver(r.v, parseSemver(v));
+        return c < 0 || (c === 0 && r.pre);
+    };
     const base = { running, latest: seen.latest, minSafe: seen.minSafe, security: behind(seen.security) };
     if (behind(seen.minSafe))
         return { state: 'unsafe', ...base };
@@ -336,13 +361,19 @@ export class UpdateWatch {
     lastLineState = null;
     closer = null;
     timer = null;
+    settle = null;
+    /** Our clock (seconds) at the last DM, for the hourly cap. */
+    lastToldAt = null;
+    /** The minimum the last DM said this copy is below, if any. */
+    lastToldMin = null;
     constructor(deps) {
         this.deps = deps;
         this.releasePubkey = deps.releasePubkey ?? RELEASE_PUBKEY;
         this.running = deps.running ?? VERSION;
         const saved = deps.dir.readJson(FILE, null);
-        const told = saved?.version === 2 && saved.told && typeof saved.told === 'object' ? saved.told : {};
-        this.state = { version: 2, seen: saved?.version === 2 ? keptSeen(saved.seen) : { ...NOTHING_SEEN }, told };
+        // What another release key signed (an older build's, or a stolen one's) does not count here.
+        const ours = saved?.version === 3 && saved.releasePubkey === this.releasePubkey;
+        this.state = { version: 3, releasePubkey: this.releasePubkey, seen: ours ? keptSeen(saved.seen) : { ...NOTHING_SEEN }, told: ours ? keptTold(saved.told) : {} };
     }
     /** Listen for releases (subscribe opens the live subscription and returns its closer), and tell the operator about one already kept. */
     start(subscribe) {
@@ -360,6 +391,9 @@ export class UpdateWatch {
         if (this.timer)
             clearInterval(this.timer);
         this.timer = null;
+        if (this.settle)
+            clearTimeout(this.settle);
+        this.settle = null;
     }
     /** Take an event if it is a trusted release that changes what was seen. Returns whether it changed anything. */
     consider(ev) {
@@ -377,7 +411,13 @@ export class UpdateWatch {
         this.deps.log(`update notice: ${n.version}${n.security ? ' (security)' : ''}${n.minSafe ? `, min_allowed_version ${n.minSafe}` : ''}; running ${this.running}: ${s.state}`);
         if (s.state !== was)
             this.lastLineAt = null;
-        void this.tellOnce();
+        const wait = this.deps.settleMs ?? SETTLE_MS;
+        if (wait <= 0)
+            void this.tellOnce();
+        else if (!this.settle) {
+            this.settle = setTimeout(() => { this.settle = null; void this.tellOnce(); }, wait);
+            this.settle.unref?.();
+        }
         return true;
     }
     status() {
@@ -412,29 +452,41 @@ export class UpdateWatch {
         return this.telling;
     }
     async doTell() {
-        const s = this.status();
-        if (!s.latest || (s.state !== 'available' && s.state !== 'unsafe'))
-            return;
-        const key = `${s.latest.version}|${s.minSafe ?? ''}`;
-        if (this.state.told[key])
-            return;
-        let ok = false;
-        try {
-            ok = this.deps.hasOperator();
-        }
-        catch {
-            ok = false;
-        }
-        if (!ok)
-            return;
-        try {
-            await this.deps.tell(dmWords(s));
-            this.state.told[key] = this.deps.now();
-            this.save();
-            this.deps.log(`update notice: told the operator about ${s.latest.version}`);
-        }
-        catch (err) {
-            this.deps.log(`update notice: could not tell the operator yet: ${err instanceof Error ? err.message : String(err)}`);
+        // Again after each DM: a release that came in while one was being sent is told about too (within the cap).
+        for (let i = 0; i < 3; i++) {
+            const s = this.status();
+            if (!s.latest || (s.state !== 'available' && s.state !== 'unsafe'))
+                return;
+            const key = `${s.latest.version}|${s.minSafe ?? ''}`;
+            if (this.state.told[key])
+                return;
+            let ok = false;
+            try {
+                ok = this.deps.hasOperator();
+            }
+            catch {
+                ok = false;
+            }
+            if (!ok)
+                return;
+            // At most one DM an hour, so a burst of releases (or a stolen key) cannot flood the operator; the retry timer tells the newest later.
+            // A minimum newly above this copy is told sooner (ten minutes), since features just switched off.
+            const now = this.deps.now();
+            const urgent = s.state === 'unsafe' && this.lastToldMin !== s.minSafe;
+            if (this.lastToldAt !== null && now - this.lastToldAt < (urgent ? URGENT_TELL_EVERY_S : TELL_EVERY_S))
+                return;
+            try {
+                await this.deps.tell(dmWords(s));
+                this.lastToldAt = now;
+                this.lastToldMin = s.state === 'unsafe' ? s.minSafe : this.lastToldMin;
+                this.state.told[key] = now;
+                this.save();
+                this.deps.log(`update notice: told the operator about ${s.latest.version}`);
+            }
+            catch (err) {
+                this.deps.log(`update notice: could not tell the operator yet: ${err instanceof Error ? err.message : String(err)}`);
+                return;
+            }
         }
     }
     save() {
@@ -480,10 +532,20 @@ export function keptSeen(raw) {
     const semverOrNull = (x) => (typeof x === 'string' && parseSemver(x) ? x : null);
     return { latest: keptNotice(s.latest), minSafe: semverOrNull(s.minSafe), security: semverOrNull(s.security) };
 }
-/** The doctor's view: what serve kept, with what the relays answered now folded in. Reads only. */
+/** What update.json says the operator was told: version keys to times; anything else is dropped. */
+function keptTold(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+        return {};
+    const out = {};
+    for (const [k, v] of Object.entries(raw))
+        if (typeof v === 'number' && Number.isFinite(v))
+            out[k] = v;
+    return out;
+}
+/** The doctor's view: what serve kept (when the same release key signed it), with what the relays answered now folded in. Reads only. */
 export function seenWith(keptFile, live, trustedPubkey, nowS) {
     const f = keptFile && typeof keptFile === 'object' ? keptFile : null;
-    const kept = f?.version === 2 ? keptSeen(f.seen) : { ...NOTHING_SEEN };
+    const kept = f?.version === 3 && f.releasePubkey === trustedPubkey ? keptSeen(f.seen) : { ...NOTHING_SEEN };
     return live ? absorbAll(kept, live, trustedPubkey, nowS) : kept;
 }
 //# sourceMappingURL=updates.js.map

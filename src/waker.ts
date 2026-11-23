@@ -256,7 +256,8 @@ export interface WakeData {
   /** quiet: the operator is still out of reach and the agent already told them so under this STRATEGY; it wakes nobody. */
   operatorMoved?: { eventId?: string; action?: string; to?: string; distance?: string; at?: number; quiet?: boolean } | null
   roamDue?: boolean
-  chatHeard?: { wake?: 'operator' | 'stranger' | null; addressed?: number } | null
+  /** strangersOff: this copy is below the update notice's minimum safe version, so a stranger's line wakes nothing (updates.ts). */
+  chatHeard?: { wake?: 'operator' | 'stranger' | null; addressed?: number; strangersOff?: boolean } | null
   /** The server switched the follow watch off and no inbox or follow_operator has said so yet. */
   followSwitchedOff?: { at?: number; reason?: string } | null
 }
@@ -763,6 +764,8 @@ export class Waker {
     if ((w === 'operator' && !this.deps.chatOrders) || (w === 'stranger' && this.pendingChat.wake === null)) {
       this.pendingChat = { wake: w, addressed: Number(data.chatHeard?.addressed ?? 0) }
     }
+    // A stranger's wake kept from before the gate switched on (updates.ts) is dropped: no turn for it.
+    if (data.chatHeard?.strangersOff === true && this.pendingChat.wake === 'stranger') this.pendingChat = { wake: null, addressed: 0 }
     return data
   }
 
