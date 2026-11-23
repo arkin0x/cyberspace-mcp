@@ -51,6 +51,23 @@ npm ci --ignore-scripts   # nothing needs an install script: dist is committed
 npm i -g .           # optional: the global command points into this folder; keep it
 ```
 
+### Updating
+
+Every running copy hears about new releases by itself: the release key (below) publishes each release as a signed nostr event, and the server tells you in `doctor`, in a short line at the end of tool replies, and once by DM if you are its operator ("Update notices" below). It never updates itself. To update:
+
+```sh
+# a clone
+cd cyberspace-mcp
+git pull
+npm ci --omit=dev --ignore-scripts
+# then restart serve (systemctl --user restart cyberspace-mcp, or however you run it)
+
+# installed with npm i -g
+npm i -g github:arkin0x/cyberspace-mcp#v<version>
+```
+
+From a release bundle, download the new bundle and check it as [docs/releasing.md](docs/releasing.md) says ("Using a release"), then point your client or service at the new folder; the state directory stays where it is. `npx github:arkin0x/cyberspace-mcp` without a pin follows master on every launch, so it updates when it restarts.
+
 `cyberspace-core` and `sno-core` are installed from GitHub at the exact commits ONOSENDAI pins, so the events this server builds are the events ONOSENDAI builds. Both are pinned as `git+https` URLs; npm records hosted GitHub dependencies as `git+ssh` in the lockfile by design and clones over https first, so `npm ci` needs no SSH key (ONOSENDAI's lockfile reads the same way). Both are pinned by full commit hash, never by a tag that could move, and every registry package in the lockfile carries its sha512 hash; `npm run check:lockfile` (run in CI) refuses a lockfile that loses either.
 
 Then run it. With no `--state` it uses `$CYBERSPACE_MCP_STATE`, else `~/.cyberspace-mcp`, the same directory `init` and `serve` use; pass `--state` for an agent of its own. The directory is created if it does not exist; the key is created on the first run.
@@ -356,6 +373,7 @@ The human may connect a Nostr Wallet Connect wallet (NIP-47) so the agent's HOSA
 | `travel.json` | The travel log: when each note of the last 24 hours was posted (so the daily limit survives a restart) and the write relays last resolved, with where they came from. Never the notes' text. |
 | `line/` | The hyperspace line (`src/hyperspace/line.ts`): the NTH `headers-v1` blobs as fetched, each kept only after it verified by proof of work from genesis through the checkpoints (`headers-NNN.bin`, about 46 MB for the whole chain), the manifest they were read from (`manifest.json`), and `line.json`, which says what is verified up to which height and when the manifest was last read. The blobs are re-verified, never trusted, when a process starts; only what the manifest says is new or changed is fetched again. |
 | `hosaka-ride.json` | A ride bought from HOSAKA, while it is in hand: the HOSAKA it was bought from, the idempotency key, the job id and poll token, the invoice, the decision about it (paid by the server, or sent to the operator), the state, and the proof and its Level 1 result once it arrives. Cleared once the hyperjump is recorded, or on `cancel`. A restart resumes from it, with the head reserved again. |
+| `update.json` | What the release key's update notices add up to (`src/updates.ts`), with the key that signed them (a build with another release key starts over): the latest release seen (its event id, time, version, minimum safe version, security flag, the first line of its notes, commit and asset ids), the highest minimum safe version any release carried (only ever raised), the highest security release, and which versions the operator was told about by DM, so each is told once. Delete it to forget them; the next start reads the releases from the relays again. |
 | `payments.json` | Every payment the server attempted from the human's wallet: HOSAKA's deposit id, the ride's key, the job, the block, the payment hash, the sats and fees, the sha256 of the preimage the wallet returned (equal to the payment hash when the payment is proven), the state (`sending`, `paid`, `failed`, `unknown`) and the time. Never the invoice string, the preimage or the connection string. The daily limit is counted from it. |
 | `http-token` | With `serve --token` or `init --token`: the bearer token the MCP URL requires, mode 600. Printed once, when made, and only when `serve`'s output is a terminal. |
 | `claude-mcp.json` | Written by `init --client claude`: the Claude Code MCP configuration for the URL (and the token header), mode 600. |
@@ -480,7 +498,30 @@ npub1ttlpyy4r6lrsvgtxmny8wny2pakp8xwpurvuc3a6pae2jnv8wpestxy4ks
 5afe1212a3d7c7062166dcc8774c8a0f6c1399c1e0d9cc47ba0f72a94d877073
 ```
 
-It is not the owner's personal key and not any agent's key; it publishes nothing to relays. Check a download with `scripts/verify-manifest.mjs`, one file that needs only Node: `node verify-manifest.mjs release cyberspace-mcp-<version>.tar.gz` (with the `.sig.json` beside it) or `node verify-manifest.mjs skill skills/cyberspace`. It prints `OK` and exits 0, or names every file that differs. The format, the signing steps and what a signature does and does not prove are in [docs/signing.md](docs/signing.md).
+It is not the owner's personal key and not any agent's key. On relays it publishes only release notices (below). Check a download with `scripts/verify-manifest.mjs`, one file that needs only Node: `node verify-manifest.mjs release cyberspace-mcp-<version>.tar.gz` (with the `.sig.json` beside it) or `node verify-manifest.mjs skill skills/cyberspace`. It prints `OK` and exits 0, or names every file that differs. The format, the signing steps and what a signature does and does not prove are in [docs/signing.md](docs/signing.md).
+
+## Update notices
+
+When a release is cut, the release key publishes it to `wss://relay.onosendai.tech` as [NIP-82](https://github.com/nostr-protocol/nips/pull/2526) events, the format ngit and Zapstore use for software releases: a kind 32267 app listing (`d` `cyberspace-mcp`), a kind 30063 release (`d` `cyberspace-mcp@<version>`) and a kind 3063 asset for the bundle (its sha256 in `x`). The release carries two tags of ours that other readers skip: `["security", "true"]` and `["min_allowed_version", "<version>"]`, the oldest version still safe to run.
+
+Every running copy subscribes to the release key's kind 30063 events for `cyberspace-mcp`, on its relays and on `wss://relay.onosendai.tech`, and reads one only when its signature verifies and its author is the release key compiled into the code (`src/updates.ts`). Anything malformed is ignored whole. The latest release is the highest version seen, never just the newest event, and the minimum safe version is the highest any release ever named, kept in `update.json` and never lowered, so a relay that replays old events or hides new ones cannot roll it back. A build with a different release key compiled in starts over. No GitHub call is made from your machine. The one new connection is to `wss://relay.onosendai.tech` when your relays do not already include it; like every relay this server talks to, it may ask the agent to authenticate (NIP-42) with its own key.
+
+It then tells you, and only tells you:
+
+- `cyberspace-mcp doctor` shows an `updates` line: `ok` when you run the latest, `WARN` with the update commands when a newer one is out, `FAIL` when you are below the minimum safe version.
+- Tool replies end with a short line, at most every six hours (every fifteen minutes below the minimum). It names the version and never the release notes, so the model reads the same words whoever wrote the notes.
+- The operator gets one DM per announced version (and another if the minimum rises), at most one an hour (ten minutes for a minimum that just switched features off), about the latest release, with the first line of the release notes and the commands above. The commands come from the code, never from the event, and a notes line that holds anything like a link, a domain, a command character or invisible text is not shown.
+
+**Below the minimum safe version** a copy switches off its risky parts until it is updated, and says why in `doctor`, in tool replies, in `listen` and in `wallet`:
+
+| Switched off | What happens instead |
+|---|---|
+| Strangers' chat | `listen`, `look` and `wait_for` leave out chat lines by anyone but your operator and the agent itself, and a stranger's line never wakes a turn (operator only). |
+| Wallet payments | The wallet pays nothing; a HOSAKA invoice goes to your operator by DM, as with no wallet connected. |
+
+Moving, riding, looking, finding and building keep working, and so do your DMs. Other text strangers wrote (bag labels, riddles, profile names) is not switched off by this gate; `--listen-to operator` covers that.
+
+**Nothing installs by itself, by design.** A stolen release key must never mean code running on every server. The worst it can do is announce a release that is not there (the update commands still fetch from GitHub, which the key does not control) or raise the minimum so the two features above stay off until a release ships a new key; a copy running that release forgets everything the old key said.
 
 ## Disclaimer
 

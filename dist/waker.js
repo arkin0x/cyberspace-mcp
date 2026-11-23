@@ -668,6 +668,9 @@ export class Waker {
         if ((w === 'operator' && !this.deps.chatOrders) || (w === 'stranger' && this.pendingChat.wake === null)) {
             this.pendingChat = { wake: w, addressed: Number(data.chatHeard?.addressed ?? 0) };
         }
+        // A stranger's wake kept from before the gate switched on (updates.ts) is dropped: no turn for it.
+        if (data.chatHeard?.strangersOff === true && this.pendingChat.wake === 'stranger')
+            this.pendingChat = { wake: null, addressed: 0 };
         return data;
     }
     consumeAgain() {
