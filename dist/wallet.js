@@ -30,11 +30,15 @@
 // bounds the sum of the last 24 hours (rolling), routing fees included once
 // the wallet reports them. Either at 0 turns paying off.
 import { createHash } from 'node:crypto';
+import { appendFileSync, chmodSync } from 'node:fs';
+import { Approvals } from './approvals.js';
 import { decodeBolt11 } from './bolt11.js';
 import { NwcClient, NwcError, NwcNotSent, parseNwc } from './nwc.js';
 export const DEFAULT_MAX_PAYMENT_SATS = 2000;
 export const DEFAULT_MAX_DAILY_SATS = 5000;
 const LEDGER_FILE = 'payments.json';
+/** One line per payment's outcome, for the human: no invoice, no preimage. */
+export const PAYMENTS_LOG = 'payments.log';
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** An invoice this close to its expiry is not paid: the payment could land after it and be lost in flight. */
 const EXPIRY_MARGIN_S = 60;
@@ -58,12 +62,16 @@ export class Wallet {
     refuse;
     ledger;
     info = null;
+    /** The operator's approvals, payment by payment (approvals.ts). */
+    approvals;
+    pendingLog = [];
     constructor(dir, opts) {
         this.dir = dir;
         this.maxPaymentSats = opts.maxPaymentSats;
         this.maxDailySats = opts.maxDailySats;
         this.now = opts.now ?? Date.now;
         this.payTimeoutMs = opts.payTimeoutMs;
+        this.approvals = new Approvals(dir, opts.paymentApproval ?? 'none', this.now, opts.approvalTtlMs);
         this.refuse = opts.refuse ?? (() => null);
         this.client = opts.nwc ? new NwcClient(parseNwc(opts.nwc, opts.source), { websocketImplementation: opts.websocketImplementation, maxWaitMs: opts.maxWaitMs, log: opts.log, beforePublish: opts.beforePublish }) : null;
         const saved = dir.readJson(LEDGER_FILE, null);
@@ -75,10 +83,14 @@ export class Wallet {
                 p.state = 'unknown';
                 p.error = 'the server stopped while this payment was going out; whether it was paid is unknown';
                 changed = true;
+                this.pendingLog.push(p);
             }
         }
         if (changed)
             this.save();
+        // Each payment's outcome has its line, the one a restart decided included.
+        for (const p of this.pendingLog.splice(0))
+            this.logSpend(p, { depositId: p.depositId, rideKey: p.rideKey, apiUrl: p.apiUrl, jobId: p.jobId, toHeight: p.toHeight, expectedMsats: p.sats * 1000, expectedHash: p.paymentHash });
     }
     /** Whether the human connected a wallet. */
     get connected() {
@@ -151,6 +163,10 @@ export class Wallet {
         const decision = this.decide(bolt11, ctx);
         if (!decision.pay)
             throw new Error(`not paid: ${decision.reason}`);
+        // The operator's approval is checked here, at the last step before money moves, whatever the caller did: one approval, this amount, this invoice, once.
+        if (this.approvals.required && (!ctx.approvalCode || !this.approvals.use(ctx.approvalCode, decision.sats, decision.invoice.paymentHash))) {
+            throw new Error('not paid: your operator has not approved this exact payment');
+        }
         const record = {
             depositId: ctx.depositId, rideKey: ctx.rideKey, apiUrl: ctx.apiUrl, jobId: ctx.jobId, toHeight: ctx.toHeight,
             paymentHash: decision.invoice.paymentHash, sats: decision.sats, feesSats: null, preimageHash: null, state: 'sending', at: this.now(), error: null,
@@ -164,11 +180,13 @@ export class Wallet {
             if (record.preimageHash === record.paymentHash) {
                 record.state = 'paid';
                 this.save();
+                this.logSpend(record, ctx);
                 return { state: 'paid', record };
             }
             record.state = 'unknown';
             record.error = 'the wallet said it paid, but the preimage it returned does not match the invoice\'s payment hash';
             this.save();
+            this.logSpend(record, ctx);
             return { state: 'unknown', record, reason: record.error };
         }
         catch (err) {
@@ -177,19 +195,43 @@ export class Wallet {
             record.state = definite ? 'failed' : 'unknown';
             record.error = err instanceof NwcError ? `${err.code}: ${words}` : words;
             this.save();
+            this.logSpend(record, ctx);
             return definite ? { state: 'failed', record, reason: record.error } : { state: 'unknown', record, reason: record.error };
         }
+    }
+    /**
+     * One line per payment's outcome in <state>/payments.log (mode 600): when,
+     * how much, what for, the result and the day's total. No invoice, no
+     * preimage, nothing that could be spent or replayed.
+     */
+    logSpend(record, ctx) {
+        try {
+            this.dir.guard('write payments.log');
+            const line = {
+                at: new Date(record.at).toISOString(), state: record.state, sats: record.sats, feesSats: record.feesSats, purpose: ctx.purpose ?? `HOSAKA ride to block ${ctx.toHeight}`,
+                payee: ctx.apiUrl, jobId: ctx.jobId, depositId: record.depositId, paymentHash: record.paymentHash, approval: ctx.approvalCode ?? null, error: record.error,
+                spentLast24hSats: this.spentLast24hSats(), maxDailySats: this.maxDailySats,
+            };
+            appendFileSync(this.dir.file(PAYMENTS_LOG), JSON.stringify(line) + '\n', { mode: 0o600 });
+            // The mode is set only when the file is made: a file that was already there is held to 600 too.
+            chmodSync(this.dir.file(PAYMENTS_LOG), 0o600);
+        }
+        catch { /* the ledger has it; a log that cannot be written never undoes a payment */ }
     }
     /** The wallet tool: connected or not, the balance when the wallet tells, today's spend, the limits. Never the connection string. */
     async status() {
         const spent = this.spentLast24hSats();
         const limits = { maxPaymentSats: this.maxPaymentSats, maxDailySats: this.maxDailySats };
         const recent = this.ledger.payments.slice(-5).map((p) => ({ jobId: p.jobId, toHeight: p.toHeight, sats: p.sats, feesSats: p.feesSats, state: p.state, at: new Date(p.at).toISOString(), paymentHash: p.paymentHash, error: p.error }));
-        const rules = 'You never pay anything yourself: no tool takes an invoice. The server pays only HOSAKA invoices for rides it bought for you (ride with prover: "hosaka"), within these limits; above them, or if a payment fails, the invoice goes to your operator by DM. Only your operator can connect a wallet or change the limits.';
+        const approval = this.approvals.required
+            ? ' Your operator approves every payment first: the server holds each one and DMs them a code; it pays only when they answer with it, within 30 minutes, and tells them after. You cannot approve anything, and you never see the code.'
+            : '';
+        const rules = `You never pay anything yourself: no tool takes an invoice. The server pays only HOSAKA invoices for rides it bought for you (ride with prover: "hosaka"), within these limits; above them, or if a payment fails, the invoice goes to your operator by DM.${approval} Only your operator can connect a wallet or change the limits.`;
+        const approvalData = { paymentApproval: this.approvals.mode, awaitingApproval: this.approvals.pending() };
         if (!this.client) {
             return {
                 text: `No wallet is connected. A HOSAKA ride's invoice goes to your operator by DM for them to pay. Your operator can connect a Nostr Wallet Connect wallet in the server's configuration (wallet.json in the state directory), with limits per payment and per day. ${rules}`,
-                data: { connected: false, reachable: null, balanceSats: null, spentLast24hSats: spent, remainingTodaySats: Math.max(0, this.maxDailySats - spent), limits, payments: recent },
+                data: { connected: false, reachable: null, balanceSats: null, spentLast24hSats: spent, remainingTodaySats: Math.max(0, this.maxDailySats - spent), limits, payments: recent, ...approvalData },
             };
         }
         let reachable = true;
@@ -216,7 +258,7 @@ export class Wallet {
         ].filter(Boolean).join(' ');
         return {
             text,
-            data: { connected: true, reachable, canPay, paymentsOff: this.refuse(), encryption: this.info?.encryption ?? null, balanceSats, spentLast24hSats: spent, remainingTodaySats: Math.max(0, this.maxDailySats - spent), limits, payments: recent, problem },
+            data: { connected: true, reachable, canPay, paymentsOff: this.refuse(), encryption: this.info?.encryption ?? null, balanceSats, spentLast24hSats: spent, remainingTodaySats: Math.max(0, this.maxDailySats - spent), limits, payments: recent, problem, ...approvalData },
         };
     }
     stop() {

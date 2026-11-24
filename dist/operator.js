@@ -76,6 +76,7 @@ import { DM_RELAYS_KIND, MAX_BACKDATE_SECONDS, RUMOR_KIND, SEEN_REACTION, WRAP_K
 import { mergeAnswers } from './nostr/relayOutcome.js';
 import { normalizeRelay } from './nostr/relays.js';
 import { Refusal } from './tool.js';
+import { withoutCodes } from './approvals.js';
 const FILE = 'dms.json';
 /** Contact lists. */
 const CONTACTS_KIND = 3;
@@ -562,6 +563,11 @@ ${halt}` : line;
                 this.state.seen[wrap.id] = wrap.created_at;
                 continue;
             }
+            // An answer to a payment approval request: read, and never an order (whether or not the operator follows the agent).
+            if (this.approves(rumor)) {
+                this.state.seen[wrap.id] = wrap.created_at;
+                continue;
+            }
             if (!following) {
                 this.state.waiting[wrap.id] = wrap.created_at;
                 if (!wasWaiting)
@@ -581,7 +587,8 @@ ${halt}` : line;
                 droppedStopped.push(rumor);
                 continue;
             }
-            orders.push({ id: rumor.id, at: rumor.created_at, text: rumor.content, strategy: isStrategy(rumor), continue: isContinue(rumor) });
+            // An approval code in an order (a reply that named it but did not answer it) is blanked: a model never sees one (approvals.ts).
+            orders.push({ id: rumor.id, at: rumor.created_at, text: withoutCodes(rumor.content), strategy: isStrategy(rumor), continue: isContinue(rumor) });
         }
         // A STOP read in this same batch drops the orders it covers, wherever they came in it.
         for (const o of orders.filter((m) => this.stoppedOrder({ id: m.id, created_at: m.at }, cut)))
@@ -757,6 +764,12 @@ ${halt}` : line;
             }
             if (rumor.kind !== RUMOR_KIND)
                 continue;
+            // An answer to a payment approval request, taken by the background poll so the payment does not wait for a turn: read, never an order.
+            if (this.approves(rumor)) {
+                this.state.seen[wrap.id] = wrap.created_at;
+                marked = true;
+                continue;
+            }
             // A STOP from the operator is carried out at once and read here: it is never an order, so nothing counts it or wakes a turn for it.
             if (isStop(rumor)) {
                 if (!following)
@@ -803,6 +816,15 @@ ${halt}` : line;
             for (const fn of [...this.ordersListeners])
                 fn(unread);
         return result;
+    }
+    /** Whether an operator's message answered a payment approval request (approvals.ts). Never throws: an approval store that fails leaves the message an ordinary one. */
+    approves(rumor) {
+        try {
+            return this.deps.answerApproval?.(rumor.content, rumor.created_at, rumor.id) ?? false;
+        }
+        catch {
+            return false;
+        }
     }
     /** Forget the wraps that fall before the next read's window. */
     prune() {
@@ -864,7 +886,8 @@ ${halt}` : line;
         if (facts.inbox.length === 0)
             throw new Refusal(`${this.noInboxWords(facts)} Nothing was sent.`);
         const wrapped = this.deps.wrap(operator, text);
-        this.remember(text);
+        // Kept so a public tool refuses to repeat it; an approval code is blanked, so no refusal can tell a model what it is (approvals.ts).
+        this.remember(withoutCodes(text));
         const toThem = await this.deps.relays.publishMany(facts.inbox, wrapped.toRecipient);
         if (!toThem.ok) {
             throw new Refusal(`Not delivered: no relay of your operator's DM inbox took it (${Object.entries(toThem.reasons).map(([u, r]) => `${u}: ${r}`).join('; ') || toThem.reason}). The relays' words are verbatim.`);

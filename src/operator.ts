@@ -80,6 +80,7 @@ import { mergeAnswers, type RelayAnswer } from './nostr/relayOutcome.js'
 import { normalizeRelay, type Relays } from './nostr/relays.js'
 import type { StateDir } from './state/dir.js'
 import { Refusal, type ToolResult } from './tool.js'
+import { withoutCodes } from './approvals.js'
 
 const FILE = 'dms.json'
 /** Contact lists. */
@@ -200,6 +201,11 @@ interface OperatorFacts {
 }
 
 export interface OperatorChannelDeps {
+  /**
+   * A DM from the operator, sealed by their key and addressed to the agent, offered first to the payment approvals (approvals.ts):
+   * true when it answered an approval request, and is then read and never an order.
+   */
+  answerApproval?: (text: string, createdAt: number, id: string) => boolean
   /** listenTo "operator" (listenTo.ts): others' messages are not even counted in what inbox answers. */
   operatorOnly?: boolean
   pubkey: string
@@ -651,13 +657,16 @@ ${halt}` : line
       if (rumor.pubkey !== operator || !toMe) { this.state.seen[wrap.id] = wrap.created_at; ignored++; continue }
       // The operator's reaction to one of the agent's messages: read, and never an order.
       if (rumor.kind !== RUMOR_KIND) { this.state.seen[wrap.id] = wrap.created_at; continue }
+      // An answer to a payment approval request: read, and never an order (whether or not the operator follows the agent).
+      if (this.approves(rumor)) { this.state.seen[wrap.id] = wrap.created_at; continue }
       if (!following) { this.state.waiting[wrap.id] = wrap.created_at; if (!wasWaiting) waiting++; continue }
       this.state.seen[wrap.id] = wrap.created_at
       if (this.claimReaction(rumor, now)) reactTo.push(rumor.id)
       // A STOP is a control the server carries out, never an order the model reads.
       if (isStop(rumor)) { if (this.claimStop(rumor, now, seenBefore, cut)) stopping.push(rumor); continue }
       if (this.stoppedOrder(rumor, cut)) { droppedStopped.push(rumor); continue }
-      orders.push({ id: rumor.id, at: rumor.created_at, text: rumor.content, strategy: isStrategy(rumor), continue: isContinue(rumor) })
+      // An approval code in an order (a reply that named it but did not answer it) is blanked: a model never sees one (approvals.ts).
+      orders.push({ id: rumor.id, at: rumor.created_at, text: withoutCodes(rumor.content), strategy: isStrategy(rumor), continue: isContinue(rumor) })
     }
     // A STOP read in this same batch drops the orders it covers, wherever they came in it.
     for (const o of orders.filter((m) => this.stoppedOrder({ id: m.id, created_at: m.at }, cut))) droppedStopped.push({ id: o.id, created_at: o.at } as Rumor)
@@ -810,6 +819,8 @@ ${halt}` : line
         continue
       }
       if (rumor.kind !== RUMOR_KIND) continue
+      // An answer to a payment approval request, taken by the background poll so the payment does not wait for a turn: read, never an order.
+      if (this.approves(rumor)) { this.state.seen[wrap.id] = wrap.created_at; marked = true; continue }
       // A STOP from the operator is carried out at once and read here: it is never an order, so nothing counts it or wakes a turn for it.
       if (isStop(rumor)) {
         if (!following) continue
@@ -848,6 +859,11 @@ ${halt}` : line
     const unread = this.unreadOrders()
     if (unread > 0) for (const fn of [...this.ordersListeners]) fn(unread)
     return result
+  }
+
+  /** Whether an operator's message answered a payment approval request (approvals.ts). Never throws: an approval store that fails leaves the message an ordinary one. */
+  private approves(rumor: Rumor): boolean {
+    try { return this.deps.answerApproval?.(rumor.content, rumor.created_at, rumor.id) ?? false } catch { return false }
   }
 
   /** Forget the wraps that fall before the next read's window. */
@@ -901,7 +917,8 @@ ${halt}` : line
     if (!facts) throw new Refusal('The operator channel is closed.')
     if (facts.inbox.length === 0) throw new Refusal(`${this.noInboxWords(facts)} Nothing was sent.`)
     const wrapped = this.deps.wrap(operator, text)
-    this.remember(text)
+    // Kept so a public tool refuses to repeat it; an approval code is blanked, so no refusal can tell a model what it is (approvals.ts).
+    this.remember(withoutCodes(text))
     const toThem = await this.deps.relays.publishMany(facts.inbox, wrapped.toRecipient)
     if (!toThem.ok) {
       throw new Refusal(`Not delivered: no relay of your operator's DM inbox took it (${Object.entries(toThem.reasons).map(([u, r]) => `${u}: ${r}`).join('; ') || toThem.reason}). The relays' words are verbatim.`)

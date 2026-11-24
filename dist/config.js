@@ -64,6 +64,10 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
   --max-payment-sats <n>        The most one payment may be. Default ${DEFAULTS.maxPaymentSats}; 0 turns paying off.
   --max-daily-sats <n>          The most the payments of the last 24 hours may add up to.
                                 Default ${DEFAULTS.maxDailySats}; 0 turns paying off.
+  --payment-approval <who>      operator: every payment is held until your operator approves it
+                                by DM with the code the server sends them (each code one payment,
+                                expiring in 30 minutes); the limits above still apply. none: the
+                                limits alone. Default none.
   --travel-log                  Let log_travel post public kind 1 notes about the agent's travels. Off by default.
   --travel-log-max-per-day <n>  The most travel log notes in any 24 hours. Default ${DEFAULT_TRAVEL_PER_DAY}
   --chat-wake-minutes <n>       A stranger's chat line that addresses the agent is reported for
@@ -94,7 +98,7 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
 
 The same keys may live in <state>/config.json: relays, operator, name, about,
 capCallSeconds, capSessionSeconds, capDailySeconds, threads, maxSidestepHeight, allowRespawn, hosakaUrl,
-nwc, maxPaymentSats, maxDailySats, chatWakeMinutes, publishMaxPerDay, avatarMaxPerDay, kitsDir, listenTo, and travelLog: { "enabled": true,
+nwc, maxPaymentSats, maxDailySats, paymentApproval, chatWakeMinutes, publishMaxPerDay, avatarMaxPerDay, kitsDir, listenTo, and travelLog: { "enabled": true,
 "maxPerDay": 6, "tagOperator": false }. The wallet string may also be the "nwc" key
 of <state>/wallet.json, which the server only reads.`;
 /** An http(s) URL without a trailing slash, or a thrown sentence. */
@@ -209,6 +213,9 @@ export function parseArgs(argv) {
             case '--chat-wake-minutes':
                 out.chatWakeMinutes = num(a, next());
                 break;
+            case '--payment-approval':
+                out.paymentApproval = paymentApprovalSetting(a, next());
+                break;
             case '--listen-to':
                 out.listenTo = listenToSetting(a, next());
                 break;
@@ -309,6 +316,7 @@ export function settingsFrom(args, file, walletFile = {}) {
         ...nwcSetting(args, file, walletFile),
         maxPaymentSats: args.maxPaymentSats ?? (file.maxPaymentSats !== undefined ? sats('config.json maxPaymentSats', file.maxPaymentSats) : DEFAULTS.maxPaymentSats),
         maxDailySats: args.maxDailySats ?? (file.maxDailySats !== undefined ? sats('config.json maxDailySats', file.maxDailySats) : DEFAULTS.maxDailySats),
+        paymentApproval: args.paymentApproval ?? (file.paymentApproval !== undefined ? paymentApprovalSetting('config.json paymentApproval', file.paymentApproval) : 'none'),
         travelLog: travelLogSettings(args, file.travelLog),
         chatWakeMinutes: args.chatWakeMinutes ?? posNum(file.chatWakeMinutes) ?? DEFAULTS.chatWakeMinutes,
         publishMaxPerDay: args.publishMaxPerDay ?? (posNum(file.publishMaxPerDay) !== undefined ? Math.max(1, Math.floor(posNum(file.publishMaxPerDay))) : DEFAULTS.publishMaxPerDay),
@@ -318,6 +326,12 @@ export function settingsFrom(args, file, walletFile = {}) {
         ...((args.kitsDir ?? str(file.kitsDir)) ? { kitsDir: args.kitsDir ?? expandHome(str(file.kitsDir)) } : {}),
         listenTo: args.listenTo ?? (file.listenTo !== undefined ? listenToSetting('config.json listenTo', file.listenTo) : 'everyone'),
     };
+}
+/** "operator" or "none", or a thrown sentence: a typo must never quietly drop the approval the human asked for. */
+function paymentApprovalSetting(where, raw) {
+    if (raw === 'operator' || raw === 'none')
+        return raw;
+    throw new Error(`${where} must be "operator" or "none"; got ${JSON.stringify(raw)}`);
 }
 /** "everyone" or "operator", or a thrown sentence: a typo here must not quietly let everyone in. */
 function listenToSetting(where, raw) {
