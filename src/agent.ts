@@ -572,6 +572,81 @@ export class Agent {
     return `Your profile names ${nip19.npubEncode(named)} as operator, but your human started this server with operator ${nip19.npubEncode(configured)}. Only the operator your human configured gives orders, so no DM is read or sent until they agree. Call identity without operator to publish the configured one again.`
   }
 
+  /**
+   * Whether a relay that accepted the last published profile is one this
+   * server still publishes to. False once the configured relays have all
+   * changed (the defaults moved off cyberspace.nostr1.com and
+   * onosendai.feeds.relay.tools in #95): then nobody reading the current
+   * relays finds the profile, its bot flag or its operator.
+   */
+  private profileOnCurrentRelays(last: ProfileFile): boolean {
+    const now = new Set(this.relays.urls)
+    return this.profileAccepted(last).some((url) => {
+      try { return now.has(normalizeURL(url)) } catch { return false }
+    })
+  }
+
+  /**
+   * Every relay known to hold the last published profile: those profile.json
+   * names, and those the outbox has since seen take the same event (its
+   * replay at start sends an event the canonical relay has not taken to the
+   * current relays, byte for byte, while the outbox still holds it).
+   */
+  private profileAccepted(last: ProfileFile): string[] {
+    // The same profile, whichever signature: the one profile.json names, or a republish the outbox sent on later.
+    const tags = JSON.stringify(last.tags)
+    const same = this.outbox.entries.filter((e) => e.event.id === last.eventId || (e.event.kind === 0 && e.event.pubkey === this.pubkey && e.event.content === last.content && JSON.stringify(e.event.tags) === tags))
+    return [...new Set([...last.accepted, ...same.flatMap((e) => e.accepted)])]
+  }
+
+  /** The startup republish while it runs (republishProfileIfMoved): identity waits for it, so the two never write profile.json over each other. */
+  private republishing: Promise<unknown> | null = null
+
+  /**
+   * At serve start: the last published profile, published again unchanged
+   * (its content and tags as they were, signed now) when no relay that
+   * accepted it is configured any more, so an agent set up on older relays
+   * moves its profile to its current ones without a call to identity. Not
+   * when no relay ever accepted it (a refusal is not retried), nor while the
+   * profile names another operator than the configured one.
+   */
+  republishProfileIfMoved(): Promise<{ status: 'unneeded' } | { status: 'published'; eventId: string; accepted: string[]; refused: Record<string, string> } | { status: 'refused'; eventId: string; refused: Record<string, string>; reason: string }> {
+    const running = this.republishMoved()
+    const settled = running.then(() => undefined, () => undefined)
+    this.republishing = settled
+    void settled.then(() => { if (this.republishing === settled) this.republishing = null })
+    return running
+  }
+
+  private async republishMoved(): Promise<{ status: 'unneeded' } | { status: 'published'; eventId: string; accepted: string[]; refused: Record<string, string> } | { status: 'refused'; eventId: string; refused: Record<string, string>; reason: string }> {
+    const last = this.dir.readJson<ProfileFile | null>('profile.json', null)
+    if (!last || this.profileAccepted(last).length === 0 || this.operatorProblem()) return { status: 'unneeded' }
+    // Every current relay refused it already: a refusal is not retried at each start (identity still asks, when called).
+    const current = this.relays.urls
+    if (current.every((url) => Object.keys(last.refused ?? {}).some((r) => { try { return normalizeURL(r) === url } catch { return false } }))) return { status: 'unneeded' }
+    if (this.profileOnCurrentRelays(last)) {
+      // The outbox's replay carried the same event to a current relay: profile.json says so too, so doctor names it.
+      const accepted = this.profileAccepted(last)
+      if (accepted.length > last.accepted.length) this.dir.writeJson('profile.json', { ...last, accepted } satisfies ProfileFile)
+      return { status: 'unneeded' }
+    }
+    const event = this.sign({ kind: 0, created_at: nowSeconds(), content: last.content, tags: last.tags })
+    const entry = this.outbox.add(event)
+    const result = await this.outbox.send(entry)
+    const refused = entry.refused ?? {}
+    // profile.json changed meanwhile (identity published another): that one stands.
+    const now = this.dir.readJson<ProfileFile | null>('profile.json', null)
+    if (now?.eventId === last.eventId) {
+      // Taken: profile.json names the new event. Not taken: the old relays' acceptance stays (doctor, visit), and the refusals are noted.
+      this.dir.writeJson('profile.json', entry.accepted.length > 0
+        ? { content: last.content, tags: last.tags, eventId: event.id, accepted: entry.accepted, refused } satisfies ProfileFile
+        : { ...last, refused: { ...(last.refused ?? {}), ...refused } } satisfies ProfileFile)
+    }
+    return result.ok && entry.accepted.length > 0
+      ? { status: 'published', eventId: event.id, accepted: entry.accepted, refused }
+      : { status: 'refused', eventId: event.id, refused, reason: result.ok ? 'no relay accepted it' : result.reason }
+  }
+
   /** Whether strangers' chat lines are switched off: this copy is below the update notice's min_safe (updates.ts GATED_FEATURES). */
   private strangersOff(): boolean {
     return this.updates.off('strangerWords') !== null
@@ -811,6 +886,8 @@ export class Agent {
   // ---- identity -------------------------------------------------------------
 
   async identity(input: { name?: string; about?: string; picture?: string; operator?: string } = {}): Promise<ToolResult> {
+    // The startup republish first, so this reads and writes profile.json after it (republishProfileIfMoved).
+    if (this.republishing) await this.republishing
     // The operator is locked (arkinox, 2026-10-11): the one the human
     // configured, else the one the published profile already names. Only
     // the human names an operator (D2 review, 2026-11-09): an agent may run
@@ -849,7 +926,10 @@ export class Agent {
     }
     const template = profileTemplate(fields, nowSeconds())
     let publish: { status: 'unchanged' } | { status: 'published'; eventId: string; accepted: string[]; refused: Record<string, string> } | { status: 'refused'; eventId: string; refused: Record<string, string>; reason: string }
-    if (last && last.content === template.content && JSON.stringify(last.tags) === JSON.stringify(template.tags) && last.accepted.length > 0) {
+    // Unchanged and still on a relay this server publishes to. A profile only
+    // the relays of an older configuration hold (the old defaults, before
+    // #95) is published again, so the agent's profile follows its relays.
+    if (last && last.content === template.content && JSON.stringify(last.tags) === JSON.stringify(template.tags) && this.profileOnCurrentRelays(last)) {
       publish = { status: 'unchanged' }
     } else {
       const event = this.sign(template)
