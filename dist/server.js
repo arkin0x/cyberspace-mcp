@@ -19,7 +19,7 @@ import { startProgress } from './progress.js';
 import { VERSION } from './updates.js';
 /** The seven rules with no undo (agents note 6), as the resource carries them. */
 const FATAL_RULES = [
-    'Never share a key between two running agents, or between an agent and a human. This server made its own key; there is no way to import another.',
+    'Never share a key between two running agents, and never hold a human\'s secret key. This server made its own key; there is no way to import another. A human\'s own chain moves here only through their remote signer, with their approval on every move.',
     'Before every move, confirm the live head. The tools do this; never bypass them. Signing from a stale head forks the chain, and a fork kills it.',
     'Never publish a spawn after your first, unless your human tells you to. A spawn ends your chain and sends you home. The server signs one only when the relays say you have no chain, or when the human started it with --allow-respawn.',
     'Never hand-build a kind 3333 event. Every movement event comes from the server\'s builder, which writes every tag from the rules.',
