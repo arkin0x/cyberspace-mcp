@@ -84,7 +84,13 @@ export class Presence extends EventEmitter {
   private stopLive: (() => void) | null = null
   private readonly profiles = new Map<string, ReadProfile>()
 
-  constructor(private readonly relays: Relays, private readonly me: string, private readonly log: (line: string) => void = () => {}) {
+  constructor(
+    private readonly relays: Relays,
+    private readonly me: string,
+    private readonly log: (line: string) => void = () => {},
+    /** Whose words reach the model (listenTo.ts): a kind 0 of anyone else is read for its bot flag and operator, never its name. */
+    private readonly hears: (pubkey: string) => boolean = () => true,
+  ) {
     super()
   }
 
@@ -195,7 +201,8 @@ export class Presence extends EventEmitter {
         if (!have || isNewerAction({ createdAt: ev.created_at, id: ev.id }, { createdAt: have.created_at, id: have.id })) newest.set(ev.pubkey, ev)
       }
       for (const pubkey of missing) {
-        const profile = readProfile(newest.get(pubkey))
+        const read = readProfile(newest.get(pubkey))
+        const profile = this.hears(pubkey) ? read : { ...read, name: null }
         this.profiles.set(pubkey, profile)
         const person = this.people.get(pubkey)
         if (person) person.profile = profile

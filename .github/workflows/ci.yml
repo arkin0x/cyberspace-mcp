@@ -14,7 +14,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - run: node scripts/check-lockfile.mjs
+      # No dependency install scripts: nothing here needs one (dist is committed, the git deps ship theirs).
+      - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm test
   check-dist:
@@ -26,5 +28,5 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run check:dist

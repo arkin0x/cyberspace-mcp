@@ -679,7 +679,8 @@ function fromInner(inner, outer, keyHex, facts) {
     if (!innerAuthentic(inner, outer.pubkey))
         return null;
     const coordHex = tag(inner, 'C');
-    if (!coordHex)
+    // Anyone's bag: a C that is not 64 hex would make hexToCoord throw and fail the whole find (security review, 2026-11-23).
+    if (!coordHex || !HEX_64.test(coordHex.toLowerCase()))
         return null;
     const { x, y, z, plane } = coordToXyz(hexToCoord(coordHex));
     const base = {

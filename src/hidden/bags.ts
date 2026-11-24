@@ -821,7 +821,8 @@ interface BagFacts { height: number; bag: BagSettings }
 function fromInner(inner: Rumor, outer: NostrEvent, keyHex: string, facts: BagFacts): Hidden | null {
   if (!innerAuthentic(inner, outer.pubkey)) return null
   const coordHex = tag(inner, 'C')
-  if (!coordHex) return null
+  // Anyone's bag: a C that is not 64 hex would make hexToCoord throw and fail the whole find (security review, 2026-11-23).
+  if (!coordHex || !HEX_64.test(coordHex.toLowerCase())) return null
   const { x, y, z, plane } = coordToXyz(hexToCoord(coordHex))
   const base = {
     eventId: inner.id,

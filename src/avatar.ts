@@ -20,7 +20,7 @@
 
 import { AVATAR_CONTENT_MAX, AVATAR_CONTENT_WARN, AVATAR_KIND, avatarContentBytes, verifyAvatar } from 'cyberspace-core'
 import { fromPayload, toPayload, type ShardModel } from 'sno-core/shards'
-import { CLIENT_NAME, type EventTemplate } from './nostr/event.js'
+import { CLIENT_TAG, type EventTemplate } from './nostr/event.js'
 
 export { AVATAR_CONTENT_MAX, AVATAR_CONTENT_WARN, AVATAR_KIND, avatarContentBytes, verifyAvatar }
 
@@ -37,7 +37,7 @@ export function avatarTemplate(shard: ShardModel | null, createdAt: number): Eve
   return {
     kind: AVATAR_KIND,
     created_at: createdAt,
-    tags: shard ? [['name', shard.name], ['client', CLIENT_NAME]] : [['client', CLIENT_NAME]],
+    tags: shard ? [['name', shard.name], [...CLIENT_TAG]] : [[...CLIENT_TAG]],
     content: shard ? JSON.stringify(toPayload(shard)) : '',
   }
 }

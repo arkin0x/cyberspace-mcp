@@ -18,6 +18,12 @@ export interface ServeDeps {
   log: (line: string) => void
   /** Where the one-time token line goes (stdout for a person). */
   print: (line: string) => void
+  /**
+   * Whether print reaches a person at a terminal. When not (a supervisor, a
+   * service manager, nohup), stdout lands in a log file, so the token is not
+   * printed there, only where it is kept. Default true.
+   */
+  interactive?: boolean
   /** Tests: the fake network, a calibration, short waits; merged into the agent's config. */
   agent?: Partial<AgentConfig>
   /** Tests: the waker's clock and watchdog pace. */
@@ -53,8 +59,13 @@ export async function startServe(argv: string[], deps: ServeDeps): Promise<Servi
   if (serveSettings.token) {
     const t = ensureToken(stateDir)
     token = t.token
-    // Printed this once, when it is made; afterwards it is only in the file (mode 600).
-    if (t.created) deps.print(`Bearer token for this server (kept in ${stateDir}/http-token; shown only now): ${t.token}`)
+    // Printed this once, when it is made, and only to a terminal; afterwards it is only in the file (mode 600).
+    // Under a supervisor stdout is a log file, often readable by others (security review, 2026-11-23).
+    if (t.created) {
+      deps.print(deps.interactive === false
+        ? `Bearer token made for this server: kept in ${stateDir}/http-token (mode 600), not printed since this output is not a terminal. Send it as Authorization: Bearer <the file's contents>.`
+        : `Bearer token for this server (kept in ${stateDir}/http-token; shown only now): ${t.token}`)
+    }
   } else if (readToken(stateDir)) {
     log('a token file exists but serve.token is off: requests are not checked for it')
   }

@@ -6,7 +6,9 @@
 // the profile and following the agent, the operator's DM inbox (kind 10050),
 // the agent's own kind 10050, the relays answering, serve running, and the
 // wake command starting (run with --version, so no model is called), and
-// the lock with this machine's id for it. It reads; it writes nothing and
+// the lock with this machine's id for it, and the release key's update
+// notice (updates.ts): whether a newer version is out, and whether this copy
+// is below its minimum safe version. It reads; it writes nothing and
 // takes no lock, so it runs beside serve.
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
@@ -24,6 +26,7 @@ import { defaultStateDir, mcpUrl, serveSettingsFrom, splitServeArgs } from './se
 import { PAUSE_FILE } from './waker.js';
 import { ForeignKeyError, StateDir } from './state/dir.js';
 import { describeLock, MACHINE_ID_ENV } from './state/lock.js';
+import { NOTICE_RELAY, RELEASE_PUBKEY, VERSION, GATED_FEATURES, judge, noticeFilter, seenWith, updateCommands } from './updates.js';
 export const DOCTOR_USAGE = `cyberspace-mcp doctor: check that your agent can hear you and answer.
 
 Usage: cyberspace-mcp doctor [--state <dir>] [--port <n>]
@@ -152,6 +155,29 @@ export async function runDoctor(argv, deps) {
         add({ name: 'operator', verdict: 'info', detail: 'none: the agent answers only to its MCP client, and operator DMs are off', fix: 'to take orders from a human by nostr DM: cyberspace-mcp init --operator <their npub>' });
     else
         add({ name: 'operator', verdict: 'ok', detail: nip19.npubEncode(operator) });
+    // Payments: the limits, and whether the operator approves each one first (approvals.ts).
+    {
+        const limits = `at most ${settings.maxPaymentSats} sats a payment and ${settings.maxDailySats} sats a day`;
+        const wallet = settings.nwc ? 'a wallet is connected' : 'no wallet is connected (invoices go to the operator)';
+        if (settings.paymentApproval === 'operator') {
+            add(operator
+                ? { name: 'payments', verdict: 'ok', detail: `approval on: every payment waits for your operator's code by DM (30 minutes, one payment each), and they are told after; ${limits}; ${wallet}` }
+                : { name: 'payments', verdict: 'warn', detail: `approval on, but there is no operator to approve, so nothing is ever paid; ${limits}; ${wallet}`, fix: 'cyberspace-mcp init --operator <their npub>' });
+        }
+        else {
+            add({ name: 'payments', verdict: 'info', detail: `approval off: the server pays HOSAKA invoices within the limits alone; ${limits}; ${wallet}`, fix: settings.nwc ? 'to approve each payment first: "paymentApproval": "operator" in config.json (or --payment-approval operator)' : undefined });
+        }
+    }
+    // Whose words reach the model (listenTo.ts).
+    if (settings.listenTo === 'operator') {
+        const profileOperator = StateDir.open(stateDir).readJson('profile.json', null)?.tags?.find((t) => t[0] === 'p' && t[3] === 'operator')?.[1];
+        add(operator || profileOperator
+            ? { name: 'listening to', verdict: 'ok', detail: 'the operator only: every other pubkey\'s words (chat, DMs, mentions, profile text, what they hid or published) are dropped where they come in' }
+            : { name: 'listening to', verdict: 'warn', detail: 'the operator only, but there is no operator: no one\'s words reach the model but its own', fix: 'cyberspace-mcp init --operator <their npub>' });
+    }
+    else {
+        add({ name: 'listening to', verdict: 'info', detail: 'everyone: strangers\' chat, profile text and what they hid reach the model as untrusted text', fix: operator ? 'to hear only your operator: "listenTo": "operator" in config.json (or --listen-to operator)' : undefined });
+    }
     // The building kits are local files: say which, or that there are none (an agent without them builds from its own objects).
     {
         const lib = new KitLibrary(kitsDirCandidates(stateDir, settings.kitsDir));
@@ -179,6 +205,7 @@ export async function runDoctor(argv, deps) {
     else
         add({ name: 'profile', verdict: 'ok', detail: `bot, ${operator ? 'operator named' : 'no operator'}, on ${profile.accepted.join(', ')}` });
     // The relays, and what they say about the operator and the agent.
+    let notices = null;
     if (pubkey && sk) {
         const secret = sk;
         const relays = new Relays({
@@ -194,6 +221,7 @@ export async function runDoctor(argv, deps) {
                     ? { name: 'relay', verdict: 'ok', detail: `${a.url} answers` }
                     : { name: 'relay', verdict: 'fail', detail: `${a.url}: ${a.outcome}${'reason' in a && a.reason ? ` (${a.reason})` : ''}`, fix: 'check the network, or the relays in config.json' });
             }
+            notices = await relays.query(noticeFilter(deps.releasePubkey ?? RELEASE_PUBKEY), deps.relayMaxWaitMs ?? 6000, deps.noticeRelays ?? [...new Set([...settings.relays, NOTICE_RELAY])]).catch(() => null);
             if (operator) {
                 const where = [...new Set([...settings.relays, ...(deps.lookupRelays ?? GENERAL_RELAYS)])];
                 const lists = await relays.queryEach({ kinds: [3, 10050], authors: [operator, pubkey] }, deps.relayMaxWaitMs ?? 6000, where);
@@ -224,6 +252,8 @@ export async function runDoctor(argv, deps) {
             relays.close();
         }
     }
+    // The release key's releases (NIP-82): what serve kept, with what the relays hold now.
+    add(updateCheck(stateDir, notices, deps));
     // The lock, and this machine's id for it.
     try {
         const { machine, judgment, held, ageMs } = describeLock(stateDir, { machineId: args.machineId, env: deps.env });
@@ -285,5 +315,27 @@ export async function runDoctor(argv, deps) {
             add({ name: 'waker', verdict: 'warn', detail: 'paused (wake.pause exists)', fix: 'cyberspace-mcp wake resume' });
     }
     return done();
+}
+/** The doctor's line for the release key's update notices (updates.ts). */
+function updateCheck(stateDir, live, deps) {
+    const running = deps.runningVersion ?? VERSION;
+    const kept = (() => { try {
+        return JSON.parse(readFileSync(join(stateDir, 'update.json'), 'utf8'));
+    }
+    catch {
+        return null;
+    } })();
+    const s = judge(seenWith(kept, live, deps.releasePubkey ?? RELEASE_PUBKEY, Math.floor(Date.now() / 1000)), running);
+    const n = s.latest;
+    const asked = live === null ? ' (the relays could not be asked)' : '';
+    const fix = n ? `${updateCommands(n.version).join(' ')} Nothing installs by itself.` : undefined;
+    const when = n ? `, released ${new Date(n.created_at * 1000).toISOString().slice(0, 10)}` : '';
+    const note = n?.note ? `: ${n.note}` : '';
+    switch (s.state) {
+        case 'unknown': return { name: 'updates', verdict: 'info', detail: `running ${running}; no release from the release key seen yet${asked}` };
+        case 'current': return { name: 'updates', verdict: 'ok', detail: `running ${running}, the newest (${n.version}${when})` };
+        case 'available': return { name: 'updates', verdict: 'warn', detail: `cyberspace-mcp ${n.version} is out${s.security ? ' (security release)' : ''}; running ${running}${when}${note}`, fix };
+        case 'unsafe': return { name: 'updates', verdict: 'fail', detail: `running ${running}, below the minimum safe version ${s.minSafe}${n ? ` (${n.version} is out${s.security ? ', a security release' : ''}${when})${note}` : ''}. Until you update: ${Object.values(GATED_FEATURES).join('; ')}`, fix: fix ?? `${updateCommands(s.minSafe).join(' ')} Nothing installs by itself.` };
+    }
 }
 //# sourceMappingURL=doctor.js.map

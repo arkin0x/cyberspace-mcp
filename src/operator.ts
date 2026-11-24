@@ -80,6 +80,7 @@ import { mergeAnswers, type RelayAnswer } from './nostr/relayOutcome.js'
 import { normalizeRelay, type Relays } from './nostr/relays.js'
 import type { StateDir } from './state/dir.js'
 import { Refusal, type ToolResult } from './tool.js'
+import { withoutCodes } from './approvals.js'
 
 const FILE = 'dms.json'
 /** Contact lists. */
@@ -200,6 +201,13 @@ interface OperatorFacts {
 }
 
 export interface OperatorChannelDeps {
+  /**
+   * A DM from the operator, sealed by their key and addressed to the agent, offered first to the payment approvals (approvals.ts):
+   * true when it answered an approval request, and is then read and never an order.
+   */
+  answerApproval?: (text: string, createdAt: number, id: string) => boolean
+  /** listenTo "operator" (listenTo.ts): others' messages are not even counted in what inbox answers. */
+  operatorOnly?: boolean
   pubkey: string
   relays: Relays
   dir: StateDir
@@ -253,6 +261,8 @@ export class OperatorChannel {
   private checking: Promise<OrdersCheck> | null = null
   /** What the newest check found; the notice counts what of it is still unread. */
   private lastCheck: OrdersCheck | null = null
+  /** Wraps the background poll marked read as never orders (a stranger's, unreadable), not yet reported by inbox's ignored count. */
+  private ignoredByPoll = 0
   private pollTimer: ReturnType<typeof setInterval> | null = null
   /** The last poll failure logged, so a relay that stays down is logged once, not every 15 s. */
   private pollError: string | null = null
@@ -630,7 +640,9 @@ ${halt}` : line
     const droppedStopped: Rumor[] = []
     const seenBefore = this.seenUnread()
     const cut: { at: number | null } = { at: null }
-    let ignored = 0
+    // What the background poll already marked read as never orders is reported here, once.
+    let ignored = this.ignoredByPoll
+    this.ignoredByPoll = 0
     let waiting = 0
     for (const wrap of mergeAnswers(answers)) {
       if (wrap.kind !== WRAP_KIND || this.state.seen[wrap.id] !== undefined) continue
@@ -645,13 +657,16 @@ ${halt}` : line
       if (rumor.pubkey !== operator || !toMe) { this.state.seen[wrap.id] = wrap.created_at; ignored++; continue }
       // The operator's reaction to one of the agent's messages: read, and never an order.
       if (rumor.kind !== RUMOR_KIND) { this.state.seen[wrap.id] = wrap.created_at; continue }
+      // An answer to a payment approval request: read, and never an order (whether or not the operator follows the agent).
+      if (this.approves(rumor)) { this.state.seen[wrap.id] = wrap.created_at; continue }
       if (!following) { this.state.waiting[wrap.id] = wrap.created_at; if (!wasWaiting) waiting++; continue }
       this.state.seen[wrap.id] = wrap.created_at
       if (this.claimReaction(rumor, now)) reactTo.push(rumor.id)
       // A STOP is a control the server carries out, never an order the model reads.
       if (isStop(rumor)) { if (this.claimStop(rumor, now, seenBefore, cut)) stopping.push(rumor); continue }
       if (this.stoppedOrder(rumor, cut)) { droppedStopped.push(rumor); continue }
-      orders.push({ id: rumor.id, at: rumor.created_at, text: rumor.content, strategy: isStrategy(rumor), continue: isContinue(rumor) })
+      // An approval code in an order (a reply that named it but did not answer it) is blanked: a model never sees one (approvals.ts).
+      orders.push({ id: rumor.id, at: rumor.created_at, text: withoutCodes(rumor.content), strategy: isStrategy(rumor), continue: isContinue(rumor) })
     }
     // A STOP read in this same batch drops the orders it covers, wherever they came in it.
     for (const o of orders.filter((m) => this.stoppedOrder({ id: m.id, created_at: m.at }, cut))) droppedStopped.push({ id: o.id, created_at: o.at } as Rumor)
@@ -693,12 +708,14 @@ ${halt}` : line
         ? `${n} message(s) from your operator wait unread: their contact list (kind 3) could not be found, and a message is an order only when your operator follows you. Tell them with message_operator.`
         : `${n} message(s) from your operator wait unread: your operator does not follow you in their contact list (kind 3), and a message is an order only when they do. Tell them with message_operator.`)
     }
+    // listenTo "operator": others' messages leave no trace at all, not even a count.
+    if (this.deps.operatorOnly) ignored = 0
     if (ignored > 0) lines.push(`${ignored} message(s) from others were ignored: only your operator gives orders.`)
     lines.push(this.strategyLine())
     return {
       text: lines.join('\n'),
       data: {
-        operator: opNpub, inbox: urls, messages: unique, strategy: strategyNow(), renewed: renewed !== null, ignored, ignoredTotal: this.state.ignoredTotal,
+        operator: opNpub, inbox: urls, messages: unique, strategy: strategyNow(), renewed: renewed !== null, ignored, ignoredTotal: this.deps.operatorOnly ? 0 : this.state.ignoredTotal,
         waitingForFollow: Object.keys(this.state.waiting).length, newlyWaiting: waiting, operatorFollows: facts.follows,
         unread: answers.flatMap((a) => (a.outcome === 'answered' ? [] : [{ url: a.url, reason: a.reason }])),
       },
@@ -790,10 +807,20 @@ ${halt}` : line
     for (const wrap of mergeAnswers(answers)) {
       if (wrap.kind !== WRAP_KIND || this.state.seen[wrap.id] !== undefined) continue
       const opened = this.deps.unwrap(wrap)
-      if (!opened.ok) continue
+      // What can never be an order is marked read here, as inbox marks it, so a flood of wraps to the agent is
+      // unwrapped once, not again at every poll (security review, 2026-11-23: 500 junk wraps cost seconds per poll).
+      if (!opened.ok) { this.state.seen[wrap.id] = wrap.created_at; this.ignoredByPoll++; marked = true; continue }
       const { rumor } = opened
       // The agent's own copies are history, never orders, as in inbox.
-      if (rumor.pubkey === this.deps.pubkey || rumor.pubkey !== operator || rumor.kind !== RUMOR_KIND || !rumor.tags.some((t) => t[0] === 'p' && t[1] === this.deps.pubkey)) continue
+      if (rumor.pubkey === this.deps.pubkey || rumor.pubkey !== operator || !rumor.tags.some((t) => t[0] === 'p' && t[1] === this.deps.pubkey)) {
+        this.state.seen[wrap.id] = wrap.created_at
+        if (rumor.pubkey !== this.deps.pubkey) this.ignoredByPoll++
+        marked = true
+        continue
+      }
+      if (rumor.kind !== RUMOR_KIND) continue
+      // An answer to a payment approval request, taken by the background poll so the payment does not wait for a turn: read, never an order.
+      if (this.approves(rumor)) { this.state.seen[wrap.id] = wrap.created_at; marked = true; continue }
       // A STOP from the operator is carried out at once and read here: it is never an order, so nothing counts it or wakes a turn for it.
       if (isStop(rumor)) {
         if (!following) continue
@@ -832,6 +859,11 @@ ${halt}` : line
     const unread = this.unreadOrders()
     if (unread > 0) for (const fn of [...this.ordersListeners]) fn(unread)
     return result
+  }
+
+  /** Whether an operator's message answered a payment approval request (approvals.ts). Never throws: an approval store that fails leaves the message an ordinary one. */
+  private approves(rumor: Rumor): boolean {
+    try { return this.deps.answerApproval?.(rumor.content, rumor.created_at, rumor.id) ?? false } catch { return false }
   }
 
   /** Forget the wraps that fall before the next read's window. */
@@ -885,7 +917,8 @@ ${halt}` : line
     if (!facts) throw new Refusal('The operator channel is closed.')
     if (facts.inbox.length === 0) throw new Refusal(`${this.noInboxWords(facts)} Nothing was sent.`)
     const wrapped = this.deps.wrap(operator, text)
-    this.remember(text)
+    // Kept so a public tool refuses to repeat it; an approval code is blanked, so no refusal can tell a model what it is (approvals.ts).
+    this.remember(withoutCodes(text))
     const toThem = await this.deps.relays.publishMany(facts.inbox, wrapped.toRecipient)
     if (!toThem.ok) {
       throw new Refusal(`Not delivered: no relay of your operator's DM inbox took it (${Object.entries(toThem.reasons).map(([u, r]) => `${u}: ${r}`).join('; ') || toThem.reason}). The relays' words are verbatim.`)

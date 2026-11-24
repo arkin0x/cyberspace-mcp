@@ -18,7 +18,7 @@
 // place (or opened the bag) reads it.
 //
 // Pure: signing and publishing happen in the agent.
-import { CLIENT_NAME } from '../nostr/event.js';
+import { CLIENT_TAG } from '../nostr/event.js';
 import { AUDIO_KIND, CHEST_KIND, HIDDEN_KIND, KEY_KIND, MESSAGE_KIND, SHARD_KIND } from './bags.js';
 import { decryptForRegion, encryptForRegion } from './crypto.js';
 export const COMMENT_KIND = 1111;
@@ -55,7 +55,7 @@ export function commentTemplate(subject, parent, ciphertext, createdAt) {
             ...(parent.address ? [['a', parent.address, '']] : []),
             ['k', String(parent.kind)],
             ['p', parent.pubkey],
-            ['client', CLIENT_NAME],
+            [...CLIENT_TAG],
             ['encrypted', ENCRYPTED_SCHEME, ciphertext, KEY_DERIVATION],
         ],
     };

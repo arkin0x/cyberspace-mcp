@@ -578,13 +578,13 @@ export class Relays {
   }
 
   /**
-   * A live subscription on every configured relay that stays open for the
-   * life of its closer: reissued after any close a relay makes. Events are
-   * handed over as they land, from whichever relay sent them; consumers
-   * merge by id.
+   * A live subscription on every configured relay (or on `urls`) that stays
+   * open for the life of its closer: reissued after any close a relay makes.
+   * Events are handed over as they land, from whichever relay sent them;
+   * consumers merge by id.
    */
-  subscribe(filter: Filter, onEvent: (ev: NostrEvent) => void, onEose?: () => void): () => void {
-    const closers = this.urls.map((url) => this.registryFor(url).subscribe(filter, { onEvent, onEose }))
+  subscribe(filter: Filter, onEvent: (ev: NostrEvent) => void, onEose?: () => void, urls: string[] = this.urls): () => void {
+    const closers = [...new Set(urls.map((u) => normalizeURL(u)))].map((url) => this.registryFor(url).subscribe(filter, { onEvent, onEose }))
     return () => { for (const c of closers) c() }
   }
 

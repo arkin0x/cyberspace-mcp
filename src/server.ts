@@ -18,6 +18,7 @@ import { RENDER_DEFAULT_SIZE, RENDER_MAX_SIZE, RENDER_MIN_SIZE } from './render.
 import { ROAM_DEFAULT_MINUTES, ROAM_MAX_MINUTES, ROAM_MIN_MINUTES } from './roam.js'
 import { MAX_TRAVEL_LOG } from './travel.js'
 import { startProgress, type CallProgress, type Progress, type ProgressExtra } from './progress.js'
+import { VERSION } from './updates.js'
 
 /** The seven rules with no undo (agents note 6), as the resource carries them. */
 const FATAL_RULES = [
@@ -321,7 +322,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
   const kept = selection === 'all' ? null : new Set([...selection, ...WAKER_TOOLS])
   const isShown = (name: string): boolean => !kept || kept.has(name)
   const shown = kept ? { count: available.filter(isShown).length, off: available.filter((n) => !isShown(n)) } : undefined
-  const server = new McpServer({ name: 'cyberspace-mcp', version: '0.0.1' }, { instructions: serverInstructions(GUIDE, shown) })
+  const server = new McpServer({ name: 'cyberspace-mcp', version: VERSION }, { instructions: serverInstructions(GUIDE, shown) })
   // A tool left out of the selection is never registered, so its schema never reaches the client (D7). Installed first, under every other wrapper.
   if (kept || options.seen) {
     const keep = kept

@@ -32,9 +32,13 @@ export async function startServe(argv, deps) {
     if (serveSettings.token) {
         const t = ensureToken(stateDir);
         token = t.token;
-        // Printed this once, when it is made; afterwards it is only in the file (mode 600).
-        if (t.created)
-            deps.print(`Bearer token for this server (kept in ${stateDir}/http-token; shown only now): ${t.token}`);
+        // Printed this once, when it is made, and only to a terminal; afterwards it is only in the file (mode 600).
+        // Under a supervisor stdout is a log file, often readable by others (security review, 2026-11-23).
+        if (t.created) {
+            deps.print(deps.interactive === false
+                ? `Bearer token made for this server: kept in ${stateDir}/http-token (mode 600), not printed since this output is not a terminal. Send it as Authorization: Bearer <the file's contents>.`
+                : `Bearer token for this server (kept in ${stateDir}/http-token; shown only now): ${t.token}`);
+        }
     }
     else if (readToken(stateDir)) {
         log('a token file exists but serve.token is off: requests are not checked for it');

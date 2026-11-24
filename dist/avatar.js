@@ -19,7 +19,7 @@
 // trailing `nonce` field in its content; it reads as any other.
 import { AVATAR_CONTENT_MAX, AVATAR_CONTENT_WARN, AVATAR_KIND, avatarContentBytes, verifyAvatar } from 'cyberspace-core';
 import { fromPayload, toPayload } from 'sno-core/shards';
-import { CLIENT_NAME } from './nostr/event.js';
+import { CLIENT_TAG } from './nostr/event.js';
 export { AVATAR_CONTENT_MAX, AVATAR_CONTENT_WARN, AVATAR_KIND, avatarContentBytes, verifyAvatar };
 /**
  * The most avatars set_avatar may publish in any 24 hours, unless the human
@@ -33,7 +33,7 @@ export function avatarTemplate(shard, createdAt) {
     return {
         kind: AVATAR_KIND,
         created_at: createdAt,
-        tags: shard ? [['name', shard.name], ['client', CLIENT_NAME]] : [['client', CLIENT_NAME]],
+        tags: shard ? [['name', shard.name], [...CLIENT_TAG]] : [[...CLIENT_TAG]],
         content: shard ? JSON.stringify(toPayload(shard)) : '',
     };
 }
