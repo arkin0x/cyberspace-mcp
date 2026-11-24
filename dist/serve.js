@@ -28,6 +28,13 @@ export async function startServe(argv, deps) {
         log(retired);
     const tools = selectTools(settings.tools, !!settings.operator);
     const agent = await Agent.start({ ...settings, log, ...deps.agent });
+    // A profile only older relays hold is published again on the current ones, in the background.
+    void agent.republishProfileIfMoved().then((r) => {
+        if (r.status === 'published')
+            log(`profile: no configured relay held it; published again to ${r.accepted.join(', ')}`);
+        else if (r.status === 'refused')
+            log(`profile: no configured relay held it, and publishing it again failed: ${r.reason}`);
+    }, (err) => log(`profile republish: ${err instanceof Error ? err.message : String(err)}`));
     let token = null;
     if (serveSettings.token) {
         const t = ensureToken(stateDir);
