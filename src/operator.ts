@@ -375,6 +375,16 @@ ${halt}` : line
     this.pollTimer.unref?.()
   }
 
+  /**
+   * Read the DM inbox now, as the background poll does (sharing a check in
+   * flight), so an operator's answer to an approval request counts before
+   * the request is judged (review of 485a2df). Never throws.
+   */
+  async readNow(): Promise<void> {
+    if (this.stopped || !this.deps.operator() || this.deps.operatorProblem?.()) return
+    try { await this.check() } catch { /* the request is judged as it stands */ }
+  }
+
   /** One background check; nothing when no operator may give orders or a check is already running. */
   async pollOnce(): Promise<void> {
     if (this.stopped || this.checking || !this.deps.operator() || this.deps.operatorProblem?.()) return

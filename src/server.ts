@@ -136,7 +136,7 @@ export const STARTER_TOOLS: readonly string[] = ['identity', 'whereami', 'look',
 export const TOOL_NAMES: readonly string[] = [
   'identity', 'whereami', 'look', 'plan_hop', 'hop', 'station', 'board', 'ride', 'ride_status', 'say', 'listen', 'wait_for',
   'find', 'hide', 'items', 'forge_item', 'seal_chest', 'seal_door', 'open_chest', 'comment', 'take', 'place', 'placed', 'remove_placed',
-  'move_placed', 'constrain_placed', 'set_avatar', 'publish_object', 'validate_object', 'render', 'kit', 'kit_piece', 'check_layout', 'budget', 'outbox', 'inbox',
+  'move_placed', 'constrain_placed', 'builds', 'build', 'build_add', 'build_rename', 'build_use', 'build_notes', 'notes', 'delete_build', 'trash', 'restore_build', 'set_avatar', 'publish_object', 'validate_object', 'render', 'kit', 'kit_piece', 'check_layout', 'budget', 'outbox', 'inbox',
   'orders_waiting', 'follow_operator', 'roam', 'visit', 'wallet', 'message_operator', 'log_travel', 'wake_again', 'work_done',
 ]
 
@@ -240,6 +240,9 @@ const contents = z.union([
     }),
   }).describe('A chest. Same as seal_chest.'),
 ])
+
+/** The build a placement belongs to, said once for every tool that places (arkinox, 2026-11-26). */
+const buildArg = z.string().max(80).optional().describe('The build this is part of, in a few words ("aerocarnival course", "castle"): a new label starts a build. Left out: your current build (build_use), else "unlabelled". Kept only on this machine, never published. delete_build takes a whole build out later without touching anything else in the same bags.')
 
 const hintHeights = z.tuple([z.number().int().min(0).max(85), z.number().int().min(0).max(85), z.number().int().min(0).max(85)])
 
@@ -493,6 +496,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
       height: z.number().int().min(0).max(MAX_KEY_HEIGHT),
       hint_heights: hintHeights.optional(),
       riddle: z.string().max(280).optional(),
+      build: buildArg,
     },
     annotations: { readOnlyHint: false, destructiveHint: false },
   }, async (args) => call(() => agent.hide(args)))
@@ -513,6 +517,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
       height: z.number().int().min(0).max(MAX_KEY_HEIGHT),
       hint_heights: hintHeights.optional(),
       riddle: z.string().max(280).optional(),
+      build: buildArg,
     },
     annotations: { readOnlyHint: false, destructiveHint: false },
   }, async (args) => call(() => agent.forgeItem(args)))
@@ -529,6 +534,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
       height: z.number().int().min(0).max(MAX_KEY_HEIGHT),
       hint_heights: hintHeights.optional(),
       riddle: z.string().max(280).optional(),
+      build: buildArg,
     },
     annotations: { readOnlyHint: false, destructiveHint: false },
   }, async (args) => call(() => agent.sealChest(args as Parameters<Agent['sealChest']>[0])))
@@ -554,6 +560,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
       height: z.number().int().min(1).max(MAX_KEY_HEIGHT).describe('The height of the bag that holds the door: room_height or more.'),
       hint_heights: hintHeights.optional(),
       riddle: z.string().max(280).optional(),
+      build: buildArg,
     },
     annotations: { readOnlyHint: false, destructiveHint: false },
   }, async (args) => call(() => agent.sealDoor(args as Parameters<Agent['sealDoor']>[0])))
@@ -597,6 +604,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
       scale: z.number().int().min(0).optional().describe('With kit: each step doubles the piece; 0 (the default) is the size the kit was built at, 1 gibson a unit.'),
       coordinate,
       height: z.number().int().min(0).max(MAX_KEY_HEIGHT),
+      build: buildArg,
     },
     annotations: { readOnlyHint: false, destructiveHint: false },
   }, async (args) => call(() => agent.place(args)))
@@ -614,7 +622,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   server.registerTool('remove_placed', {
     title: 'Remove something you placed',
-    description: 'Take down something you placed, as ONOSENDAI\'s DELETE does. One thing: its bag is read fresh from the relays and rewritten without it, keeping everything else in the bag; when it was the last thing there, the bag itself is deleted (NIP-09 kind 5). A shard hidden by reference also has its sealed object taken down once nothing of yours names it; a public object (yours from publish_object, or anyone\'s) is never unpublished, only its placement goes. A whole bag: whole_bag: true deletes the bag the target is in and everything in it; or give bag (a lookup id or bag id from placed, at least 8 hex) to delete that bag, also one this server holds no key for. Only your own bags: nothing anyone else hid can be removed. Refused, with nothing changed, when target is missing, when the canonical relay does not answer, or when a name fits several things. "last" is the newest thing of any type: when your operator says "the shard", add type "shard". The answer says what each relay said, verbatim.',
+    description: 'Take down something you placed, as ONOSENDAI\'s DELETE does. One thing: its bag is read fresh from the relays and rewritten without it, keeping everything else in the bag; when it was the last thing there, the bag itself is deleted (NIP-09 kind 5). A shard hidden by reference also has its sealed object taken down once nothing of yours names it; a public object (yours from publish_object, or anyone\'s) is never unpublished, only its placement goes. A whole bag: whole_bag: true deletes the bag the target is in and everything in it; or give bag (a lookup id or bag id from placed, at least 8 hex) to delete that bag, also one this server holds no key for. A whole bag that holds pieces of more than one build is refused: use delete_build, which takes one build out and keeps the rest. A whole bag of more than 5 things, or of things in no build, may need your operator\'s approval first: then the call is held and the server asks them by DM; once they approve, make the same call again. A whole bag of things in no build is refused unless your operator approves deletes (name their builds with build_add first, or use delete_build with their ids), and so is any delete that, with what you deleted in the last hour, goes past 5 things, until they approve. Before anything is deleted a backup goes to your trash (trash lists it, restore_build puts it back). Only your own bags: nothing anyone else hid can be removed. Refused, with nothing changed, when target is missing, when the canonical relay does not answer, or when a name fits several things. "last" is the newest thing of any type: when your operator says "the shard", add type "shard". The answer says what each relay said, verbatim.',
     inputSchema: {
       target: z.string().optional().describe(targetWords),
       type: typeWords,
@@ -651,6 +659,91 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   }, async (args) => call(() => agent.constrainPlaced(args)))
+
+  server.registerTool('builds', {
+    title: 'Your builds',
+    description: 'List your builds: each label (what you are building, "aerocarnival course"), its id, how many pieces are placed and in which cubes, how many were removed, and its notes; and your current build (where placements go when they name none). From this machine\'s own record, no relay asked. Builds are kept only on this machine and never published. Read it (and notes) before you build or delete.',
+    annotations: { readOnlyHint: true },
+  }, async () => call(() => agent.buildsList()))
+
+  server.registerTool('build', {
+    title: 'One build',
+    description: 'Show one build\'s pieces (type, name, id, place, cube height), each checked against your bags as the relays hold them now: there, moved or changed outside this server (found under another id or place), or missing. "unlabelled" also lists what is in no build (things placed before builds were kept). Use it before delete_build to see exactly what a build is.',
+    inputSchema: { build: z.string().min(1).describe('The build\'s label (case does not matter) or id, as builds lists it; or "unlabelled".') },
+    annotations: { readOnlyHint: true },
+  }, async (args) => call(() => agent.build(args)))
+
+  server.registerTool('build_add', {
+    title: 'Add placed things to a build',
+    description: 'Record things you already placed under a build, so delete_build and remove_placed can tell your builds apart. Everything placed before builds were kept is in no build ("unlabelled"): name each of your existing builds this way. Give the build (a label or id; a new label starts one) and exactly one of: pieces (ids, as placed lists them), match (every thing whose name contains these words) or bag (every thing in one bag, by its lookup id or bag id). A thing that already belongs to another build is refused, with nothing changed, unless move: true moves it into this one. Check with placed or build first. Kept only on this machine; nothing is published.',
+    inputSchema: {
+      build: z.string().min(1).max(80).describe('The build\'s label or id; a new label starts a build.'),
+      pieces: z.array(z.string()).min(1).max(500).optional().describe('The ids of the things (at least 8 hex each, as placed lists them).'),
+      match: z.string().optional().describe('Instead: every thing whose name or first words contain this (case does not matter).'),
+      bag: z.string().optional().describe('Instead: every thing in one bag, by its lookup id or bag id (at least 8 hex).'),
+      move: z.boolean().optional().describe('true to move things that belong to another build into this one.'),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  }, async (args) => call(() => agent.buildAdd(args)))
+
+  server.registerTool('build_rename', {
+    title: 'Rename a build',
+    description: 'Give a build a new label. Its pieces stay as they are; only this machine knows the label. A label another build has is refused.',
+    inputSchema: { build: z.string().min(1).describe('The build\'s label or id.'), label: z.string().min(1).max(80).describe('Its new label.') },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  }, async (args) => call(() => agent.buildRename(args)))
+
+  server.registerTool('build_use', {
+    title: 'Set the current build',
+    description: 'Choose the build every later place, hide, forge_item, seal_chest and seal_door goes to when it names none: call it before you start building something ("castle"), so every piece is recorded under it. A new label starts a build. No build (or empty) clears it: placements naming none then go to "unlabelled".',
+    inputSchema: { build: z.string().max(80).optional().describe('The build\'s label or id; leave it out to clear.') },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  }, async (args) => call(() => agent.buildUse(args)))
+
+  server.registerTool('build_notes', {
+    title: 'Notes on a build',
+    description: 'Write a build\'s notes: what it is, who asked for it, what to keep in mind. set replaces them, append adds a line. Kept only on this machine. builds and build show them.',
+    inputSchema: {
+      build: z.string().min(1).describe('The build\'s label or id.'),
+      set: z.string().max(8000).optional().describe('The notes, replacing what is there.'),
+      append: z.string().max(8000).optional().describe('A line to add.'),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  }, async (args) => call(() => agent.buildNotes(args)))
+
+  server.registerTool('notes', {
+    title: 'Your notes',
+    description: 'Your own notes file, kept on this machine across sessions: what I built where, and why. Read it before you build or delete anything; after you build, append a line saying what you built, where and for whom. No input reads it; append adds one line; replace writes it whole. At most 64 KB. Never published.',
+    inputSchema: {
+      append: z.string().max(4000).optional().describe('One line to add.'),
+      replace: z.string().optional().describe('The whole notes, replacing what is there.'),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  }, async (args) => call(() => agent.notesTool(args)))
+
+  server.registerTool('delete_build', {
+    title: 'Delete a build',
+    description: 'Take one build out of your bags, or the pieces you name by id, and keep everything else that shares those bags (another build\'s pieces are never deleted with it). Without confirm it changes nothing and returns a preview: for each bag, exactly what would go and what would stay (names, ids, builds), and whether your operator must approve. Show the preview to your operator, then call again with confirm: true. When approval is needed (more than 5 pieces by default, counting what you deleted in the last hour without approval), the first confirmed call is held and the server sends your operator the preview by DM with a code; their answer reaches your inbox: when they approve, call inbox, then again with confirm: true, and it runs. "unlabelled" is refused: name its builds with build_add first, or give the pieces by id. The preview says what restore_build could bring back. Before anything is deleted, a backup of every piece that goes is written to your trash; a bag that still holds other things is rewritten without the pieces (read fresh from the relays), and only a bag with nothing else left is deleted. Example: "delete the aerocarnival course": builds (or build) to find it, delete_build with build "aerocarnival course", show the preview, then confirm.',
+    inputSchema: {
+      build: z.string().optional().describe('The build\'s label or id, as builds lists it; "unlabelled" is everything in no build.'),
+      pieces: z.array(z.string()).min(1).max(500).optional().describe('Instead of build: the ids of the pieces to go (at least 8 hex each, as placed or build lists them).'),
+      confirm: z.boolean().optional().describe('true to delete; left out, only the preview.'),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  }, async (args) => call(() => agent.deleteBuild(args)))
+
+  server.registerTool('trash', {
+    title: 'The trash',
+    description: 'List the backups your deletes wrote (newest first): when, which tool, which build, what was removed and what stayed in each bag, and whether it was restored. Every remove_placed and delete_build writes one before it deletes anything; nothing is ever removed from the trash. restore_build puts an entry\'s pieces back.',
+    annotations: { readOnlyHint: true },
+  }, async () => call(() => agent.trashList()))
+
+  server.registerTool('restore_build', {
+    title: 'Restore from the trash',
+    description: 'Put back what a delete removed. The trash keeps each bag as it was; its key is derived again from the place (costs the keys of those cubes, as hide does), and the original entries are put back exactly as they were, with the same ids, merged into whatever bag is there now: messages, coins, shards, items, chests and doors alike. A shard sealed by reference whose object was taken down comes back as a new sealed object with the same contents (a new id and address); a public object placed by its address comes back while it is still published. A thing from a locked room goes back only into that room, while this server still holds its door; otherwise it is skipped, never put in the open. What was in a bag this server could not open cannot come back. Each piece is marked as it lands: a restore cut short is tried again for the rest only, and nothing is put back twice. The answer says what came back and what did not, and why. The entry stays in the trash.',
+    inputSchema: { trash: z.string().min(1).describe('The trash entry\'s id (or the unique start of it), as trash lists it.') },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  }, async (args) => call(() => agent.restoreBuild(args)))
 
   server.registerTool('set_avatar', {
     title: 'Set your avatar',

@@ -16,7 +16,7 @@ import { DEFAULT_PUBLISH_PER_DAY } from './publicObject.js'
 import { DEFAULT_AVATAR_PER_DAY } from './avatar.js'
 import { expandHome } from './serveConfig.js'
 import { DEFAULT_CAP_CALL_SECONDS, DEFAULT_CAP_DAILY_SECONDS, DEFAULT_CAP_SESSION_SECONDS, defaultThreads } from './budget.js'
-import type { PaymentApproval } from './approvals.js'
+import { DEFAULT_DELETE_APPROVAL_THRESHOLD, type DeleteApproval, type PaymentApproval } from './approvals.js'
 
 export interface Settings {
   stateDir: string
@@ -44,6 +44,16 @@ export interface Settings {
   maxDailySats: number
   /** "operator": every payment waits for the operator's approval by DM, code by code (approvals.ts); "none": the limits alone (the default). */
   paymentApproval: PaymentApproval
+  /**
+   * "operator": a delete that needs approval (more than deleteApprovalThreshold
+   * pieces, or a whole bag of things in no build) waits for the operator's
+   * code by DM (approvals.ts DeleteApprovals); "none": no delete waits (the
+   * trash keeps a backup either way). Default: "operator" when an operator is
+   * configured, else "none" (arkinox, 2026-11-26).
+   */
+  deleteApproval: DeleteApproval
+  /** How many pieces one delete may take without the operator's approval. Default 5. */
+  deleteApprovalThreshold: number
   /** The public travel log: the human's switch, never the model's (arkinox, 2026-10-11). */
   travelLog: TravelLogSettings
   /** Least minutes between two wakes for strangers' chat lines that address the agent (arkinox, 2026-10-11). */
@@ -104,6 +114,8 @@ export interface ParsedArgs {
   maxPaymentSats?: number
   maxDailySats?: number
   paymentApproval?: PaymentApproval
+  deleteApproval?: DeleteApproval
+  deleteApprovalThreshold?: number
   travelLog?: boolean
   travelLogMaxPerDay?: number
   chatWakeMinutes?: number
@@ -155,6 +167,14 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
                                 by DM with the code the server sends them (each code one payment,
                                 expiring in 30 minutes); the limits above still apply. none: the
                                 limits alone. Default none.
+  --delete-approval <who>       operator: a delete that takes more than the threshold below, or a
+                                whole bag of things in no build, is held until your operator
+                                approves it by DM with the code the server sends them (each code
+                                one delete of exactly the pieces previewed, expiring in 30
+                                minutes). none: no delete waits. A backup goes to <state>/trash
+                                either way. Default operator when an operator is set, else none.
+  --delete-approval-threshold <n>
+                                How many pieces one delete may take without approval. Default ${DEFAULT_DELETE_APPROVAL_THRESHOLD}
   --travel-log                  Let log_travel post public kind 1 notes about the agent's travels. Off by default.
   --travel-log-max-per-day <n>  The most travel log notes in any 24 hours. Default ${DEFAULT_TRAVEL_PER_DAY}
   --chat-wake-minutes <n>       A stranger's chat line that addresses the agent is reported for
@@ -185,7 +205,7 @@ Usage: cyberspace-mcp init                     Set up an agent once: key, operat
 
 The same keys may live in <state>/config.json: relays, operator, name, about,
 capCallSeconds, capSessionSeconds, capDailySeconds, threads, maxSidestepHeight, allowRespawn, hosakaUrl,
-nwc, maxPaymentSats, maxDailySats, paymentApproval, chatWakeMinutes, publishMaxPerDay, avatarMaxPerDay, kitsDir, listenTo, and travelLog: { "enabled": true,
+nwc, maxPaymentSats, maxDailySats, paymentApproval, deleteApproval, deleteApprovalThreshold, chatWakeMinutes, publishMaxPerDay, avatarMaxPerDay, kitsDir, listenTo, and travelLog: { "enabled": true,
 "maxPerDay": 6, "tagOperator": false }. The wallet string may also be the "nwc" key
 of <state>/wallet.json, which the server only reads.`
 
@@ -250,6 +270,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case '--travel-log-max-per-day': out.travelLogMaxPerDay = Math.max(1, Math.floor(num(a, next()))); break
       case '--chat-wake-minutes': out.chatWakeMinutes = num(a, next()); break
       case '--payment-approval': out.paymentApproval = paymentApprovalSetting(a, next()); break
+      case '--delete-approval': out.deleteApproval = paymentApprovalSetting(a, next()); break
+      case '--delete-approval-threshold': out.deleteApprovalThreshold = threshold(a, next()); break
       case '--listen-to': out.listenTo = listenToSetting(a, next()); break
       case '--publish-max-per-day': out.publishMaxPerDay = Math.max(1, Math.floor(num(a, next()))); break
       case '--avatar-max-per-day': out.avatarMaxPerDay = Math.max(1, Math.floor(num(a, next()))); break
@@ -280,6 +302,8 @@ interface FileConfig {
   maxPaymentSats?: unknown
   maxDailySats?: unknown
   paymentApproval?: unknown
+  deleteApproval?: unknown
+  deleteApprovalThreshold?: unknown
   travelLog?: unknown
   chatWakeMinutes?: unknown
   publishMaxPerDay?: unknown
@@ -360,6 +384,9 @@ export function settingsFrom(args: ParsedArgs, file: FileConfig, walletFile: Wal
     maxPaymentSats: args.maxPaymentSats ?? (file.maxPaymentSats !== undefined ? sats('config.json maxPaymentSats', file.maxPaymentSats) : DEFAULTS.maxPaymentSats),
     maxDailySats: args.maxDailySats ?? (file.maxDailySats !== undefined ? sats('config.json maxDailySats', file.maxDailySats) : DEFAULTS.maxDailySats),
     paymentApproval: args.paymentApproval ?? (file.paymentApproval !== undefined ? paymentApprovalSetting('config.json paymentApproval', file.paymentApproval) : 'none'),
+    // On by default whenever there is an operator to ask (arkinox, 2026-11-26).
+    deleteApproval: args.deleteApproval ?? (file.deleteApproval !== undefined ? paymentApprovalSetting('config.json deleteApproval', file.deleteApproval) : (args.operator ?? str(file.operator)) ? 'operator' : 'none'),
+    deleteApprovalThreshold: args.deleteApprovalThreshold ?? (file.deleteApprovalThreshold !== undefined ? threshold('config.json deleteApprovalThreshold', file.deleteApprovalThreshold) : DEFAULT_DELETE_APPROVAL_THRESHOLD),
     travelLog: travelLogSettings(args, file.travelLog),
     chatWakeMinutes: args.chatWakeMinutes ?? posNum(file.chatWakeMinutes) ?? DEFAULTS.chatWakeMinutes,
     publishMaxPerDay: args.publishMaxPerDay ?? (posNum(file.publishMaxPerDay) !== undefined ? Math.max(1, Math.floor(posNum(file.publishMaxPerDay)!)) : DEFAULTS.publishMaxPerDay),
@@ -371,7 +398,14 @@ export function settingsFrom(args: ParsedArgs, file: FileConfig, walletFile: Wal
   }
 }
 
-/** "operator" or "none", or a thrown sentence: a typo must never quietly drop the approval the human asked for. */
+/** A whole number of pieces, 0 or more, or a thrown sentence. */
+function threshold(where: string, raw: unknown): number {
+  const n = typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : raw
+  if (typeof n !== 'number' || !Number.isInteger(n) || n < 0) throw new Error(`${where} must be a whole number of pieces, 0 or more; got ${JSON.stringify(raw)}`)
+  return n
+}
+
+/** "operator" or "none" (paymentApproval and deleteApproval), or a thrown sentence: a typo must never quietly drop the approval the human asked for. */
 function paymentApprovalSetting(where: string, raw: unknown): PaymentApproval {
   if (raw === 'operator' || raw === 'none') return raw
   throw new Error(`${where} must be "operator" or "none"; got ${JSON.stringify(raw)}`)

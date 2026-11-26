@@ -71,8 +71,12 @@ import { Refusal } from './tool.js';
 import { Transit } from './transit.js';
 import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS, Wallet } from './wallet.js';
 import { NOTICE_RELAY, UpdateWatch } from './updates.js';
-import { Placements } from './placed.js';
+import { DEFAULT_DELETE_APPROVAL_THRESHOLD, Placements, labelOf } from './placed.js';
+import { Builds, cleanLabel } from './builds.js';
+import { Trash } from './trash.js';
+import { Notes } from './notes.js';
 import { DEFAULT_TRAVEL_PER_DAY, TravelLog, repeatsPrivate } from './travel.js';
+import { DeleteApprovals, deleteRequestWords } from './approvals.js';
 import { Listener, WITHHELD, publishable, scrubSaved, withholdWords } from './listenTo.js';
 export { Refusal } from './tool.js';
 /** Where publish_object counts what it published, so the daily limit survives a restart. */
@@ -211,6 +215,16 @@ export class Agent {
     updates;
     /** What the agent placed: listing it, taking it down, moving it (placed.ts). */
     placements;
+    /** Which build each placed thing belongs to, in local state only (builds.ts). */
+    builds;
+    /** The backups every delete writes first (trash.ts). */
+    trash;
+    /** The operator's approvals of large deletes (approvals.ts). */
+    deleteApprovals;
+    /** The agent's own notes: what it built where, and why (notes.ts). */
+    notes;
+    /** Restores in flight, by trash entry: one at a time each (review of 485a2df). */
+    restoring = new Map();
     calibration;
     dir;
     sk;
@@ -319,9 +333,21 @@ export class Agent {
         this.avatars = new AvatarSizes(this.relays, this.log, Date.now, (pubkey) => this.listener.hears(pubkey));
         // Someone arrives: their avatar is read now, so its size is known before the agent plans a landing near them.
         this.presence.on('arrival', (p) => this.avatars.want([p.pubkey]));
+        // Builds, notes, the trash and delete approvals (arkinox, 2026-11-26): local state only, nothing of it published.
+        this.builds = new Builds(dir);
+        this.trash = new Trash(dir);
+        this.notes = new Notes(dir);
+        this.deleteApprovals = new DeleteApprovals(dir, config.deleteApproval ?? (config.operator ? 'operator' : 'none'), Date.now, config.deleteApprovalTtlMs);
         this.operatorChannel = new OperatorChannel({
-            // The operator's answers to payment approval requests, checked by the operator channel's seal rules before they get here.
-            answerApproval: (text, createdAt, id) => this.wallet.approvals.answer(text, createdAt, id) !== null,
+            // The operator's answers to approval requests, checked by the operator channel's seal rules before they get here.
+            // A payment's answer is consumed. A delete's is recorded and stays an ordinary message (its code blanked), so the
+            // agent hears the answer and, approved, calls delete_build again: nothing else would wake it to.
+            answerApproval: (text, createdAt, id) => {
+                if (this.wallet.approvals.answer(text, createdAt, id) !== null)
+                    return true;
+                this.deleteApprovals.answer(text, createdAt, id);
+                return false;
+            },
             operatorOnly: this.listener.operatorOnly,
             pubkey: this.pubkey, relays: this.relays, dir, operator: () => this.operatorOfProfile(), operatorProblem: () => this.operatorProblem(), lookupRelays: config.lookupRelays ?? GENERAL_RELAYS,
             sign: (t) => this.sign(t),
@@ -406,7 +432,61 @@ export class Agent {
             },
             afterRemove: (ids) => { for (const id of ids)
                 this.doors.remove(id); },
+            builds: this.builds,
+            trash: this.trash,
+            deleteGate: {
+                threshold: config.deleteApprovalThreshold ?? DEFAULT_DELETE_APPROVAL_THRESHOLD,
+                required: () => this.deleteApprovals.required,
+                check: (input) => this.deleteGate(input),
+                recent: () => this.deleteApprovals.recentDeleted(),
+                note: (pieces, approved) => this.deleteApprovals.noteDeleted(pieces, approved),
+            },
         });
+    }
+    /**
+     * Whether a delete that needs approval may run (deleteApproval "operator";
+     * approvals.ts DeleteApprovals). `spend`: go ahead; the caller calls it
+     * inside the bag lock right before signing, and it spends the approval on
+     * exactly these pieces then (review of 485a2df), refusing when it no longer
+     * holds. `held`: the answer to give, with the request sent to the operator
+     * by the server, never with its code. The operator's pending DMs are read
+     * first, as inbox reads them, so an answer that came in is counted.
+     */
+    async deleteGate(input) {
+        if (input.needs.length === 0 || !this.deleteApprovals.required)
+            return { spend: () => { } };
+        const why = input.needs.join('; ');
+        const operator = this.operatorProblem() ? null : this.operatorOfProfile();
+        if (!operator)
+            throw new Refusal(`This delete needs your operator's approval (${why}), and deleteApproval is "operator", but there is no operator to ask${this.operatorProblem() ? ` (${this.operatorProblem()})` : ' (identity publishes the operator your human configured)'}. Nothing was deleted.`);
+        await this.operatorChannel.readNow();
+        const v = this.deleteApprovals.verdict(input.pieces);
+        if (v.state === 'approved') {
+            const code = v.request.code;
+            return { spend: () => { if (!this.deleteApprovals.use(code, input.pieces))
+                    throw new Refusal('The approval lapsed or changed before the delete ran. Nothing was deleted.'); } };
+        }
+        if (v.state === 'refused' || v.state === 'expired') {
+            this.deleteApprovals.reported(v.request.code);
+            throw new Refusal(`Not deleted: ${v.reason}. Ask again (${input.again}, which sends them a new request) only if your operator tells you to.`);
+        }
+        const request = v.state === 'pending' ? v.request : this.deleteApprovals.request({ pieces: input.pieces, summary: input.summary });
+        const minutes = this.deleteApprovals.ttlMinutes;
+        if (!this.deleteApprovals.notified(request.code)) {
+            try {
+                await this.operatorChannel.message(deleteRequestWords(request));
+                this.deleteApprovals.markNotified(request.code);
+            }
+            catch (err) {
+                return { held: { text: `Held: this delete needs your operator's approval (${why}), and the request could NOT be sent to them just now (${err instanceof Error ? err.message : String(err)}). Nothing was deleted. ${input.again[0].toUpperCase()}${input.again.slice(1)} to send it again.`, data: { held: true, approvalNeeded: true, needs: input.needs, notified: false } } };
+            }
+        }
+        return {
+            held: {
+                text: `Held for your operator's approval (${why}): the server ${v.state === 'pending' ? 'already sent' : 'sent'} them what would go and what would stay, by DM, with a code. Nothing was deleted. Their answer comes as a DM: when they approve, ${input.again}; it runs then. If they refuse, or do not answer within ${minutes} minutes, nothing is deleted. The request covers exactly these pieces: if what would go changes, it no longer applies.`,
+                data: { held: true, approvalNeeded: true, needs: input.needs, notified: true, expiresAt: request.expiresAt },
+            },
+        };
     }
     /**
      * The operator the agent's own kind 0 names: the p tag marked operator in
@@ -467,6 +547,19 @@ export class Agent {
     }
     /** The startup republish while it runs (republishProfileIfMoved): identity waits for it, so the two never write profile.json over each other. */
     republishing = null;
+    /** The created_at of the newest profile this server signed in this run. */
+    lastProfileAt = 0;
+    /**
+     * A created_at for the next profile: now, but always after every profile this
+     * server signed (in this run, or still in the outbox). A kind 0 is replaceable,
+     * and on a tie a relay keeps the lower id (NIP-01), so an identity edit signed
+     * in the same second as the startup republish could lose to it (the flaky
+     * profileMoved test was this race, not timing).
+     */
+    profileCreatedAt() {
+        const signed = this.outbox.entries.filter((o) => o.event.kind === 0 && o.event.pubkey === this.pubkey).map((o) => o.event.created_at);
+        return Math.max(nowSeconds(), this.lastProfileAt + 1, ...signed.map((t) => t + 1));
+    }
     /**
      * At serve start: the last published profile, published again unchanged
      * (its content and tags as they were, signed now) when no relay that
@@ -503,7 +596,8 @@ export class Agent {
                 this.dir.writeJson('profile.json', { ...last, accepted });
             return { status: 'unneeded' };
         }
-        const event = this.sign({ kind: 0, created_at: nowSeconds(), content: last.content, tags: last.tags });
+        const event = this.sign({ kind: 0, created_at: this.profileCreatedAt(), content: last.content, tags: last.tags });
+        this.lastProfileAt = event.created_at;
         const entry = this.outbox.add(event);
         const result = await this.outbox.send(entry);
         const refused = entry.refused ?? {};
@@ -794,7 +888,7 @@ export class Agent {
             picture: picture === '' ? undefined : picture ?? had.picture,
             operator: operator ?? undefined,
         };
-        const template = profileTemplate(fields, nowSeconds());
+        const template = profileTemplate(fields, this.profileCreatedAt());
         let publish;
         // Unchanged and still on a relay this server publishes to. A profile only
         // the relays of an older configuration hold (the old defaults, before
@@ -804,6 +898,7 @@ export class Agent {
         }
         else {
             const event = this.sign(template);
+            this.lastProfileAt = event.created_at;
             const entry = this.outbox.add(event);
             const result = await this.outbox.send(entry);
             const refused = entry.refused ?? {};
@@ -2254,6 +2349,7 @@ export class Agent {
             this.keys.noteBag(summary);
             const accepted = entry.accepted;
             const refused = entry.refused ?? {};
+            const recorded = entries[0] ? this.recordPiece(input.build, entries[0], opened, { lookupId: key.lookupId, height, at, createdAt, objectId: objectEvent?.id }) : null;
             const text = [
                 `Hid ${what} in the h${height} cube at base x ${key.base.x} y ${key.base.y} z ${key.base.z}${room ? `, inside the room of your door "${room.name}": it went into the room bag, which only someone who opens that door can read` : ''} (lookup id ${key.lookupId.slice(0, 12)}...). The bag ${bag.id.slice(0, 8)}... now holds ${merged.length} entr${merged.length === 1 ? 'y' : 'ies'}${current ? ` (${carried.length} carried forward from ${current.id.slice(0, 8)}...)` : ''}. Key cost ${keyMs.toFixed(0)} ms.`,
                 accepted.length ? `Accepted by ${accepted.join(', ')}.` : `No relay accepted the bag${result.ok ? '' : `: ${result.reason}`}. It waits in the outbox.`,
@@ -2261,8 +2357,9 @@ export class Agent {
                 hint ? `Hinted at heights ${hint.join(',')}${riddle ? `, riddle "${riddle}"` : ''}.` : 'No hint: only someone who derives this cube\'s key will find it.',
                 walk ? `${walk.trim()}${'object' in input.contents ? ' constrain_placed changes it where it stands.' : ''}` : '',
                 `Its id is ${handle(objectEvent ? objectEvent.id : !isReference(entries[0]) ? entries[0].id : objectHandle(`${key.lookupId}/${entryKey(entries[0])}`))}: placed lists it, remove_placed takes it down, move_placed moves it.`,
+                recorded ? `Recorded in your build "${recorded.label}" (kept only on this machine).` : '',
             ].filter(Boolean).join('\n');
-            return { text, data: { bagId: bag.id, lookupId: key.lookupId, cube: { height, base: key.base, plane: at.plane }, ...(room ? { room: { door: room.doorId, name: room.name, height: room.height } } : {}), ...(door ? { door: { id: door.doorId, name: door.name, roomHeight: door.height } } : {}), entries: merged.length, carried: carried.length, keyMs: Math.round(keyMs), accepted, refused, hint, riddle, objectEventId: objectEvent?.id ?? null, ...(item ? { item } : {}), ...(chest ? { chest } : {}) } };
+            return { text, data: { ...(recorded ? { build: recorded.label, id: recorded.id } : {}), bagId: bag.id, lookupId: key.lookupId, cube: { height, base: key.base, plane: at.plane }, ...(room ? { room: { door: room.doorId, name: room.name, height: room.height } } : {}), ...(door ? { door: { id: door.doorId, name: door.name, roomHeight: door.height } } : {}), entries: merged.length, carried: carried.length, keyMs: Math.round(keyMs), accepted, refused, hint, riddle, objectEventId: objectEvent?.id ?? null, ...(item ? { item } : {}), ...(chest ? { chest } : {}) } };
         });
     }
     async place(input) {
@@ -2275,20 +2372,20 @@ export class Agent {
             const clipped = kitCall(() => clipWords(k.entry, input.turn, input.scale, at.position, input.height));
             if (clipped)
                 throw new Refusal(`Not placed: ${clipped}`);
-            const r = await this.hide({ contents: { object: k.payload }, coordinate: input.coordinate, height: input.height });
+            const r = await this.hide({ contents: { object: k.payload }, coordinate: input.coordinate, height: input.height, build: input.build });
             return { ...r, text: `Kit piece ${k.entry.id}${k.turn ? ` turned ${k.turn}` : ''}${k.scale ? ` at scale ${k.scale}` : ''}, as "${k.shard.name}": ${r.text}`, data: { ...r.data, kit: { piece: k.entry.id, turn: k.turn, scale: k.scale } } };
         }
         if (input.turn !== undefined || input.scale !== undefined)
             throw new Refusal('turn and scale go with kit (a kit piece); a payload you give is placed as it is.');
         // An object find or open_chest listed, or one taken from a chest, by its id: its payload is placed as given.
         if (input.id !== undefined && input.object === undefined && input.address === undefined) {
-            return this.hide({ contents: { object: publishable(toPayload(this.objectById(input.id).shard)) }, coordinate: input.coordinate, height: input.height });
+            return this.hide({ contents: { object: publishable(toPayload(this.objectById(input.id).shard)) }, coordinate: input.coordinate, height: input.height, build: input.build });
         }
         if (input.object !== undefined) {
             const v = validateSnoPayload(input.object);
             if (!v.ok)
                 throw new Refusal(`Not placed: the payload is not valid SNO. ${v.errors.join(' ')}`);
-            return this.hide({ contents: { object: input.object }, coordinate: input.coordinate, height: input.height });
+            return this.hide({ contents: { object: input.object }, coordinate: input.coordinate, height: input.height, build: input.build });
         }
         if (input.address) {
             const { address, object } = await this.publicObject(input.address);
@@ -2308,7 +2405,7 @@ export class Agent {
             const here = this.keeper.place();
             const at = this.target(input.coordinate, here);
             // Placing another author's public object is a placement (DECK-0003 3.2): a reference entry, carried in the bag.
-            return this.hideReference(referenceTo(object, at.position, at.plane, this.relays.canonical), at, input.height, `object "${check.shard.name}" by ${object.pubkey.slice(0, 8)}... (public, by reference)`);
+            return this.hideReference(referenceTo(object, at.position, at.plane, this.relays.canonical), at, input.height, `object "${check.shard.name}" by ${object.pubkey.slice(0, 8)}... (public, by reference)`, input.build);
         }
         throw new Refusal('Give either an object payload or the address of a published kind 33331 object.');
     }
@@ -2350,7 +2447,7 @@ export class Agent {
         return this.listener.hears(author) ? errors.join(' ') : 'it does not follow DECK-0003 section 1.9 (details withheld: it was written by someone other than your operator).';
     }
     /** Hide a reference entry in the agent's bag at a cube: the same read-before-write as hide. */
-    async hideReference(ref, at, height, what) {
+    async hideReference(ref, at, height, what, build) {
         const cube = this.regionAt(at, height);
         // A reference placed inside one of this server's rooms, at its height, goes into the room bag as anything else does (DECK-0004 §3.7.4).
         const inRoom = this.roomHeld(at.position, at.plane, height, cube.key);
@@ -2372,8 +2469,9 @@ export class Agent {
             this.keys.notePlaced(key.lookupId, entryKey(ref), createdAt);
             const opened = await unbag(bag, regionKey, (r) => this.resolveReference(r), { at: at.position, plane: at.plane }, height);
             this.keys.noteBag({ lookupId: key.lookupId, bagId: bag.id, author: this.pubkey, createdAt, height, base: key.base, entries: opened.map((h) => this.summarize(h, key.lookupId)), missing: merged.filter(isReference).length - opened.filter((h) => h.ref).length, riddle: settings.riddle, hint: settings.hint, at: now });
-            const text = `Placed ${what} in the h${height} cube at base x ${key.base.x} y ${key.base.y} z ${key.base.z}; bag ${bag.id.slice(0, 8)}... holds ${merged.length} entr${merged.length === 1 ? 'y' : 'ies'}. Key cost ${keyMs.toFixed(0)} ms. ${entry.accepted.length ? `Accepted by ${entry.accepted.join(', ')}.` : `No relay accepted it${result.ok ? '' : `: ${result.reason}`}.`}${entry.refused ? ` Refused by ${Object.entries(entry.refused).map(([u, r]) => `${u}: ${r}`).join('; ')}.` : ''}`;
-            return { text, data: { bagId: bag.id, lookupId: key.lookupId, cube: { height, base: key.base, plane: at.plane }, entries: merged.length, keyMs: Math.round(keyMs), accepted: entry.accepted, refused: entry.refused ?? {} } };
+            const recorded = this.recordPiece(build, ref, opened, { lookupId: key.lookupId, height, at, createdAt });
+            const text = `Placed ${what} in the h${height} cube at base x ${key.base.x} y ${key.base.y} z ${key.base.z}; bag ${bag.id.slice(0, 8)}... holds ${merged.length} entr${merged.length === 1 ? 'y' : 'ies'}. Key cost ${keyMs.toFixed(0)} ms. ${entry.accepted.length ? `Accepted by ${entry.accepted.join(', ')}.` : `No relay accepted it${result.ok ? '' : `: ${result.reason}`}.`}${entry.refused ? ` Refused by ${Object.entries(entry.refused).map(([u, r]) => `${u}: ${r}`).join('; ')}.` : ''} Recorded in your build "${recorded.label}" (kept only on this machine).`;
+            return { text, data: { build: recorded.label, id: recorded.id, bagId: bag.id, lookupId: key.lookupId, cube: { height, base: key.base, plane: at.plane }, entries: merged.length, keyMs: Math.round(keyMs), accepted: entry.accepted, refused: entry.refused ?? {} } };
         });
     }
     // ---- what the agent placed ---------------------------------------------------
@@ -2392,6 +2490,154 @@ export class Agent {
     /** constrain_placed: set placed shards' WALK setting (and opacity) in place, keeping their lineage (placed.ts). */
     constrainPlaced(input) {
         return this.placements.constrain(input);
+    }
+    /**
+     * Record what was just placed in the build ledger (builds.ts): under the
+     * build named, else the current build, else "unlabelled". Its id and
+     * label are what placed lists for it. Returns the build's label. Local
+     * state only; nothing of it is published.
+     */
+    recordPiece(build, entry, opened, where) {
+        const ref = isReference(entry) ? entry : null;
+        const key = entryKey(entry);
+        const h = opened.find((x) => (ref ? !!x.ref && entryKey(x.ref) === key : !x.ref && x.inner.id === entry.id)) ?? null;
+        const id = where.objectId ?? (ref ? (h && h.inner.kind === OBJECT_KIND && h.inner.tags.some((t) => t[0] === 'encrypted') ? h.inner.id : objectHandle(`${where.lookupId}/${key}`)) : entry.id);
+        const piece = {
+            lookupId: where.lookupId, height: where.height, id, lineage: ref ? (ref[0] === 'a' ? ref[1] : null) : itemLineage(entry),
+            type: h ? h.type : 'unreadable', label: h ? labelOf(h) : 'placed', at: { x: where.at.position.x.toString(), y: where.at.position.y.toString(), z: where.at.position.z.toString() }, plane: where.at.plane,
+            ...(ref && ref[0] === 'a' ? { objectAddress: ref[1] } : {}), placedAt: where.createdAt,
+        };
+        try {
+            return { label: this.builds.record(build, piece).label, id };
+        }
+        catch (err) {
+            // The placement went out already: a ledger that cannot be written never fails it; the log says so.
+            this.log(`builds: could not record a piece: ${err instanceof Error ? err.message : String(err)}`);
+            return { label: this.builds.target(build), id };
+        }
+    }
+    // ---- builds, notes, the trash ------------------------------------------------
+    //
+    // arkinox, 2026-11-26, after "delete the aerocarnival course" took a
+    // 31-piece castle that shared an h9 bag with it: build labels, memory
+    // notes, backup-before-delete, scoped deletes, a delete preview with
+    // operator approval, and restore. All of it local state; nothing of a
+    // build's label or notes is ever published.
+    /** builds: every build, with its pieces counted and where they are; from the ledger alone (no relay is asked). */
+    buildsList() {
+        const all = this.builds.all();
+        const current = this.builds.current();
+        const rows = all.map((b) => {
+            const active = b.pieces.filter((p) => !p.removedAt);
+            const cubes = [...new Map(active.map((p) => [p.lookupId, p])).values()];
+            return { b, active, removed: b.pieces.length - active.length, cubes };
+        });
+        const out = [all.length ? `Your builds: ${all.length}.${current ? ` Current build (where placements go when you name none): "${current.label}".` : ' No current build: placements with no build go to "unlabelled".'}` : 'You have no builds yet. place, hide, forge_item, seal_chest and seal_door take build: a label for what you are building ("aerocarnival course"); build_use sets one for every placement after.'];
+        for (const r of rows) {
+            const where = r.cubes.slice(0, 6).map((p) => `h${p.height} near x ${p.at.x} y ${p.at.y} z ${p.at.z} (bag ${p.lookupId.slice(0, 8)}...)`).join('; ');
+            out.push(`  "${r.b.label}" (id ${r.b.id}${current?.id === r.b.id ? ', current' : ''}): ${r.active.length} piece(s) in ${r.cubes.length} bag(s)${r.removed ? `, ${r.removed} removed` : ''}${where ? `: ${where}${r.cubes.length > 6 ? '; ...' : ''}` : ''}${r.b.notes ? `. Notes: ${r.b.notes.split('\n')[0].slice(0, 120)}` : ''}`);
+        }
+        out.push('Things placed before builds were kept are in no build: build with "unlabelled" lists them. build shows one build\'s pieces checked against what is placed; delete_build takes one build out of your bags and keeps everything else.');
+        return {
+            text: out.join('\n'),
+            data: { current: current ? { id: current.id, label: current.label } : null, builds: rows.map((r) => ({ id: r.b.id, label: r.b.label, notes: r.b.notes, pieces: r.active.length, removed: r.removed, bags: r.cubes.map((p) => ({ lookupId: p.lookupId, height: p.height, near: p.at })), createdAt: r.b.createdAt, updatedAt: r.b.updatedAt })) },
+        };
+    }
+    /** build: one build's pieces, checked against the bags as the relays hold them now (placed.ts buildReport). */
+    build(input) {
+        return this.placements.buildReport(String(input.build ?? ''));
+    }
+    /** build_add: things already placed, recorded under a build (placed.ts buildAdd). */
+    buildAdd(input) {
+        return this.placements.buildAdd(input);
+    }
+    /** build_rename: a build's new label. */
+    buildRename(input) {
+        const before = this.builds.get(input.build).label;
+        const b = this.builds.rename(input.build, input.label);
+        return { text: `Renamed the build "${before}" to "${b.label}" (id ${b.id}). Its pieces are as they were; only this machine knows the label.`, data: { id: b.id, label: b.label, previous: before } };
+    }
+    /** build_use: the build later placements go to when they name none; empty clears it. */
+    buildUse(input) {
+        const existed = cleanLabel(input.build) ? this.builds.find(input.build) !== null : true;
+        const b = this.builds.use(input.build ?? '');
+        if (!b)
+            return { text: 'No current build now: a placement that names no build goes to "unlabelled".', data: { current: null } };
+        return { text: `Current build: "${b.label}" (id ${b.id})${existed ? '' : ', a new build'}. Every place, hide, forge_item, seal_chest and seal_door that names no build is recorded in it until you change it (build_use with no build clears it).`, data: { current: { id: b.id, label: b.label }, created: !existed } };
+    }
+    /** build_notes: set or append to a build's notes. */
+    buildNotes(input) {
+        if ((input.set === undefined) === (input.append === undefined))
+            throw new Refusal('Give exactly one of: set (replaces the build\'s notes) or append (adds a line). Nothing was changed.');
+        const b = this.builds.setNotes(input.build, input);
+        return { text: `Notes of the build "${b.label}" now (${b.notes.length} characters):\n${b.notes || '(empty)'}`, data: { id: b.id, label: b.label, notes: b.notes } };
+    }
+    /** notes: the agent's general notes file, read, appended to or replaced (notes.ts). */
+    notesTool(input) {
+        return this.notes.tool(input);
+    }
+    /** delete_build: take one build (or pieces by id) out of the bags, preview first, approval when needed, backup always (placed.ts). */
+    deleteBuild(input) {
+        return this.placements.deleteBuild(input);
+    }
+    /** trash: the backups deletes wrote, newest first. */
+    trashList() {
+        const all = this.trash.list();
+        const out = [all.length ? `Trash: ${all.length} backup(s), newest first. Nothing here is ever deleted on its own; restore_build with an id puts its pieces back.` : 'The trash is empty: nothing you placed was deleted since backups were kept.'];
+        for (const m of all.slice(0, 50)) {
+            out.push(`  ${m.id}: ${m.tool}${m.build ? ` of the build "${m.build}"` : ''}, ${m.removed.length} thing(s) from ${m.bags.length} bag(s)${m.bags.some((b) => b.kept.length) ? ` (${m.bags.reduce((n, b) => n + b.kept.length, 0)} stayed)` : ''}: ${m.removed.slice(0, 6).map((r) => `${r.type} "${r.label}"`).join(', ')}${m.removed.length > 6 ? ', ...' : ''}${m.restoredAt ? `. Restored ${m.restoredAt}` : (m.restored ?? []).some((r) => r.ok) ? `. Partly restored (${new Set((m.restored ?? []).filter((r) => r.ok).map((r) => r.from)).size} of ${m.removed.length}); restore_build again tries the rest` : ''}`);
+        }
+        if (all.length > 50)
+            out.push(`  ... and ${all.length - 50} older.`);
+        return { text: out.join('\n'), data: { entries: all.map((m) => ({ id: m.id, createdAt: m.createdAt, tool: m.tool, build: m.build ?? null, removed: m.removed, bags: m.bags.map((b) => ({ lookupId: b.lookupId, height: b.height, wholeBag: b.wholeBag, removed: b.removed.length, kept: b.kept.length })), restoredAt: m.restoredAt ?? null })) } };
+    }
+    /**
+     * restore_build: put back what a delete removed, from the bag the trash
+     * keeps (placed.ts restoreFromTrash, review of 485a2df): the original
+     * entries verbatim, same ids, merged into the bag as it stands now; a
+     * sealed shard whose object was taken down sealed again under a new d; a
+     * piece from a locked room only into that room. Each piece is marked in
+     * the entry as it lands, so a restore cut short is tried again for the
+     * rest only, and a piece already back is never put back twice. One restore
+     * of an entry runs at a time. The entry is kept.
+     */
+    async restoreBuild(input) {
+        const id = this.trash.read(input.trash).meta.id;
+        // One restore of an entry at a time: a second waits for the first, then sees what it put back.
+        const before = this.restoring.get(id) ?? Promise.resolve();
+        let release;
+        const mine = new Promise((r) => { release = r; });
+        const tail = before.then(() => mine);
+        this.restoring.set(id, tail);
+        await before;
+        try {
+            const entry = this.trash.read(id);
+            if (entry.pieces.length === 0)
+                throw new Refusal(`The trash entry ${id} holds no piece this server could read (the bag could not be opened when it was deleted), so nothing can be restored from it. Nothing was changed.`);
+            const back = new Set((entry.meta.restored ?? []).filter((r) => r.ok).map((r) => r.from));
+            if (entry.pieces.every((p) => back.has(p.id)))
+                throw new Refusal(`Everything in the trash entry ${id} is already back (${entry.meta.restoredAt ?? 'restored'}); restoring it again would put back nothing. Nothing was changed.`);
+            const done = await this.placements.restoreFromTrash(entry, back, (rs) => { this.trash.markRestored(id, rs); });
+            const ok = done.filter((d) => d.ok);
+            const failed = done.filter((d) => !d.ok);
+            const meta = this.trash.read(id).meta;
+            if (ok.length === 0)
+                throw new Refusal(`Nothing of ${id} was restored: ${failed.map((d) => `${d.type} "${d.label}": ${d.why}`).join('; ')}. The entry stays in the trash; restore_build tries again for these.`);
+            return {
+                text: [
+                    `Restored ${ok.length} thing(s) from ${id} into their bags, as they were (the same entries, merged with what is there now), recorded in their builds: ${ok.map((d) => `${d.type} "${d.label}"${d.id ? ` (id ${d.id.slice(0, 12)})` : ''}${d.why ? `; ${d.why}` : ''}`).join(', ')}.`,
+                    ...(back.size ? [`Already back before this call: ${back.size}.`] : []),
+                    ...failed.map((d) => `Not restored: ${d.type} "${d.label}": ${d.why}`),
+                    meta.restoredAt ? `Every piece is back; the trash entry is kept, marked restored (${meta.restoredAt}).` : 'Not every piece is back: the trash entry is kept, and restore_build with it again tries only the rest.',
+                ].join('\n'),
+                data: { trashId: id, restored: ok, failed, restoredAt: meta.restoredAt ?? null },
+            };
+        }
+        finally {
+            release();
+            if (this.restoring.get(id) === tail)
+                this.restoring.delete(id);
+        }
     }
     // ---- items and chests --------------------------------------------------------
     //
@@ -2562,11 +2808,11 @@ export class Agent {
     }
     /** The forge_item tool: forge an item and hide it, held at once (B1 3.1). */
     forgeItem(input) {
-        return this.hide({ contents: { key: { name: input.name, about: input.about } }, coordinate: input.coordinate ?? { dx: 0, dy: 0, dz: 0 }, height: input.height, hint_heights: input.hint_heights, riddle: input.riddle });
+        return this.hide({ contents: { key: { name: input.name, about: input.about } }, coordinate: input.coordinate ?? { dx: 0, dy: 0, dz: 0 }, height: input.height, hint_heights: input.hint_heights, riddle: input.riddle, build: input.build });
     }
     /** The seal_chest tool: seal things to a public key and hide the chest (B1 3.1). */
     sealChest(input) {
-        return this.hide({ contents: { chest: { name: input.name, lock: input.lock, requires: input.requires, entries: input.contents } }, coordinate: input.coordinate ?? { dx: 0, dy: 0, dz: 0 }, height: input.height, hint_heights: input.hint_heights, riddle: input.riddle });
+        return this.hide({ contents: { chest: { name: input.name, lock: input.lock, requires: input.requires, entries: input.contents } }, coordinate: input.coordinate ?? { dx: 0, dy: 0, dz: 0 }, height: input.height, hint_heights: input.hint_heights, riddle: input.riddle, build: input.build });
     }
     /**
      * What a comment on `given` answers (ONOSENDAI comments.ts itemParent): an
@@ -2713,8 +2959,8 @@ export class Agent {
     }
     /** seal_door: a locked door (DECK-0004 §3.7) hidden like a chest; its room bag takes what is hidden in its room at its height from then on. */
     async sealDoor(input) {
-        const { coordinate, height, hint_heights, riddle, ...door } = input;
-        return this.hide({ contents: { door }, coordinate: coordinate ?? { dx: 0, dy: 0, dz: 0 }, height, hint_heights, riddle });
+        const { coordinate, height, hint_heights, riddle, build, ...door } = input;
+        return this.hide({ contents: { door }, coordinate: coordinate ?? { dx: 0, dy: 0, dz: 0 }, height, hint_heights, riddle, build });
     }
     async render(input) {
         const given = [input.object, input.id, input.address, input.kit, input.layout].filter((x) => x !== undefined).length;

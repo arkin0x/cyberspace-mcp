@@ -93,10 +93,12 @@ const STATUS_MAX = 2000;
  * wake_again. ride counts only when it signs a hyperjump or its state
  * changes (a start or a resume, not a poll of the same state); set_avatar
  * only when the avatar is not the one it set last; constrain_placed only
- * when it changed a shard. A tool not listed here
+ * when it changed a shard; delete_build only when it deleted (never a
+ * preview or a call held for the operator's approval), and remove_placed
+ * not when held either. A tool not listed here
  * is not progress until it is added.
  */
-export const PROGRESS_TOOLS = new Set(['hop', 'board', 'ride', 'hide', 'place', 'publish_object', 'move_placed', 'remove_placed', 'seal_chest', 'forge_item', 'take', 'open_chest', 'comment', 'set_avatar', 'visit', 'constrain_placed']);
+export const PROGRESS_TOOLS = new Set(['hop', 'board', 'ride', 'hide', 'place', 'publish_object', 'move_placed', 'remove_placed', 'seal_chest', 'forge_item', 'take', 'open_chest', 'comment', 'set_avatar', 'visit', 'constrain_placed', 'delete_build', 'restore_build']);
 /** Open work older than this is closed without a turn: nobody is waiting on a day-old order any more. */
 const WORK_STALE_MS = 24 * 60 * 60_000;
 /**
@@ -629,6 +631,10 @@ export class Waker {
         }
         if (ok && name === 'constrain_placed')
             effect = Array.isArray(data.changed) && data.changed.length > 0;
+        if (ok && name === 'delete_build')
+            effect = data.deleted === true;
+        if (ok && name === 'remove_placed' && data.held === true)
+            effect = false;
         if (effect && this.turnKind === 'work')
             this.turnProgress++;
     }

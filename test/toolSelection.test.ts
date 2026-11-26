@@ -76,7 +76,7 @@ describe('the server', () => {
     expect(await prompts(client)).toEqual([])
     const instructions = client.getInstructions() ?? ''
     // Without a waker its two tools do not exist, so 43 in all here.
-    expect(instructions).toContain('shows 9 of its 43 tools')
+    expect(instructions).toContain('shows 9 of its 53 tools')
     expect(instructions).toContain('--tools all')
     expect(instructions).toContain('"tools" in config.json')
     expect(instructions).toMatch(/: station, board, ride, ride_status, wait_for, hide, .*log_travel\.$/)
@@ -93,7 +93,7 @@ describe('the server', () => {
   it('keeps the waker\'s tools whenever a waker runs, whatever the selection', async () => {
     const client = await connect(STARTER_TOOLS, WAKER)
     expect(await names(client)).toEqual([...STARTER_TOOLS, 'wake_again', 'work_done'].sort())
-    expect(client.getInstructions()).toContain('shows 11 of its 45 tools')
+    expect(client.getInstructions()).toContain('shows 11 of its 55 tools')
     await client.close()
   })
 

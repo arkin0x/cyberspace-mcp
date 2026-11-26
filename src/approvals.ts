@@ -19,6 +19,7 @@
 
 import { randomInt } from 'node:crypto'
 import type { StateDir } from './state/dir.js'
+import { RESTORE_WORDS } from './trash.js'
 
 export type PaymentApproval = 'none' | 'operator'
 
@@ -114,11 +115,7 @@ export class Approvals {
 
   /** Hold a payment as a request with a fresh code. The caller DMs the operator the words requestWords gives. */
   request(input: { depositId: string; paymentHash: string; sats: number; purpose: string; payee: string }): ApprovalRequest {
-    const used = new Set(this.requests.map((r) => r.code))
-    let code: string
-    do {
-      code = 'PAY-' + Array.from({ length: 6 }, () => ALPHABET[randomInt(ALPHABET.length)]).join('')
-    } while (used.has(code))
+    const code = newCode('PAY', new Set(this.requests.map((r) => r.code)))
     const t = this.now()
     const r: ApprovalRequest = { code, depositId: input.depositId, paymentHash: input.paymentHash.toLowerCase(), sats: input.sats, purpose: input.purpose, payee: input.payee, createdAt: t, expiresAt: t + this.ttlMs, state: 'pending' }
     this.requests.push(r)
@@ -176,32 +173,50 @@ export class Approvals {
   }
 }
 
-const CODE = /\bPAY-[2-9A-HJKMNP-Z]{6}\b/gi
-const YES = new Set(['YES', 'Y', 'OK', 'OKAY', 'APPROVE', 'APPROVED', 'PAY', 'GO'])
+/** Every approval code, payment (PAY-) or delete (DEL-): a message holding two answers nothing. */
+const ANY_CODE = /\b(?:PAY|DEL)-[2-9A-HJKMNP-Z]{6}\b/gi
+const YES = new Set(['YES', 'Y', 'OK', 'OKAY', 'APPROVE', 'APPROVED', 'GO'])
 const NO = new Set(['NO', 'N', 'DENY', 'DENIED', 'REFUSE', 'REFUSED', 'REJECT', 'CANCEL'])
+/** The yes-word each kind of request adds: "pay PAY-..." and "delete DEL-..." read as yes. */
+const YES_FOR: Record<CodePrefix, string> = { PAY: 'PAY', DEL: 'DELETE' }
+
+/** What a code names: a payment (approvals.ts Approvals) or a delete (DeleteApprovals). */
+export type CodePrefix = 'PAY' | 'DEL'
 
 /**
  * What an operator's DM says about a request, read strictly (review of
  * #107: "do not pay PAY-X" must never pay): the code alone, or one yes-word
  * and the code, approves; one no-word and the code refuses. Anything else
- * (other words, a question, two codes) answers nothing, and the message is
- * an ordinary one. Case and the punctuation around the words do not count.
+ * (other words, a question, two codes of any kind) answers nothing, and the
+ * message is an ordinary one. Case and the punctuation around the words do
+ * not count. `prefix` says which requests it answers: a DEL- code never
+ * answers a payment, nor a PAY- code a delete.
  */
-export function readAnswer(text: string): { code: string; yes: boolean } | null {
-  const codes = text.match(CODE) ?? []
+export function readAnswer(text: string, prefix: CodePrefix = 'PAY'): { code: string; yes: boolean } | null {
+  const codes = text.match(ANY_CODE) ?? []
   if (codes.length !== 1) return null
   const code = codes[0].toUpperCase()
-  const words = text.toUpperCase().replace(CODE, ' ').replace(/[.,!:;"'()\s]+/g, ' ').trim().split(' ').filter(Boolean)
+  if (!code.startsWith(`${prefix}-`)) return null
+  const words = text.toUpperCase().replace(ANY_CODE, ' ').replace(/[.,!:;"'()\s]+/g, ' ').trim().split(' ').filter(Boolean)
   if (words.length === 0) return { code, yes: true }
   if (words.length !== 1) return null
-  if (YES.has(words[0])) return { code, yes: true }
+  if (YES.has(words[0]) || words[0] === YES_FOR[prefix]) return { code, yes: true }
   if (NO.has(words[0])) return { code, yes: false }
   return null
 }
 
-/** A text with every approval code blanked: what the server keeps of the DMs it sent, so no tool can echo a code back (review of #107). */
+/** A text with every approval code blanked (payment and delete): what the server keeps of the DMs it sent, so no tool can echo a code back (review of #107). */
 export function withoutCodes(text: string): string {
-  return text.replace(CODE, 'PAY-******')
+  return text.replace(ANY_CODE, (m) => `${m.slice(0, 3).toUpperCase()}-******`)
+}
+
+/** A fresh code with this prefix, unlike any in `used`. */
+function newCode(prefix: CodePrefix, used: Set<string>): string {
+  let code: string
+  do {
+    code = `${prefix}-` + Array.from({ length: 6 }, () => ALPHABET[randomInt(ALPHABET.length)]).join('')
+  } while (used.has(code))
+  return code
 }
 
 /** The DM that asks the operator to approve one payment. */
@@ -213,4 +228,204 @@ export function requestWords(r: ApprovalRequest, day: { spentSats: number; maxDa
     `Today so far: ${day.spentSats} of ${day.maxDailySats} sats spent; after this, ${Math.max(0, day.maxDailySats - day.spentSats - r.sats)} left. One payment may be at most ${day.maxPaymentSats} sats.`,
     `To approve, reply with just the code ${r.code} (or "yes ${r.code}"). To refuse, reply "no ${r.code}". Any other reply approves nothing. It expires in ${minutes} minutes; if you do not answer, nothing is paid.`,
   ].join('\n')
+}
+
+// ---- deletes -----------------------------------------------------------------
+//
+// The operator approves a large delete first (arkinox, 2026-11-26, after
+// "delete the aerocarnival course" took a 31-piece castle that shared a bag
+// with it: "a delete preview with operator approval"). The same strict
+// reading as a payment: the server, never a model, DMs the operator what
+// would go and what stays, with a DEL- code; only the operator's own DM
+// naming it approves; "no <code>" refuses; it lapses after the TTL; one
+// approval is one delete of exactly the pieces previewed, used once. The
+// code is never in a tool's answer. <state>/delete-approvals.json keeps the
+// requests (mode 600).
+
+/** How many pieces may go in one delete without the operator's approval, by default. */
+export const DEFAULT_DELETE_APPROVAL_THRESHOLD = 5
+
+/** Who approves a delete that needs approval: the operator, by DM, or nobody (the trash still keeps a backup). */
+export type DeleteApproval = 'none' | 'operator'
+
+const DELETE_FILE = 'delete-approvals.json'
+
+/** One delete held for the operator's approval. */
+export interface DeleteRequest {
+  /** The code operators type, e.g. DEL-7KQ2XM. */
+  code: string
+  /** The ids of the pieces the preview named, sorted: the request covers exactly this set, and nothing else. */
+  pieces: string[]
+  /** What the operator was told would go, in words. */
+  summary: string
+  createdAt: number
+  expiresAt: number
+  state: ApprovalState
+  answeredAt?: number
+  answerId?: string
+  notified?: boolean
+  /** A refusal or lapse the agent was told of: the next confirm asks again, with a new code. */
+  reported?: boolean
+}
+
+/** How long a delete that ran without approval counts against the threshold (review of 485a2df: no splitting a large delete into small ones). */
+export const DELETE_WINDOW_MS = 60 * 60_000
+
+interface DeleteFile { version: 1; requests: DeleteRequest[]; deleted?: Array<{ at: number; pieces: number }> }
+
+/** Whether a delete of this exact set may run now. */
+export type DeleteVerdict =
+  | { state: 'none' }
+  | { state: 'pending'; request: DeleteRequest }
+  | { state: 'approved'; request: DeleteRequest }
+  | { state: 'refused' | 'expired'; request: DeleteRequest; reason: string }
+
+/** The set a request covers, as one string: the ids sorted, without repeats. */
+function setOf(pieces: string[]): string[] {
+  return [...new Set(pieces)].sort()
+}
+
+/** The delete approval requests in <state>/delete-approvals.json, read as strictly as a payment's. */
+export class DeleteApprovals {
+  private requests: DeleteRequest[]
+  /** Deletes that ran without an approval, the last hour's: when, and how many pieces. */
+  private deleted: Array<{ at: number; pieces: number }>
+
+  constructor(
+    private readonly dir: StateDir,
+    readonly mode: DeleteApproval,
+    private readonly now: () => number = Date.now,
+    private readonly ttlMs: number = APPROVAL_TTL_MS,
+  ) {
+    const saved = dir.readJson<DeleteFile | null>(DELETE_FILE, null)
+    this.requests = saved?.version === 1 && Array.isArray(saved.requests) ? saved.requests : []
+    this.deleted = saved?.version === 1 && Array.isArray(saved.deleted) ? saved.deleted.filter((d) => typeof d?.at === 'number' && typeof d?.pieces === 'number') : []
+  }
+
+  /** How many pieces deletes that needed no approval took in the last hour, across delete_build and remove_placed. */
+  recentDeleted(): number {
+    const since = this.now() - DELETE_WINDOW_MS
+    return this.deleted.filter((d) => d.at > since).reduce((n, d) => n + d.pieces, 0)
+  }
+
+  /** A delete ran. One the operator approved is not counted: they saw exactly what went. */
+  noteDeleted(pieces: number, approved: boolean): void {
+    if (approved || pieces <= 0) return
+    this.deleted.push({ at: this.now(), pieces })
+    this.save()
+  }
+
+  /** Whether a delete that needs approval waits for the operator. */
+  get required(): boolean {
+    return this.mode === 'operator'
+  }
+
+  /** How long the operator has to answer, in minutes. */
+  get ttlMinutes(): number {
+    return Math.round(this.ttlMs / 60_000)
+  }
+
+  private save(): void {
+    const cutoff = this.now() - KEPT_MS
+    this.requests = this.requests.filter((r) => r.state === 'pending' || r.state === 'approved' || r.createdAt >= cutoff).slice(-KEPT)
+    const since = this.now() - DELETE_WINDOW_MS
+    this.deleted = this.deleted.filter((d) => d.at > since)
+    this.dir.writeJson(DELETE_FILE, { version: 1, requests: this.requests, deleted: this.deleted } satisfies DeleteFile)
+  }
+
+  private expire(): void {
+    const t = this.now()
+    let changed = false
+    for (const r of this.requests) {
+      if ((r.state === 'pending' || r.state === 'approved') && t >= r.expiresAt) { r.state = 'expired'; changed = true }
+    }
+    if (changed) this.save()
+  }
+
+  /**
+   * The newest request for exactly this set of pieces. A request for any
+   * other set does not apply (the preview it approved is not this one). A
+   * refusal or lapse is told once; after that the set has no request, so the
+   * next confirm asks again.
+   */
+  verdict(pieces: string[]): DeleteVerdict {
+    this.expire()
+    const want = setOf(pieces).join(',')
+    const r = [...this.requests].reverse().find((q) => q.pieces.join(',') === want)
+    if (!r || r.state === 'used' || r.reported) return { state: 'none' }
+    if (r.state === 'pending') return { state: 'pending', request: r }
+    if (r.state === 'approved') return { state: 'approved', request: r }
+    // Words without the code: no tool's answer ever carries one, a spent one included.
+    const reason = r.state === 'refused'
+      ? 'your operator refused this delete, so nothing was deleted'
+      : `your operator did not answer the request for this delete within ${this.ttlMinutes} minutes, so nothing was deleted`
+    return { state: r.state === 'refused' ? 'refused' : 'expired', request: r, reason }
+  }
+
+  /** Mark a refusal or lapse as told to the agent. */
+  reported(code: string): void {
+    const r = this.requests.find((q) => q.code === code)
+    if (r && !r.reported) { r.reported = true; this.save() }
+  }
+
+  /** Hold a delete as a request with a fresh code. The caller DMs the operator deleteRequestWords. */
+  request(input: { pieces: string[]; summary: string }): DeleteRequest {
+    const code = newCode('DEL', new Set(this.requests.map((r) => r.code)))
+    const t = this.now()
+    const r: DeleteRequest = { code, pieces: setOf(input.pieces), summary: input.summary, createdAt: t, expiresAt: t + this.ttlMs, state: 'pending' }
+    this.requests.push(r)
+    this.save()
+    return r
+  }
+
+  /** Spend an approval on the delete it covers, before anything is signed. False when it is not (or no longer) an approval of exactly this set. */
+  use(code: string, pieces: string[]): boolean {
+    this.expire()
+    const r = this.requests.find((q) => q.code === code)
+    if (!r || r.state !== 'approved' || r.pieces.join(',') !== setOf(pieces).join(',')) return false
+    r.state = 'used'
+    this.save()
+    return true
+  }
+
+  /** A DM from the operator (seal checked by the caller): answers the pending delete request it names, as Approvals.answer does a payment's. */
+  answer(text: string, createdAtSeconds: number, messageId: string): DeleteRequest | null {
+    if (!this.required) return null
+    this.expire()
+    const said = readAnswer(text, 'DEL')
+    if (!said) return null
+    const r = this.requests.find((q) => q.state === 'pending' && q.code === said.code)
+    if (!r) return null
+    if (createdAtSeconds * 1000 < r.createdAt - 60_000) return null
+    r.state = said.yes ? 'approved' : 'refused'
+    r.answeredAt = this.now()
+    r.answerId = messageId
+    this.save()
+    return r
+  }
+
+  notified(code: string): boolean {
+    return this.requests.find((q) => q.code === code)?.notified === true
+  }
+
+  markNotified(code: string): void {
+    const r = this.requests.find((q) => q.code === code)
+    if (r && !r.notified) { r.notified = true; this.save() }
+  }
+
+  /** Requests still waiting on the operator (never with the code). */
+  pending(): Array<Omit<DeleteRequest, 'code' | 'answerId'>> {
+    this.expire()
+    return this.requests.filter((r) => r.state === 'pending').map(({ code: _c, answerId: _a, ...rest }) => rest)
+  }
+}
+
+/** The DM that asks the operator to approve one delete. Kept under the DM cap: the list is cut, never the code or how to answer. */
+export function deleteRequestWords(r: DeleteRequest, maxChars = 3800): string {
+  const minutes = Math.round((r.expiresAt - r.createdAt) / 60_000)
+  const head = `May I delete ${r.pieces.length} thing(s) I placed? A backup of everything that goes is written to the trash in my state directory first. ${RESTORE_WORDS}`
+  const tail = `To approve, reply with just the code ${r.code} (or "yes ${r.code}"). To refuse, reply "no ${r.code}". Any other reply approves nothing. It expires in ${minutes} minutes; if you do not answer, nothing is deleted.`
+  const room = Math.max(200, maxChars - head.length - tail.length - 4)
+  const summary = r.summary.length > room ? `${r.summary.slice(0, room - 20).replace(/\s+\S*$/, '')} ... (list cut)` : r.summary
+  return [head, summary, tail].join('\n')
 }
