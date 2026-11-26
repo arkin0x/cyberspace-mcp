@@ -168,6 +168,15 @@ export async function runDoctor(argv, deps) {
             add({ name: 'payments', verdict: 'info', detail: `approval off: the server pays HOSAKA invoices within the limits alone; ${limits}; ${wallet}`, fix: settings.nwc ? 'to approve each payment first: "paymentApproval": "operator" in config.json (or --payment-approval operator)' : undefined });
         }
     }
+    // Deletes: whether the operator approves a large one first (approvals.ts DeleteApprovals); the trash keeps a backup either way (trash.ts).
+    if (settings.deleteApproval === 'operator') {
+        add(operator
+            ? { name: 'deletes', verdict: 'ok', detail: `approval on: a delete of more than ${settings.deleteApprovalThreshold} piece(s), or of a whole bag of things in no build, waits for your operator's code by DM (30 minutes, one delete each); every delete is backed up to ${join(stateDir, 'trash')} first` }
+            : { name: 'deletes', verdict: 'warn', detail: `approval on, but there is no operator to approve, so a delete that needs approval never runs; every delete is backed up to ${join(stateDir, 'trash')} first`, fix: 'cyberspace-mcp init --operator <their npub>, or "deleteApproval": "none" in config.json' });
+    }
+    else {
+        add({ name: 'deletes', verdict: 'info', detail: `approval off: deletes run without asking anyone; every delete is backed up to ${join(stateDir, 'trash')} first`, fix: operator ? 'to approve large deletes first: "deleteApproval": "operator" in config.json (or --delete-approval operator)' : undefined });
+    }
     // Whose words reach the model (listenTo.ts).
     if (settings.listenTo === 'operator') {
         const profileOperator = StateDir.open(stateDir).readJson('profile.json', null)?.tags?.find((t) => t[0] === 'p' && t[3] === 'operator')?.[1];

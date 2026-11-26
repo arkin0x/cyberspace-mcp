@@ -58,6 +58,10 @@ import type { EntrySummary, HeldKey, ItemPlace, KeyStore, OpenedBag } from './sp
 import { Refusal, type ToolResult } from './tool.js'
 import { readOpacity } from 'sno-core/shards'
 import { CONSTRAIN_WORDS, authoredConstrainOf, chosenConstrain, chosenConstrainOf, rawConstrain, rewritePayload, walkWords, withAuthoredConstrain, type Constrain } from './walkConstrain.js'
+import { toPayload } from 'sno-core/shards'
+import { UNLABELLED, groupKey, type Builds } from './builds.js'
+import { withoutTokens, type Trash, type TrashKept, type TrashPiece } from './trash.js'
+import { DEFAULT_DELETE_APPROVAL_THRESHOLD } from './approvals.js'
 
 /** The words an agent may use for "the thing I placed most recently". */
 const LAST_WORDS = new Set(['last', 'latest', 'newest', 'recent', 'most recent', 'the last one', 'it', 'this', 'that'])
@@ -158,6 +162,35 @@ export interface PlacedHost {
   maxHeight: number
   minHeight: number
   log: (line: string) => void
+  /** The build ledger (builds.ts): which build each thing belongs to, followed through moves, rewrites and deletes. */
+  builds?: Builds
+  /** Where every delete writes its backup first (trash.ts); with none, deletes refuse. */
+  trash?: Trash
+  /** The operator's approval of a large delete (approvals.ts DeleteApprovals); with none, no delete waits. */
+  deleteGate?: DeleteGate
+}
+
+/**
+ * The approval a delete may need (arkinox, 2026-11-26: "a delete preview
+ * with operator approval"). `needs` says why approval is needed; empty, it
+ * is not. check returns null to go ahead (an approval, when one was needed,
+ * spent on exactly these pieces), or the answer to give instead (held for
+ * the operator); a refusal or lapse throws a Refusal.
+ */
+export interface DeleteGate {
+  threshold: number
+  /** Whether a delete that needs approval waits for the operator (deleteApproval "operator"). */
+  required: () => boolean
+  check(input: { pieces: string[]; needs: string[]; summary: string; again: string }): Promise<ToolResult | null>
+}
+
+export { DEFAULT_DELETE_APPROVAL_THRESHOLD }
+
+/** One bag a delete touches: what goes and what stays. */
+interface BagPlan {
+  bag: OpenBag
+  remove: Row[]
+  keep: Row[]
 }
 
 /** The entries of an envelope, opened with its region key; null when it does not open (the wrong key, or not a list). */
@@ -208,7 +241,8 @@ function entryPoint(e: BagEntry): { position: Position; plane: Plane } | null {
   return { position: { x, y, z }, plane }
 }
 
-function labelOf(h: Hidden): string {
+/** What placed calls a thing: a message's first words, or a shard's, key's, chest's or audio's name. */
+export function labelOf(h: Hidden): string {
   return h.type === 'message' ? messagePreview(h.text ?? '', 60) : h.type === 'shard' ? (h.shard?.name ?? 'shard') : h.type === 'key' ? (h.key?.name ?? 'key') : h.type === 'audio' ? (h.audio?.title ?? 'audio') : (h.chest?.name ?? 'chest')
 }
 
@@ -529,15 +563,17 @@ export class Placements {
         const moved = r.lineage && r.lineage !== r.id && /^[0-9a-f]{64}$/.test(r.lineage) ? `, moved (lineage ${r.lineage.slice(0, 12)})` : ''
         // An object at opacity 0 is still there; its author should be able to find it (DECK-0003 1.11).
         const walk = r.hidden?.shard ? `, ${walkWords(r.hidden.shard)}${readOpacity(r.hidden.shard.opacity) === 0 ? ', invisible (opacity 0: a reader draws nothing of its own)' : ''}` : ''
-        out.push(`  ${r.type} "${r.label}" id ${r.id.slice(0, 12)} at ${words(r.at)}${how}${moved}${walk}`)
+        const build = this.host.builds ? `, build "${this.groupOf(r).label}"` : ''
+        out.push(`  ${r.type} "${r.label}" id ${r.id.slice(0, 12)} at ${words(r.at)}${how}${moved}${walk}${build}`)
       }
     }
     if (reading.silent.length) out.push(`Not answered: ${reading.silent.join('; ')}. A bag only those relays hold is not listed.`)
+    if (this.host.builds) out.push('Each thing names its build ("unlabelled": placed with no build, or before builds were kept). To take a whole build out and keep everything else in the same bags: delete_build.')
     out.push('To take one down: remove_placed with its target (its id, its exact name, or "last" for the newest of any type; add type: "shard" for the newest shard); whole_bag: true takes down the bag it is in. To move one: move_placed with its target and by: { dz: 12 } for 12 gibsons toward Z+ (dx, dy, dz in gibsons, negative for X-, Y-, Z-), or to: a coordinate. To turn collision in WALK on or off for shards: constrain_placed with their target (or match, bag, all: true) and constrain "opaque", "all" or "off".')
     return {
       text: out.join('\n'),
       data: {
-        bags: bags.map((b) => ({ lookupId: b.lookupId, bagId: b.bagId, height: b.height, base: b.base, createdAt: b.createdAt, riddle: b.riddle, keyHeld: b.keyHeld, onlyHere: b.onlyHere, entries: b.rows.map(Placements.publicRow) })),
+        bags: bags.map((b) => ({ lookupId: b.lookupId, bagId: b.bagId, height: b.height, base: b.base, createdAt: b.createdAt, riddle: b.riddle, keyHeld: b.keyHeld, onlyHere: b.onlyHere, entries: b.rows.map((r) => ({ ...Placements.publicRow(r), ...(this.host.builds ? { build: this.groupOf(r).label } : {}) })) })),
         last: last ? Placements.publicRow(last) : null,
         unanswered: reading.silent,
       },
@@ -694,6 +730,87 @@ export class Placements {
     return { lookupId: bag.lookupId, keyHex: bag.keyHex, height: bag.height, base: bag.base }
   }
 
+  // ---- builds and backups ----------------------------------------------------------
+
+  /** The build a thing belongs to, as a group: its ledger build, or "unlabelled" (in no build, or placed before the ledger). */
+  private groupOf(r: Pick<Row, 'id' | 'lineage'>): { key: string; label: string; id: string | null } {
+    const b = this.host.builds?.buildOf({ id: r.id, lineage: r.lineage }) ?? null
+    if (!b || groupKey(b.label) === UNLABELLED) return { key: UNLABELLED, label: UNLABELLED, id: b?.id ?? null }
+    return { key: groupKey(b.label), label: b.label, id: b.id }
+  }
+
+  /** A thing named for the operator: its type, name, short id and build. */
+  private thingWords(r: Row): string {
+    return `${r.type} "${r.label}" (id ${r.id.slice(0, 12)}, ${this.groupOf(r).label})`
+  }
+
+  /** One removed thing as the trash keeps it: opened, never a secret (trash.ts). */
+  private trashPiece(r: Row): TrashPiece {
+    const h = r.hidden
+    const out: TrashPiece = {
+      id: r.id, lineage: r.lineage, type: r.type, label: withoutTokens(r.label).text, build: this.groupOf(r).label, lookupId: r.bag.lookupId, height: r.bag.height, at: r.at, plane: r.plane,
+      ...(r.anyPlane ? { anyPlane: true as const } : {}), ...(r.byReference ? { byReference: r.byReference } : {}), ...(r.objectAddress ? { objectAddress: r.objectAddress } : {}),
+    }
+    if (h?.type === 'shard' && h.shard) {
+      // An inline shard's payload as it was written (every field kept); a sealed one as sno-core reads it back.
+      let raw: unknown = null
+      if (!isReference(r.entry)) { try { raw = JSON.parse((r.entry as NostrEvent).content) } catch { raw = null } }
+      out.payload = raw && typeof raw === 'object' ? raw : toPayload(h.shard)
+    }
+    if (h?.type === 'message') {
+      const t = withoutTokens(h.text ?? '')
+      out.text = t.text
+      if (t.held) out.heldCashuToken = true
+    }
+    // A key's own event carries its secret: only its name, sentence and public key are kept.
+    if (h?.type === 'key' && h.key) out.key = { name: h.key.name, about: h.key.about, itemPubkey: h.key.itemPubkey }
+    if (h?.type === 'chest' && h.chest) out.chest = { name: h.chest.name, requires: h.chest.requires, lockPubkey: h.chest.lockPubkey, ...(h.chest.door ? { door: h.chest.door } : {}) }
+    if (h?.type === 'audio' && h.audio) out.audio = { title: h.audio.title }
+    return out
+  }
+
+  private kept(r: Row): TrashKept {
+    // A message's first words may start a Cashu token: blanked, as in its text.
+    return { id: r.id, type: r.type, label: withoutTokens(r.label).text, build: this.groupOf(r).label }
+  }
+
+  /**
+   * Write the backup of a delete to the trash, fsynced, before anything is
+   * signed (trash.ts). Each bag as it stands now (`current`, read fresh),
+   * the removed things opened, their sealed objects, their ledger entries,
+   * and what stayed. Throws a Refusal when it cannot be written: then the
+   * delete does not run.
+   */
+  private backup(ctx: { tool: string; asked: Record<string, unknown>; label: string; build?: string }, bags: Array<{ bag: OpenBag; current: NostrEvent | null; remove: Row[]; keep: Row[]; whole: boolean }>): string {
+    const trash = this.host.trash
+    if (!trash) throw new Refusal('This server has no trash to write a backup to, so nothing was deleted: a delete never runs without its backup.')
+    const removed = bags.flatMap((b) => b.remove)
+    const objects = removed.flatMap((r) => (isReference(r.entry) && r.hidden?.inner && (r.hidden.inner as NostrEvent).sig ? [referenced(r.hidden.inner)] : []))
+    return trash.write({
+      bags: bags.flatMap((b) => (b.current ? [b.current] : [])),
+      objects: [...new Map(objects.map((o) => [o.id, o])).values()],
+      pieces: removed.map((r) => this.trashPiece(r)),
+      ledger: (this.host.builds?.entriesFor(removed) ?? []).map((e) => ({ ...e, piece: { ...e.piece, label: withoutTokens(e.piece.label).text } })),
+      meta: {
+        tool: ctx.tool, asked: ctx.asked, ...(ctx.build ? { build: ctx.build } : {}),
+        bags: bags.map((b) => ({ lookupId: b.bag.lookupId, bagId: b.current?.id ?? null, height: b.bag.height, base: b.bag.base, wholeBag: b.whole, removed: b.remove.map((r) => r.id), kept: b.keep.map((r) => this.kept(r)) })),
+        removed: removed.map((r) => this.kept(r)),
+      },
+    }, ctx.label)
+  }
+
+  /** What a delete would do to each bag, in words: what goes, what stays, and whether the bag is rewritten or deleted. */
+  private planWords(plans: BagPlan[]): string[] {
+    const out: string[] = []
+    for (const p of plans) {
+      const b = p.bag
+      out.push(`h${b.height} bag at base ${b.base ? words(b.base) : '?'} (lookup id ${b.lookupId.slice(0, 12)}...): ${p.keep.length ? `rewritten without ${p.remove.length} thing(s); ${p.keep.length} stay` : `deleted (nothing else is in it)`}.`)
+      out.push(`  goes: ${p.remove.map((r) => this.thingWords(r)).join('; ')}`)
+      if (p.keep.length) out.push(`  stays: ${p.keep.map((r) => this.thingWords(r)).join('; ')}`)
+    }
+    return out
+  }
+
   // ---- remove_placed -------------------------------------------------------------
 
   async remove(input: { target?: string; type?: string; bag?: string; whole_bag?: boolean }): Promise<ToolResult> {
@@ -706,12 +823,11 @@ export class Placements {
       const hits = reading.bags.filter((b) => b.lookupId.startsWith(want) || b.bagId.startsWith(want))
       if (hits.length === 0) throw new Refusal(`None of your bags has a lookup id or bag id starting ${want}. placed lists them.`)
       if (hits.length > 1) throw new Refusal(`${hits.length} of your bags start ${want}; give more of the id.`)
-      this.host.beforeRemove?.(hits[0].rows.map((r) => r.id))
-      return this.removeBag(hits[0], reading)
+      return this.removeWhole(hits[0], reading, input)
     }
     const row = this.resolve(reading, input.target, input.type)
-    this.host.beforeRemove?.(input.whole_bag ? row.bag.rows.map((r) => r.id) : [row.id])
-    if (input.whole_bag) return this.removeBag(row.bag, reading)
+    if (input.whole_bag) return this.removeWhole(row.bag, reading, input)
+    this.host.beforeRemove?.([row.id])
     const key = this.keyOf(row.bag)
     return this.withBags([key.lookupId], async () => {
       this.unsentGuard([key.lookupId], null)
@@ -719,28 +835,62 @@ export class Placements {
       if (!current || !entries.some((e) => entryKey(e) === row.key)) throw new Refusal(`${row.type} "${row.label}" is no longer in that bag; nothing was changed. placed shows what is there now.`)
       const left = entries.filter((e) => entryKey(e) !== row.key)
       const what = `${row.type} "${row.label}" (id ${row.id.slice(0, 12)}) at ${words(row.at)} in your h${key.height} bag`
+      // The backup first, fsynced, before anything is signed (arkinox, 2026-11-26).
+      const trashId = this.backup({ tool: 'remove_placed', asked: input, label: row.label }, [{ bag: row.bag, current, remove: [row], keep: row.bag.rows.filter((r) => r !== row), whole: left.length === 0 }])
+      const saved = ` A backup is in the trash (${trashId}); restore_build brings it back.`
       if (left.length > 0) {
         const settings = bagSettingsOf(current, key.height)
         const { event, entry } = await this.publishBag(left, key, settings, { position: { x: BigInt(key.base.x), y: BigInt(key.base.y), z: BigInt(key.base.z) }, plane: row.plane }, current)
         await this.noteOpened(event, key, settings)
         const retract = entry.accepted.includes(this.canonical) ? await this.retractIfUnnamed(row, reading, new Set([`${row.bag.lookupId}/${row.key}`])) : ''
+        this.host.builds?.removed([row], trashId)
         this.host.afterRemove?.([row.id])
         return {
-          text: `Removed ${what}. The bag was rewritten without it (${event.id.slice(0, 8)}...), keeping the other ${left.length} thing(s): ${relayWords(entry)}.${retract}`,
-          data: { removed: Placements.publicRow(row), bagId: event.id, lookupId: key.lookupId, left: left.length, deletedBag: false, accepted: entry.accepted, refused: entry.refused ?? {} },
+          text: `Removed ${what}. The bag was rewritten without it (${event.id.slice(0, 8)}...), keeping the other ${left.length} thing(s): ${relayWords(entry)}.${retract}${saved}`,
+          data: { removed: Placements.publicRow(row), bagId: event.id, lookupId: key.lookupId, left: left.length, deletedBag: false, trashId, accepted: entry.accepted, refused: entry.refused ?? {} },
         }
       }
       const { event, entry } = await this.deleteBag(key.lookupId, current.id, current.created_at, key)
       const retract = entry.accepted.includes(this.canonical) ? await this.retractIfUnnamed(row, reading, new Set([`${row.bag.lookupId}/${row.key}`])) : ''
+      this.host.builds?.removed([row], trashId)
       this.host.afterRemove?.([row.id])
       return {
-        text: `Removed ${what}. It was the last thing in the bag, so the bag itself was deleted (NIP-09 kind 5 ${event.id.slice(0, 8)}...): ${relayWords(entry)}.${retract}`,
-        data: { removed: Placements.publicRow(row), deletionId: event.id, lookupId: key.lookupId, left: 0, deletedBag: true, accepted: entry.accepted, refused: entry.refused ?? {} },
+        text: `Removed ${what}. It was the last thing in the bag, so the bag itself was deleted (NIP-09 kind 5 ${event.id.slice(0, 8)}...): ${relayWords(entry)}.${retract}${saved}`,
+        data: { removed: Placements.publicRow(row), deletionId: event.id, lookupId: key.lookupId, left: 0, deletedBag: true, trashId, accepted: entry.accepted, refused: entry.refused ?? {} },
       }
     })
   }
 
-  private async removeBag(bag: OpenBag, reading: Reading): Promise<ToolResult> {
+  /**
+   * remove_placed of a whole bag. Refused when the bag holds things of more
+   * than one build (the incident of 2026-11-26: a bag shared by a course and
+   * a castle): delete_build takes one build out and keeps the rest. Needs
+   * the operator's approval (deleteApproval "operator") above the threshold,
+   * or when it holds things in no build, or things this server cannot read.
+   */
+  private async removeWhole(bag: OpenBag, reading: Reading, input: Record<string, unknown>): Promise<ToolResult> {
+    const groups = [...new Map(bag.rows.map((r) => { const g = this.groupOf(r); return [g.key, g] as const })).values()]
+    if (groups.length > 1) {
+      const counts = groups.map((g) => `"${g.label}" (${bag.rows.filter((r) => this.groupOf(r).key === g.key).length} thing(s))`).join(', ')
+      throw new Refusal(`That bag (h${bag.height}, lookup id ${bag.lookupId.slice(0, 12)}...) holds things of ${groups.length} builds: ${counts}. Deleting it whole would destroy the others too, so nothing was changed. To take one build out and keep the rest, call delete_build with that build (or with the ids of the pieces to go); it shows a preview first. build lists a build's pieces.`)
+    }
+    const threshold = this.host.deleteGate?.threshold ?? DEFAULT_DELETE_APPROVAL_THRESHOLD
+    const needs: string[] = []
+    if (bag.rows.length > threshold) needs.push(`${bag.rows.length} things would go, more than ${threshold}`)
+    if (bag.rows.some((r) => this.groupOf(r).key === UNLABELLED)) needs.push('it holds things in no build (placed before builds were kept, or with no build named), so nobody named what they are part of')
+    if (!bag.keyHeld) needs.push('this server holds no key for it, so what it holds cannot be read or backed up')
+    const plan: BagPlan = { bag, remove: bag.rows, keep: [] }
+    const preview = bag.keyHeld ? this.planWords([plan]) : [`bag ${bag.lookupId.slice(0, 12)}... (no key held: its contents cannot be read)`]
+    const pieces = bag.keyHeld ? bag.rows.map((r) => r.id) : [`bag:${bag.lookupId}`]
+    if (this.host.deleteGate && needs.length) {
+      const held = await this.host.deleteGate.check({ pieces, needs, summary: preview.join('\n'), again: 'call remove_placed again exactly as before' })
+      if (held) return { ...held, text: `${held.text}\nWhat would go:\n${preview.join('\n')}`, data: { ...held.data, preview: true, lookupId: bag.lookupId } }
+    }
+    this.host.beforeRemove?.(bag.rows.map((r) => r.id))
+    return this.removeBag(bag, reading, input)
+  }
+
+  private async removeBag(bag: OpenBag, reading: Reading, input: Record<string, unknown>): Promise<ToolResult> {
     return this.withBags([bag.lookupId], async () => {
       this.unsentGuard([bag.lookupId], null)
       // The newest version, read again, so the deletion names the id the relays hold now.
@@ -748,6 +898,13 @@ export class Placements {
       if (!answers.some((a) => a.outcome === 'answered' && normalizeURL(a.url) === this.canonical)) throw new Refusal(`The canonical relay did not answer for that bag (${Placements.silentWords(answers).join('; ')}). Nothing was changed. Try again shortly.`)
       const current = this.newestOwn(bag.lookupId, mergeAnswers(answers)) ?? bag.event
       const key = bag.keyHex && bag.base && bag.height >= 0 ? { lookupId: bag.lookupId, keyHex: bag.keyHex, height: bag.height, base: bag.base } : null
+      // Something added since it was read (another session) would go unseen and unbacked: refused, so the next call sees it.
+      if (key && current.id !== bag.event.id) {
+        const fresh = await openEntries(current, hexToBytes(key.keyHex))
+        const known = new Set(bag.rows.map((r) => r.key))
+        if (!fresh || fresh.some((e) => !known.has(entryKey(e)))) throw new Refusal('That bag changed since it was read (another session wrote it). Nothing was changed; call placed again to see what it holds now.')
+      }
+      const trashId = this.backup({ tool: 'remove_placed', asked: input, label: bag.rows.length === 1 ? bag.rows[0].label : `bag-${bag.lookupId.slice(0, 8)}` }, [{ bag, current, remove: bag.rows, keep: [], whole: true }])
       const { event, entry } = await this.deleteBag(bag.lookupId, current.id, Math.max(current.created_at, this.floor(bag.lookupId) - 1), key)
       const gone = new Set(bag.rows.map((r) => `${bag.lookupId}/${r.key}`))
       const notes: string[] = []
@@ -757,13 +914,263 @@ export class Placements {
           if (n) notes.push(n.trim())
         }
       }
+      this.host.builds?.removed(bag.rows, trashId)
       this.host.afterRemove?.(bag.rows.map((r) => r.id))
       const what = bag.keyHeld ? `your h${bag.height} bag at base ${bag.base ? words(bag.base) : '?'} and the ${bag.rows.length} thing(s) in it${bag.rows.length ? ` (${bag.rows.slice(0, 8).map((r) => `"${r.label}"`).join(', ')}${bag.rows.length > 8 ? ', ...' : ''})` : ''}` : `your bag ${bag.lookupId.slice(0, 12)}... (no key held, so what it held was not read)`
       return {
-        text: `Deleted ${what} (NIP-09 kind 5 ${event.id.slice(0, 8)}... naming 33330:<you>:${bag.lookupId.slice(0, 12)}...): ${relayWords(entry)}.${notes.length ? ` ${notes.join(' ')}` : ''}`,
-        data: { deletedBag: true, lookupId: bag.lookupId, bagId: current.id, deletionId: event.id, removed: bag.rows.map(Placements.publicRow), accepted: entry.accepted, refused: entry.refused ?? {} },
+        text: `Deleted ${what} (NIP-09 kind 5 ${event.id.slice(0, 8)}... naming 33330:<you>:${bag.lookupId.slice(0, 12)}...): ${relayWords(entry)}.${notes.length ? ` ${notes.join(' ')}` : ''} A backup is in the trash (${trashId})${bag.keyHeld ? '; restore_build brings its shards and messages back' : ': the bag as it was, sealed, since this server cannot open it'}.`,
+        data: { deletedBag: true, lookupId: bag.lookupId, bagId: current.id, deletionId: event.id, removed: bag.rows.map(Placements.publicRow), trashId, accepted: entry.accepted, refused: entry.refused ?? {} },
       }
     })
+  }
+
+  // ---- delete_build ----------------------------------------------------------------
+
+  /**
+   * delete_build: take one build out of the agent's bags (or the pieces
+   * named by id), keeping everything else in each bag (arkinox, 2026-11-26).
+   * Without confirm it changes nothing and says, bag by bag, what would go
+   * and what would stay, and whether the operator must approve. With
+   * confirm: the approval when needed, the backup, then for each bag a
+   * rewrite without the pieces (read fresh, as remove_placed rewrites) or,
+   * when nothing else is left in it, its deletion. A bag that still holds
+   * another build's pieces is never deleted.
+   */
+  async deleteBuild(input: { build?: string; pieces?: string[]; confirm?: boolean }): Promise<ToolResult> {
+    const hasBuild = input.build !== undefined && String(input.build).trim() !== ''
+    const hasPieces = Array.isArray(input.pieces) && input.pieces.length > 0
+    if (hasBuild === hasPieces) throw new Refusal('Say what to delete with exactly one of: build (a build\'s label or id, as builds lists it) or pieces (the ids of the things to go, at least 8 hex each, as placed or build lists them). Nothing was changed.')
+    const reading = await this.readAll()
+    const rows = Placements.rows(reading)
+    let picked: Row[]
+    let named: { key: string; label: string } | null = null
+    const notFound: string[] = []
+    if (hasBuild) {
+      const given = String(input.build).trim()
+      const b = groupKey(given) === UNLABELLED ? null : (this.host.builds?.get(given) ?? null)
+      if (!b && groupKey(given) !== UNLABELLED) throw new Refusal(`No build is called "${given}". builds lists them.`)
+      named = b ? { key: groupKey(b.label), label: b.label } : { key: UNLABELLED, label: UNLABELLED }
+      // An entry this server cannot read (a kind it does not know) is never taken by a build: only by its id.
+      picked = rows.filter((r) => this.groupOf(r).key === named!.key && r.type !== 'unreadable')
+      // What the ledger says is in the build but no bag holds now: said, never guessed at.
+      if (b) for (const p of b.pieces) if (!p.removedAt && !picked.some((r) => r.id === p.id || (p.lineage !== null && r.lineage === p.lineage))) notFound.push(`${p.type} "${p.label}" (id ${p.id.slice(0, 12)})`)
+    } else {
+      const ids = (input.pieces ?? []).map((x) => String(x).trim().toLowerCase())
+      picked = []
+      for (const id of ids) {
+        if (!/^[0-9a-f]{8,64}$/.test(id)) throw new Refusal(`"${id}" is not a piece id: each is at least 8 hex characters, as placed or build lists them. Nothing was changed.`)
+        const hits = [...new Map(rows.filter((r) => r.id.startsWith(id)).map((r) => [`${r.bag.lookupId}/${r.key}`, r])).values()]
+        if (hits.length > 1) throw new Refusal(`${hits.length} things have ids starting ${id}; give more of it. Nothing was changed.`)
+        if (hits.length === 0) { notFound.push(id); continue }
+        if (!picked.includes(hits[0])) picked.push(hits[0])
+      }
+    }
+    if (picked.length === 0) {
+      throw new Refusal(`Nothing ${named ? `of the build "${named.label}"` : 'with those ids'} is in your bags${notFound.length ? ` (not found: ${notFound.slice(0, 10).join('; ')})` : ''}. Nothing was changed. placed lists what is placed.`)
+    }
+    const plans: BagPlan[] = []
+    for (const r of picked) {
+      let p = plans.find((x) => x.bag === r.bag)
+      if (!p) { p = { bag: r.bag, remove: [], keep: [] }; plans.push(p) }
+      p.remove.push(r)
+    }
+    for (const p of plans) p.keep = p.bag.rows.filter((r) => !p.remove.includes(r))
+    const threshold = this.host.deleteGate?.threshold ?? DEFAULT_DELETE_APPROVAL_THRESHOLD
+    const needs: string[] = []
+    if (picked.length > threshold) needs.push(`${picked.length} things would go, more than ${threshold}`)
+    const outside = named ? picked.filter((r) => this.groupOf(r).key !== named!.key) : []
+    if (outside.length) needs.push(`${outside.length} of them are not in the build "${named!.label}"`)
+    const approval = needs.length > 0 && !!this.host.deleteGate?.required()
+    const preview = this.planWords(plans)
+    const what = named ? `the build "${named.label}"` : `${picked.length} piece(s) named by id`
+    const data = {
+      build: named?.label ?? null,
+      bags: plans.map((p) => ({ lookupId: p.bag.lookupId, height: p.bag.height, base: p.bag.base, deletesBag: p.keep.length === 0, removes: p.remove.map((r) => ({ ...Placements.publicRow(r), build: this.groupOf(r).label })), keeps: p.keep.map((r) => ({ ...Placements.publicRow(r), build: this.groupOf(r).label })) })),
+      pieces: picked.map((r) => r.id),
+      notFound,
+      approvalNeeded: approval,
+      needs,
+    }
+    if (!input.confirm) {
+      return {
+        text: [
+          `Preview of deleting ${what}: nothing was changed. ${picked.length} thing(s) in ${plans.length} bag(s) would go; everything else in those bags stays.`,
+          ...preview,
+          ...(notFound.length ? [`In the build but in none of your bags now (nothing to remove): ${notFound.slice(0, 20).join('; ')}.`] : []),
+          approval ? `Your operator must approve it first (${needs.join('; ')}): call again with confirm: true and the server sends them this preview by DM with a code; once they approve, call again with confirm: true and it runs.` : 'No approval is needed: call again with confirm: true to delete.',
+          'A backup of everything that goes is written to the trash first; restore_build brings shards and messages back. Show this preview to your operator before you confirm.',
+        ].join('\n'),
+        data: { ...data, preview: true },
+      }
+    }
+    if (approval) {
+      const held = await this.host.deleteGate!.check({ pieces: picked.map((r) => r.id), needs, summary: [`Deleting ${what}:`, ...preview].join('\n'), again: 'call delete_build again with confirm: true and the same build or pieces' })
+      if (held) return { ...held, text: `${held.text}\nWhat would go:\n${preview.join('\n')}`, data: { ...data, ...held.data, preview: true } }
+    }
+    this.host.beforeRemove?.(picked.map((r) => r.id))
+    const keys = plans.map((p) => this.keyOf(p.bag))
+    return this.withBags(keys.map((k) => k.lookupId), async () => {
+      for (const k of keys) this.unsentGuard([k.lookupId], null)
+      // Every bag read fresh first: what goes is only what is still there; what another session added stays.
+      const fresh: Array<{ plan: BagPlan; key: ReturnType<Placements['keyOf']>; current: NostrEvent | null; left: BagEntry[]; going: Row[] }> = []
+      for (let i = 0; i < plans.length; i++) {
+        const { current, entries } = await this.ownBag(keys[i].lookupId, hexToBytes(keys[i].keyHex))
+        const here = new Set(entries.map(entryKey))
+        const going = current ? plans[i].remove.filter((r) => here.has(r.key)) : []
+        const goingKeys = new Set(going.map((r) => r.key))
+        fresh.push({ plan: plans[i], key: keys[i], current, left: entries.filter((e) => !goingKeys.has(entryKey(e))), going })
+      }
+      const going = fresh.flatMap((f) => f.going)
+      if (going.length === 0) throw new Refusal(`None of it is in your bags any more (another session removed it?). Nothing was changed; placed shows what is there now.`)
+      // The backup first, fsynced, before anything is signed: a delete never runs without it.
+      const trashId = this.backup({ tool: 'delete_build', asked: input, label: named?.label ?? picked[0].label, ...(named ? { build: named.label } : {}) },
+        fresh.filter((f) => f.going.length).map((f) => ({ bag: f.plan.bag, current: f.current, remove: f.going, keep: f.plan.keep, whole: f.left.length === 0 })))
+      const lines: string[] = []
+      const bagsData: Array<Record<string, unknown>> = []
+      const goneFrom = new Set(going.map((r) => `${r.bag.lookupId}/${r.key}`))
+      const retractable: Row[] = []
+      for (const f of fresh) {
+        if (f.going.length === 0) { lines.push(`h${f.key.height} bag at base ${words(f.key.base)}: nothing of it was there any more; left as it is.`); continue }
+        const k = f.key
+        if (f.left.length > 0) {
+          const settings = bagSettingsOf(f.current!, k.height)
+          const { event, entry } = await this.publishBag(f.left, k, settings, { position: { x: BigInt(k.base.x), y: BigInt(k.base.y), z: BigInt(k.base.z) }, plane: f.going[0].plane }, f.current)
+          await this.noteOpened(event, k, settings)
+          if (entry.accepted.includes(this.canonical)) retractable.push(...f.going)
+          lines.push(`h${k.height} bag at base ${words(k.base)}: rewritten without ${f.going.length} thing(s) (${event.id.slice(0, 8)}...), keeping the other ${f.left.length}: ${relayWords(entry)}.`)
+          bagsData.push({ lookupId: k.lookupId, bagId: event.id, deletedBag: false, removed: f.going.map((r) => r.id), left: f.left.length, accepted: entry.accepted, refused: entry.refused ?? {} })
+        } else {
+          const { event, entry } = await this.deleteBag(k.lookupId, f.current!.id, f.current!.created_at, k)
+          if (entry.accepted.includes(this.canonical)) retractable.push(...f.going)
+          lines.push(`h${k.height} bag at base ${words(k.base)}: nothing else was in it, so it was deleted (NIP-09 kind 5 ${event.id.slice(0, 8)}...): ${relayWords(entry)}.`)
+          bagsData.push({ lookupId: k.lookupId, deletionId: event.id, deletedBag: true, removed: f.going.map((r) => r.id), left: 0, accepted: entry.accepted, refused: entry.refused ?? {} })
+        }
+      }
+      for (const r of retractable) {
+        const n = await this.retractIfUnnamed(r, reading, goneFrom)
+        if (n) lines.push(`  ${r.type} "${r.label}":${n}`)
+      }
+      this.host.builds?.removed(going, trashId)
+      this.host.afterRemove?.(going.map((r) => r.id))
+      const skipped = picked.length - going.length
+      return {
+        text: [
+          `Deleted ${going.length} thing(s) of ${what}${skipped ? ` (${skipped} were no longer there)` : ''}; everything else in those bags stays.`,
+          ...lines,
+          `A backup is in the trash (${trashId}): restore_build with that id places its shards and messages again.`,
+        ].join('\n'),
+        data: { deleted: true, build: named?.label ?? null, trashId, removed: going.map((r) => ({ ...Placements.publicRow(r), build: this.groupOf(r).label })), bags: bagsData, notFound },
+      }
+    })
+  }
+
+  // ---- build_add: things already placed, into a build ------------------------------
+
+  /**
+   * build_add: record things already placed under a build, so a scoped
+   * delete can tell them apart (every piece placed before the ledger is in
+   * no build). By id (or a list of ids), by `match` on the name, or every
+   * thing in one bag. A thing of another build is refused unless `move`.
+   * Local state only: nothing is signed or published.
+   */
+  async buildAdd(input: { build?: string; pieces?: string[]; match?: string; bag?: string; move?: boolean }): Promise<ToolResult> {
+    const builds = this.host.builds
+    if (!builds) throw new Refusal('This server keeps no build ledger.')
+    const label = String(input.build ?? '').trim()
+    if (!label) throw new Refusal('Say which build (build): its label or id; a new label starts one. Nothing was changed.')
+    const selectors = [Array.isArray(input.pieces) && input.pieces.length > 0, input.match !== undefined, input.bag !== undefined].filter(Boolean).length
+    if (selectors !== 1) throw new Refusal('Say which things with exactly one of: pieces (their ids, at least 8 hex each, as placed lists them), match (every thing whose name contains these words) or bag (every thing in one bag, by its lookup id or bag id). Nothing was changed.')
+    const reading = await this.readAll()
+    const rows = Placements.rows(reading)
+    let picked: Row[]
+    if (input.bag !== undefined) {
+      const want = String(input.bag).trim().toLowerCase()
+      if (!/^[0-9a-f]{8,64}$/.test(want)) throw new Refusal('bag is at least 8 hex characters of a lookup id or bag id, as placed lists them.')
+      const hits = reading.bags.filter((b) => b.lookupId.startsWith(want) || b.bagId.startsWith(want))
+      if (hits.length === 0) throw new Refusal(`None of your bags has a lookup id or bag id starting ${want}. placed lists them.`)
+      if (hits.length > 1) throw new Refusal(`${hits.length} of your bags start ${want}; give more of the id.`)
+      if (!hits[0].keyHeld) throw new Refusal('This server holds no key for that bag, so what is in it cannot be read or named. Nothing was changed.')
+      picked = hits[0].rows
+    } else if (input.match !== undefined) {
+      const m = String(input.match).trim().toLowerCase()
+      if (!m) throw new Refusal('match is the words a name contains; it must not be empty. Nothing was changed.')
+      picked = rows.filter((r) => r.label.toLowerCase().includes(m))
+    } else {
+      picked = []
+      for (const raw of input.pieces ?? []) {
+        const id = String(raw).trim().toLowerCase()
+        if (!/^[0-9a-f]{8,64}$/.test(id)) throw new Refusal(`"${id}" is not a piece id: each is at least 8 hex characters, as placed lists them. Nothing was changed.`)
+        const hits = [...new Map(rows.filter((r) => r.id.startsWith(id)).map((r) => [`${r.bag.lookupId}/${r.key}`, r])).values()]
+        if (hits.length === 0) throw new Refusal(`Nothing you placed has an id starting ${id}. placed lists them. Nothing was changed.`)
+        if (hits.length > 1) throw new Refusal(`${hits.length} things have ids starting ${id}; give more of it. Nothing was changed.`)
+        if (!picked.includes(hits[0])) picked.push(hits[0])
+      }
+    }
+    if (picked.length === 0) throw new Refusal(`Nothing you placed${input.match !== undefined ? ` has a name containing "${String(input.match).trim()}"` : ' is in that bag'}. placed lists what you placed. Nothing was changed.`)
+    const pieceOf = (r: Row) => ({
+      lookupId: r.bag.lookupId, height: r.bag.height, id: r.id, lineage: r.lineage, type: r.type, label: r.label, at: r.at, plane: r.plane,
+      ...(r.objectAddress ? { objectAddress: r.objectAddress } : {}), placedAt: r.createdAt,
+    })
+    const res = builds.assign(label, picked.map(pieceOf), input.move === true)
+    const name = (p: { type: string; label: string; id: string }): string => `${p.type} "${p.label}" (id ${p.id.slice(0, 12)})`
+    if (res.conflicts.length && input.move !== true) {
+      throw new Refusal(`${res.conflicts.length} of them already belong to another build: ${res.conflicts.slice(0, 15).map((c) => `${name(c.piece)} in "${c.build}"`).join('; ')}${res.conflicts.length > 15 ? '; ...' : ''}. Nothing was changed. Leave them out (name the pieces by id), or give move: true to move them into this build.`)
+    }
+    const b = res.build
+    const out = [
+      res.added.length || res.moved.length ? `Recorded ${res.added.length + res.moved.length} thing(s) in the build "${b?.label ?? label}"${b ? ` (id ${b.id})` : ''}: ${[...res.added, ...res.moved.map((m) => m.piece)].slice(0, 20).map(name).join('; ')}.` : `Nothing to record: every thing named is already in the build "${b?.label ?? label}".`,
+      ...(res.moved.length ? [`Moved from other builds: ${res.moved.map((m) => `${name(m.piece)} from "${m.from}"`).join('; ')}.`] : []),
+      ...(res.already.length && (res.added.length || res.moved.length) ? [`Already in it: ${res.already.length}.`] : []),
+      'Kept only on this machine; nothing was published. build shows the build checked against what is placed; delete_build takes it out of your bags and keeps everything else.',
+    ]
+    return { text: out.join('\n'), data: { build: b ? { id: b.id, label: b.label } : null, added: res.added, moved: res.moved.map((m) => ({ ...m.piece, from: m.from })), already: res.already.map((p) => p.id) } }
+  }
+
+  // ---- build: one build, checked against what is placed -----------------------------
+
+  /**
+   * One build's pieces as the ledger keeps them, each checked against the
+   * bags as the relays hold them now: there, moved or written again
+   * elsewhere (found by its lineage under another id or place), or missing.
+   * "unlabelled" also lists what is in no build.
+   */
+  async buildReport(given: string): Promise<ToolResult> {
+    const builds = this.host.builds
+    const isUnlabelled = groupKey(given) === UNLABELLED
+    const b = isUnlabelled ? (builds?.find(UNLABELLED) ?? null) : (builds?.get(given) ?? null)
+    if (!b && !isUnlabelled) throw new Refusal(`No build is called "${given}". builds lists them.`)
+    const reading = await this.readAll()
+    const rows = Placements.rows(reading)
+    const out: string[] = []
+    const pieces: Array<Record<string, unknown>> = []
+    const active = b ? b.pieces.filter((p) => !p.removedAt) : []
+    const removed = b ? b.pieces.filter((p) => p.removedAt) : []
+    out.push(`Build "${b?.label ?? UNLABELLED}"${b ? ` (id ${b.id})` : ''}: ${active.length} piece(s) in the ledger${removed.length ? `, ${removed.length} removed` : ''}.${b?.notes ? ` Notes: ${b.notes}` : ''}`)
+    const flagged = { moved: 0, missing: 0 }
+    for (const p of active) {
+      const same = rows.find((r) => r.id === p.id && r.bag.lookupId === p.lookupId)
+      const elsewhere = same ? null : rows.find((r) => r.id === p.id) ?? (p.lineage ? rows.find((r) => r.lineage === p.lineage) : undefined) ?? null
+      const state = same ? 'there' : elsewhere ? 'moved' : 'missing'
+      if (state === 'moved') flagged.moved++
+      if (state === 'missing') flagged.missing++
+      const now = same ?? elsewhere
+      pieces.push({ ...p, state, ...(now ? { now: { id: now.id, at: now.at, height: now.bag.height, lookupId: now.bag.lookupId } } : {}) })
+      out.push(`  ${p.type} "${p.label}" id ${p.id.slice(0, 12)} at ${words(p.at)} (h${p.height})${state === 'there' ? '' : state === 'moved' ? ` MOVED OR CHANGED: now id ${now!.id.slice(0, 12)} at ${words(now!.at)} (h${now!.bag.height})` : ' MISSING: in none of your bags now'}`)
+    }
+    let legacy: Row[] = []
+    if (isUnlabelled) {
+      legacy = rows.filter((r) => this.groupOf(r).key === UNLABELLED && !active.some((p) => p.id === r.id))
+      if (legacy.length) out.push(`In no build (placed before builds were kept): ${legacy.length} thing(s).`)
+      for (const r of legacy) out.push(`  ${r.type} "${r.label}" id ${r.id.slice(0, 12)} at ${words(r.at)} (h${r.bag.height}, bag ${r.bag.lookupId.slice(0, 12)}...)`)
+    }
+    if (flagged.moved || flagged.missing) out.push(`${flagged.moved} moved or changed outside this server, ${flagged.missing} missing: placed shows what is where now.`)
+    if (removed.length) out.push(`Removed: ${removed.slice(-10).map((p) => `"${p.label}"${p.trashId ? ` (trash ${p.trashId})` : ''}`).join(', ')}${removed.length > 10 ? ', ...' : ''}.`)
+    if (reading.silent.length) out.push(`Not answered: ${reading.silent.join('; ')}. A piece only those relays hold shows as missing.`)
+    out.push('delete_build with this build shows what deleting it would take out of each bag, and what would stay.')
+    return {
+      text: out.join('\n'),
+      data: { build: b ? { id: b.id, label: b.label, notes: b.notes, createdAt: b.createdAt, updatedAt: b.updatedAt } : { id: null, label: UNLABELLED }, pieces, removed, legacy: legacy.map(Placements.publicRow), moved: flagged.moved, missing: flagged.missing, unanswered: reading.silent },
+    }
   }
 
   // ---- move_placed ---------------------------------------------------------------
@@ -949,6 +1356,8 @@ export class Placements {
     if (!isReference(row.entry) && !isReference(moved)) this.host.keys.movedItem((row.entry as NostrEvent).id, (moved as NostrEvent).id, place)
     const newId = isReference(moved) ? (object ? object.id : (row.byReference === 'sealed' ? row.id : objectHandle(`${newKey.lookupId}/${entryKey(moved)}`))) : (moved as NostrEvent).id
     const lineage = isReference(moved) ? moved[1] : itemLineage(moved as NostrEvent)
+    // The ledger follows it: the new id replaces the old, its lineage kept (builds.ts).
+    this.host.builds?.moved({ id: row.id, lineage: row.lineage }, { id: newId, lineage: typeof lineage === 'string' ? lineage : null, lookupId: newKey.lookupId, height, at: { x: place.x, y: place.y, z: place.z }, plane: dest.plane })
     const delta = (['x', 'y', 'z'] as const).map((a) => [a, dest.position[a] - from.position[a]] as const).filter(([, d]) => d !== 0n).map(([a, d]) => `${d > 0n ? '+' : ''}${d} ${a}`)
     const text = [
       `Moved ${row.type} "${row.label}" from ${words(row.at)} to ${words(place)}${delta.length ? ` (${delta.join(', ')} gibsons)` : ''}${height !== oldKey.height ? `, from the h${oldKey.height} cube to h${height}` : ''}. Its new id is ${newId.slice(0, 12)}; ${isReference(moved) ? 'its object keeps its address' : `it keeps its lineage ${String(lineage).slice(0, 12)}`}, so its reactions follow it.`,
@@ -1148,6 +1557,8 @@ export class Placements {
       }
     })
 
+    // The ledger follows each shard written again to its new id (builds.ts).
+    this.host.builds?.replaced(changed.map((c) => ({ from: { id: c.row.id, lineage: c.row.lineage }, id: c.id })))
     const setting = (r: Row): string => {
       const w = wantOf(r)
       return walkWords({ mode: r.hidden!.shard!.mode, opacity: w.opacity, extra: { constrain: w.constrain } }) + (input.opacity !== undefined ? `, opacity ${w.opacity ?? 100}` : w.opacity === 0 ? ', still invisible (opacity 0)' : '')
