@@ -202,7 +202,7 @@ export function requestWords(r, day) {
 // ---- deletes -----------------------------------------------------------------
 //
 // The operator approves a large delete first (arkinox, 2026-11-26, after
-// "delete the aerocarnival course" took a 31-piece castle that shared a bag
+// "delete the obstacle run" took a 31-piece castle that shared a bag
 // with it: "a delete preview with operator approval"). The same strict
 // reading as a payment: the server, never a model, DMs the operator what
 // would go and what stays, with a DEL- code; only the operator's own DM

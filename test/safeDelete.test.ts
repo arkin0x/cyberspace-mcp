@@ -1,6 +1,6 @@
 // safeDelete.test.ts: builds, notes, the trash, scoped deletes, the delete
 // preview with the operator's approval, and restore (arkinox, 2026-11-26,
-// after "delete the aerocarnival course" took a 31-piece castle that shared
+// after "delete the obstacle run" took a 31-piece castle that shared
 // an h9 bag with it, with no backup and no warning). Over the MCP client,
 // against fake relays only, with throwaway keys: delete_build of one build
 // rewrites a shared bag and keeps the other build's pieces; the trash holds
@@ -145,9 +145,9 @@ describe('builds, the trash, scoped deletes and restore (no operator)', () => {
 
   /** Two builds in one h8 bag: the course (two shards, a message, a key) and the castle (three shards). */
   async function mixedBag(): Promise<void> {
-    for (const [i, n] of ['ramp', 'loop'].entries()) expect((await call('place', { object: shard(n), ...at(i), height: 8, build: 'Aerocarnival Course' })).isError).toBe(false)
-    expect((await call('hide', { contents: { message: 'start line here' }, ...at(2), height: 8, build: 'aerocarnival course' })).isError).toBe(false)
-    expect((await call('forge_item', { name: 'Course Key', ...at(3), height: 8, build: 'aerocarnival course' })).isError).toBe(false)
+    for (const [i, n] of ['ramp', 'loop'].entries()) expect((await call('place', { object: shard(n), ...at(i), height: 8, build: 'Obstacle Run' })).isError).toBe(false)
+    expect((await call('hide', { contents: { message: 'start line here' }, ...at(2), height: 8, build: 'obstacle run' })).isError).toBe(false)
+    expect((await call('forge_item', { name: 'Course Key', ...at(3), height: 8, build: 'obstacle run' })).isError).toBe(false)
     expect((await call('build_use', { build: 'castle' })).data.created).toBe(true)
     for (const [i, n] of ['keep', 'tower', 'gate'].entries()) expect((await call('place', { object: shard(n), ...at(10 + i), height: 8 })).isError).toBe(false)
   }
@@ -158,10 +158,10 @@ describe('builds, the trash, scoped deletes and restore (no operator)', () => {
     await call('place', { object: shard('stray'), ...at(20), height: 8 })
     const list = await call('builds')
     const builds = list.data.builds as Array<{ label: string; pieces: number }>
-    expect(builds.map((b) => [b.label, b.pieces])).toEqual([['Aerocarnival Course', 4], ['castle', 3], ['unlabelled', 1]])
+    expect(builds.map((b) => [b.label, b.pieces])).toEqual([['Obstacle Run', 4], ['castle', 3], ['unlabelled', 1]])
     expect(list.data.current).toBeNull()
     // The label is local state only: nothing published names it.
-    for (const e of canonical.published) expect(JSON.stringify(e)).not.toMatch(/aerocarnival|castle/i)
+    for (const e of canonical.published) expect(JSON.stringify(e)).not.toMatch(/obstacle run|castle/i)
     const one = await call('build', { build: 'castle' })
     expect(one.isError).toBe(false)
     expect((one.data.pieces as Array<{ state: string; label: string }>).map((p) => [p.label, p.state])).toEqual([['keep', 'there'], ['tower', 'there'], ['gate', 'there']])
@@ -172,7 +172,7 @@ describe('builds, the trash, scoped deletes and restore (no operator)', () => {
     expect(await bagNames(canonical, a.pubkey)).toEqual(['gate', 'keep', 'key:Course Key', 'loop', 'ramp', 'start line here', 'tower'])
     const before = canonical.published.length
     // The preview changes nothing.
-    const preview = await call('delete_build', { build: 'aerocarnival course' })
+    const preview = await call('delete_build', { build: 'obstacle run' })
     expect(preview.isError).toBe(false)
     expect(preview.data.preview).toBe(true)
     expect(preview.text).toContain('nothing was changed')
@@ -185,7 +185,7 @@ describe('builds, the trash, scoped deletes and restore (no operator)', () => {
     expect(preview.data.approvalNeeded).toBe(false)
     expect(canonical.published.length).toBe(before)
 
-    const done = await call('delete_build', { build: 'aerocarnival course', confirm: true })
+    const done = await call('delete_build', { build: 'obstacle run', confirm: true })
     expect(done.isError, done.text).toBe(false)
     expect(done.data.deleted).toBe(true)
     expect(await bagNames(canonical, a.pubkey)).toEqual(['gate', 'keep', 'tower'])
@@ -204,14 +204,14 @@ describe('builds, the trash, scoped deletes and restore (no operator)', () => {
     expect(pieces.find((p) => p.label === 'ramp')!.payload).toMatchObject({ name: 'ramp', colors: [1, 2, 3, 4] })
     expect(pieces.find((p) => p.type === 'message')!.text).toBe('start line here')
     expect(pieces.find((p) => p.type === 'key')!.key).toMatchObject({ name: 'Course Key' })
-    expect(pieces.every((p) => p.build === 'Aerocarnival Course' && p.height === 8)).toBe(true)
+    expect(pieces.every((p) => p.build === 'Obstacle Run' && p.height === 8)).toBe(true)
     const signedBags = JSON.parse(readFileSync(join(entry, 'bags.json'), 'utf8')) as NostrEvent[]
     expect(signedBags).toHaveLength(1)
     expect(signedBags[0]).toMatchObject({ kind: HIDDEN_KIND, pubkey: a.pubkey })
     expect(signedBags[0].sig).toMatch(/^[0-9a-f]{128}$/)
     expect((await openEntries(signedBags[0], H8.key))!.length).toBe(7)
     const meta = JSON.parse(readFileSync(join(entry, 'meta.json'), 'utf8')) as { tool: string; build: string; bags: Array<{ removed: string[]; kept: Array<{ label: string }> }> }
-    expect(meta).toMatchObject({ tool: 'delete_build', build: 'Aerocarnival Course' })
+    expect(meta).toMatchObject({ tool: 'delete_build', build: 'Obstacle Run' })
     expect(meta.bags[0].removed).toHaveLength(4)
     expect(meta.bags[0].kept.map((k) => k.label)).toEqual(['keep', 'tower', 'gate'])
     const secrets = secretsIn(dir)
@@ -219,10 +219,10 @@ describe('builds, the trash, scoped deletes and restore (no operator)', () => {
     for (const f of trashFiles(dir)) for (const sec of secrets) expect(f.text.includes(sec), `${f.path} holds a secret`).toBe(false)
 
     // The ledger: the course's pieces removed, pointing at the trash; the castle untouched.
-    const course = a.builds.find('aerocarnival course')!
+    const course = a.builds.find('obstacle run')!
     expect(course.pieces.every((p) => p.removedAt && p.trashId === trashId)).toBe(true)
     expect(a.builds.find('castle')!.pieces.every((p) => !p.removedAt)).toBe(true)
-    expect((await call('trash')).data.entries).toEqual([expect.objectContaining({ id: trashId, tool: 'delete_build', build: 'Aerocarnival Course' })])
+    expect((await call('trash')).data.entries).toEqual([expect.objectContaining({ id: trashId, tool: 'delete_build', build: 'Obstacle Run' })])
   })
 
   it('remove_placed of a whole bag that holds two builds is refused, and nothing is published', async () => {
@@ -230,7 +230,7 @@ describe('builds, the trash, scoped deletes and restore (no operator)', () => {
     const before = canonical.published.length
     const r = await call('remove_placed', { target: 'keep', whole_bag: true })
     expect(r.isError).toBe(true)
-    expect(r.text).toMatch(/holds things of 2 builds: "Aerocarnival Course" \(4 thing\(s\)\), "castle" \(3 thing\(s\)\)/)
+    expect(r.text).toMatch(/holds things of 2 builds: "Obstacle Run" \(4 thing\(s\)\), "castle" \(3 thing\(s\)\)/)
     expect(r.text).toContain('delete_build')
     const byBag = await call('remove_placed', { bag: H8.lookupId.slice(0, 12) })
     expect(byBag.isError).toBe(true)
@@ -287,25 +287,25 @@ describe('builds, the trash, scoped deletes and restore (no operator)', () => {
     await forgetLedger()
     const rows = rowsOf(await call('placed'))
     const id = (label: string): string => rows.find((r) => r.label === label)!.id
-    expect((await call('build_add', { build: 'aerocarnival course', pieces: [id('ramp'), id('loop')] })).isError).toBe(false)
+    expect((await call('build_add', { build: 'obstacle run', pieces: [id('ramp'), id('loop')] })).isError).toBe(false)
     // The whole bag now holds the course and pieces in no build: refused before castle is even named.
-    expect((await call('remove_placed', { target: 'keep', whole_bag: true })).text).toMatch(/holds things of 2 builds: "aerocarnival course" \(2 thing\(s\)\), "unlabelled" \(3 thing\(s\)\)/)
+    expect((await call('remove_placed', { target: 'keep', whole_bag: true })).text).toMatch(/holds things of 2 builds: "obstacle run" \(2 thing\(s\)\), "unlabelled" \(3 thing\(s\)\)/)
     const refused = await call('build_add', { build: 'castle', bag: H8.lookupId.slice(0, 12) })
     expect(refused.isError).toBe(true)
-    expect(refused.text).toMatch(/2 of them already belong to another build: .*"ramp".*in "aerocarnival course"/)
+    expect(refused.text).toMatch(/2 of them already belong to another build: .*"ramp".*in "obstacle run"/)
     expect(a.builds.find('castle')).toBeNull()
     expect((await call('build_add', { build: 'castle', match: 'e' })).isError).toBe(false) // keep, tower, gate
     const moved = await call('build_add', { build: 'castle', pieces: [id('loop')], move: true })
     expect(moved.isError, moved.text).toBe(false)
-    expect(moved.data.moved).toEqual([expect.objectContaining({ label: 'loop', from: 'aerocarnival course' })])
-    expect(a.builds.find('aerocarnival course')!.pieces.map((p) => p.label)).toEqual(['ramp'])
+    expect(moved.data.moved).toEqual([expect.objectContaining({ label: 'loop', from: 'obstacle run' })])
+    expect(a.builds.find('obstacle run')!.pieces.map((p) => p.label)).toEqual(['ramp'])
     const before = canonical.published.length
     const whole = await call('remove_placed', { target: 'keep', whole_bag: true })
     expect(whole.isError).toBe(true)
-    expect(whole.text).toMatch(/holds things of 2 builds: "aerocarnival course" \(1 thing\(s\)\), "castle" \(4 thing\(s\)\)/)
+    expect(whole.text).toMatch(/holds things of 2 builds: "obstacle run" \(1 thing\(s\)\), "castle" \(4 thing\(s\)\)/)
     expect(canonical.published.length).toBe(before)
     // And the scoped delete takes only the course out.
-    expect((await call('delete_build', { build: 'aerocarnival course', confirm: true })).data.deleted).toBe(true)
+    expect((await call('delete_build', { build: 'obstacle run', confirm: true })).data.deleted).toBe(true)
     expect(await bagNames(canonical, a.pubkey)).toEqual(['gate', 'keep', 'loop', 'tower'])
   })
 
@@ -337,11 +337,11 @@ describe('builds, the trash, scoped deletes and restore (no operator)', () => {
   it('restore_build puts the original entries back verbatim (same ids), a key and its chest and a coin included, merged into the bag', async () => {
     await mixedBag()
     const TOKEN = 'cashuAeyJ0b2tlbiI6W3sibWludCI6Imh0dHBzOi8vbWludC5leGFtcGxlIn1dfQ'
-    await call('hide', { contents: { message: `${TOKEN} for the winner` }, ...at(5), height: 8, build: 'aerocarnival course' })
-    expect((await call('seal_chest', { name: 'Prize', lock: 'Course Key', contents: [{ message: 'you win' }], ...at(4), height: 8, build: 'aerocarnival course' })).isError).toBe(false)
+    await call('hide', { contents: { message: `${TOKEN} for the winner` }, ...at(5), height: 8, build: 'obstacle run' })
+    expect((await call('seal_chest', { name: 'Prize', lock: 'Course Key', contents: [{ message: 'you win' }], ...at(4), height: 8, build: 'obstacle run' })).isError).toBe(false)
     const before = await entriesNow(canonical, a.pubkey)
     expect(before.size).toBe(9)
-    const done = await call('delete_build', { build: 'aerocarnival course', confirm: true })
+    const done = await call('delete_build', { build: 'obstacle run', confirm: true })
     expect(done.data.deleted, done.text).toBe(true)
     expect(done.text).toContain('restore_build can put back')
     expect((await entriesNow(canonical, a.pubkey)).size).toBe(3)
@@ -361,7 +361,7 @@ describe('builds, the trash, scoped deletes and restore (no operator)', () => {
     expect(after.size).toBe(9)
     for (const [id, json] of before) expect(after.get(id), id).toBe(json)
     expect(await bagNames(canonical, a.pubkey)).toContain('key:Course Key')
-    const course = a.builds.find('aerocarnival course')!
+    const course = a.builds.find('obstacle run')!
     const labels = course.pieces.filter((p) => !p.removedAt).map((p) => p.label)
     expect(labels.filter((l) => !l.startsWith('[a Cashu token, not kept]')).sort()).toEqual(['Course Key', 'Prize', 'loop', 'ramp', 'start line here'])
     expect(labels).toHaveLength(6)

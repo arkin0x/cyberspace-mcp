@@ -1,9 +1,9 @@
 // builds.ts: which build each thing the agent placed belongs to, in local
-// state only (arkinox, 2026-11-26, after "delete the aerocarnival course"
+// state only (arkinox, 2026-11-26, after "delete the obstacle run"
 // took a 31-piece castle that shared an h9 bag with it: "build labels,
 // memory notes, backup-before-delete, scoped deletes").
 //
-// A build is a label a human would say ("aerocarnival course"), the agent's
+// A build is a label a human would say ("obstacle run"), the agent's
 // notes on it, and its pieces: each thing placed under it, where, and its
 // ids. place and hide record a piece under the build they are given, else
 // under the current build (build_use), else under "unlabelled"; move_placed

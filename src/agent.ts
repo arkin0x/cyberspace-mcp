@@ -2577,7 +2577,7 @@ export class Agent {
 
   // ---- builds, notes, the trash ------------------------------------------------
   //
-  // arkinox, 2026-11-26, after "delete the aerocarnival course" took a
+  // arkinox, 2026-11-26, after "delete the obstacle run" took a
   // 31-piece castle that shared an h9 bag with it: build labels, memory
   // notes, backup-before-delete, scoped deletes, a delete preview with
   // operator approval, and restore. All of it local state; nothing of a
@@ -2592,7 +2592,7 @@ export class Agent {
       const cubes = [...new Map(active.map((p) => [p.lookupId, p])).values()]
       return { b, active, removed: b.pieces.length - active.length, cubes }
     })
-    const out: string[] = [all.length ? `Your builds: ${all.length}.${current ? ` Current build (where placements go when you name none): "${current.label}".` : ' No current build: placements with no build go to "unlabelled".'}` : 'You have no builds yet. place, hide, forge_item, seal_chest and seal_door take build: a label for what you are building ("aerocarnival course"); build_use sets one for every placement after.']
+    const out: string[] = [all.length ? `Your builds: ${all.length}.${current ? ` Current build (where placements go when you name none): "${current.label}".` : ' No current build: placements with no build go to "unlabelled".'}` : 'You have no builds yet. place, hide, forge_item, seal_chest and seal_door take build: a label for what you are building ("obstacle run"); build_use sets one for every placement after.']
     for (const r of rows) {
       const where = r.cubes.slice(0, 6).map((p) => `h${p.height} near x ${p.at.x} y ${p.at.y} z ${p.at.z} (bag ${p.lookupId.slice(0, 8)}...)`).join('; ')
       out.push(`  "${r.b.label}" (id ${r.b.id}${current?.id === r.b.id ? ', current' : ''}): ${r.active.length} piece(s) in ${r.cubes.length} bag(s)${r.removed ? `, ${r.removed} removed` : ''}${where ? `: ${where}${r.cubes.length > 6 ? '; ...' : ''}` : ''}${r.b.notes ? `. Notes: ${r.b.notes.split('\n')[0].slice(0, 120)}` : ''}`)
