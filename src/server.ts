@@ -242,7 +242,7 @@ const contents = z.union([
 ])
 
 /** The build a placement belongs to, said once for every tool that places (arkinox, 2026-11-26). */
-const buildArg = z.string().max(80).optional().describe('The build this is part of, in a few words ("aerocarnival course", "castle"): a new label starts a build. Left out: your current build (build_use), else "unlabelled". Kept only on this machine, never published. delete_build takes a whole build out later without touching anything else in the same bags.')
+const buildArg = z.string().max(80).optional().describe('The build this is part of, in a few words ("obstacle run", "castle"): a new label starts a build. Left out: your current build (build_use), else "unlabelled". Kept only on this machine, never published. delete_build takes a whole build out later without touching anything else in the same bags.')
 
 const hintHeights = z.tuple([z.number().int().min(0).max(85), z.number().int().min(0).max(85), z.number().int().min(0).max(85)])
 
@@ -662,7 +662,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   server.registerTool('builds', {
     title: 'Your builds',
-    description: 'List your builds: each label (what you are building, "aerocarnival course"), its id, how many pieces are placed and in which cubes, how many were removed, and its notes; and your current build (where placements go when they name none). From this machine\'s own record, no relay asked. Builds are kept only on this machine and never published. Read it (and notes) before you build or delete.',
+    description: 'List your builds: each label (what you are building, "obstacle run"), its id, how many pieces are placed and in which cubes, how many were removed, and its notes; and your current build (where placements go when they name none). From this machine\'s own record, no relay asked. Builds are kept only on this machine and never published. Read it (and notes) before you build or delete.',
     annotations: { readOnlyHint: true },
   }, async () => call(() => agent.buildsList()))
 
@@ -723,7 +723,7 @@ export function createServer(agent: Agent, log: (line: string) => void = () => {
 
   server.registerTool('delete_build', {
     title: 'Delete a build',
-    description: 'Take one build out of your bags, or the pieces you name by id, and keep everything else that shares those bags (another build\'s pieces are never deleted with it). Without confirm it changes nothing and returns a preview: for each bag, exactly what would go and what would stay (names, ids, builds), and whether your operator must approve. Show the preview to your operator, then call again with confirm: true. When approval is needed (more than 5 pieces by default, counting what you deleted in the last hour without approval), the first confirmed call is held and the server sends your operator the preview by DM with a code; their answer reaches your inbox: when they approve, call inbox, then again with confirm: true, and it runs. "unlabelled" is refused: name its builds with build_add first, or give the pieces by id. The preview says what restore_build could bring back. Before anything is deleted, a backup of every piece that goes is written to your trash; a bag that still holds other things is rewritten without the pieces (read fresh from the relays), and only a bag with nothing else left is deleted. Example: "delete the aerocarnival course": builds (or build) to find it, delete_build with build "aerocarnival course", show the preview, then confirm.',
+    description: 'Take one build out of your bags, or the pieces you name by id, and keep everything else that shares those bags (another build\'s pieces are never deleted with it). Without confirm it changes nothing and returns a preview: for each bag, exactly what would go and what would stay (names, ids, builds), and whether your operator must approve. Show the preview to your operator, then call again with confirm: true. When approval is needed (more than 5 pieces by default, counting what you deleted in the last hour without approval), the first confirmed call is held and the server sends your operator the preview by DM with a code; their answer reaches your inbox: when they approve, call inbox, then again with confirm: true, and it runs. "unlabelled" is refused: name its builds with build_add first, or give the pieces by id. The preview says what restore_build could bring back. Before anything is deleted, a backup of every piece that goes is written to your trash; a bag that still holds other things is rewritten without the pieces (read fresh from the relays), and only a bag with nothing else left is deleted. Example: "delete the obstacle run": builds (or build) to find it, delete_build with build "obstacle run", show the preview, then confirm.',
     inputSchema: {
       build: z.string().optional().describe('The build\'s label or id, as builds lists it; "unlabelled" is everything in no build.'),
       pieces: z.array(z.string()).min(1).max(500).optional().describe('Instead of build: the ids of the pieces to go (at least 8 hex each, as placed or build lists them).'),
