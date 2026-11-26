@@ -164,7 +164,7 @@ describe('the follow watch', () => {
     expect(moved.to).toBe(east(home, 40n).hex)
     expect(moved.plane).toBe(home.plane)
     expect(moved.at).toBe(h2.created_at)
-    expect(moved.distance).toContain('35 east')
+    expect(moved.distance).toContain('35 gibsons east')
     expect(ow.text).toContain('Your operator moved')
     // Still unseen on the next poll: only follow_operator marks it.
     expect(((await a.ordersWaiting()).data.operatorMoved as { eventId: string }).eventId).toBe(h2.id)
@@ -316,7 +316,7 @@ describe('nobody\'s gibson', () => {
       expect(r.text).toContain('A ride exits exactly at its stop')
       expect(r.text).toContain('the rule that your avatar never overlaps a person\'s yields here')
       expect(r.text).toContain('Your operator stands on this exact gibson, so your avatars overlap')
-      expect(r.text).toContain('Step off by 2 gibsons now')
+      expect(r.text).toContain('Step off by 2 gibsons (233 pm) now')
       const fixed = r.data.fixedPoint as { sharedWith: string[]; stepOff: string }
       expect(fixed.sharedWith).toEqual([op])
       expect(fixed.stepOff).not.toBe(stop)

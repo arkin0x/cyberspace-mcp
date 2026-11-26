@@ -12,6 +12,7 @@ import type { ChatLine } from './chat.js'
 import type { Person } from './presence.js'
 import type { BudgetState } from './budget.js'
 import { describePlace, distanceBetween, distanceWords, placeOf, sameCube, type Place } from './space/coords.js'
+import { distanceData } from './space/units.js'
 import { bagInPlane, planeName, type HeldKey, type OpenedBag } from './space/regionKeys.js'
 import { sectorsApart } from './presence.js'
 import { objectHandle } from './render.js'
@@ -55,6 +56,11 @@ function ago(seconds: number | null): string {
   return `${Math.round(seconds / 86400)} d ago`
 }
 
+/** How far a thing is, as a look line says it: "200 nm (1718 gibsons east; within the h11 cube) from you". */
+function fromYou(d: ReturnType<typeof distanceBetween>): string {
+  return d.chebyshev === 0n ? (d.samePlane ? 'where you stand' : 'where you stand, in the other plane') : `${distanceWords(d)} from you`
+}
+
 export function lookReport(input: LookInput, now: number): LookReport {
   const here = input.place
   const where = describePlace(here)
@@ -80,7 +86,7 @@ export function lookReport(input: LookInput, now: number): LookReport {
         const at = placeOf({ x: BigInt(e.at.x), y: BigInt(e.at.y), z: BigInt(e.at.z) }, e.plane as Plane)
         const d = distanceBetween(here, at)
         const what = e.type === 'message' ? (e.coin ? 'coins (a Cashu token in a message)' : 'message') : e.type === 'shard' ? `object${e.shard ? ` (id ${objectHandle(e.eventId).slice(0, 12)}, ${e.shard.vertices} vertices, ${e.shard.faces} faces, unit 2^${e.shard.unit}, extent ${e.shard.extent}, ${e.shard.mode})` : ''}` : e.type
-        lines.push(`    ${what}${e.byReference ? ' [by reference]' : ''} by ${e.author.slice(0, 8)}...: "${e.label}" at ${distanceWords(d)}`)
+        lines.push(`    ${what}${e.byReference ? ' [by reference]' : ''} by ${e.author.slice(0, 8)}...: "${e.label}", ${fromYou(d)}`)
       }
     }
   }
@@ -91,7 +97,7 @@ export function lookReport(input: LookInput, now: number): LookReport {
     lines.push(`WHO IS HERE (${input.people.length} in the 27 sectors around you):`)
     for (const p of input.people) {
       const d = distanceBetween(here, p.place)
-      const cube = sameCube(here, p.place, input.scanHeight) ? 'same h12 cube (chat reaches them)' : `${sectorsApart(p.place.position, here.position)} sector${sectorsApart(p.place.position, here.position) === 1n ? '' : 's'} away, ${distanceWords(d)}`
+      const cube = sameCube(here, p.place, input.scanHeight) ? `same h12 cube (chat reaches them), ${fromYou(d)}` : `${sectorsApart(p.place.position, here.position)} sector${sectorsApart(p.place.position, here.position) === 1n ? '' : 's'} away, ${fromYou(d)}`
       const who = p.profile?.name ? `"${p.profile.name}" ` : ''
       const bot = p.profile?.bot === true ? 'bot' : p.profile?.bot === false ? 'says not a bot' : 'bot flag unknown'
       lines.push(`  ${who}${p.pubkey.slice(0, 12)}... (${bot}): ${cube}; last ${p.type} ${ago(now - p.lastActive)}${p.frozen ? '; chain frozen, standing at its last valid position' : p.verdictAt ? '; chain valid' : '; chain not yet checked'}`)
@@ -116,11 +122,17 @@ export function lookReport(input: LookInput, now: number): LookReport {
     where,
     chain: input.chain,
     keys: input.keys.map((k) => ({ lookupId: k.lookupId, height: k.height, base: k.base, source: k.source })),
-    bags: input.bags.map((b) => { const { entries, elsewhere, unread } = bagInPlane(b, here.plane); return { ...b, entries, elsewhere, ...(unread ? { unread } : {}), untrusted: ['riddle', 'entries[].label'] } }),
+    bags: input.bags.map((b) => {
+      const { entries, elsewhere, unread } = bagInPlane(b, here.plane)
+      // Each entry's distance from you on the widest axis, in gibsons and as ONOSENDAI's Nearby shows it.
+      const placed = entries.map((e) => ({ ...e, distance: distanceData(distanceBetween(here, placeOf({ x: BigInt(e.at.x), y: BigInt(e.at.y), z: BigInt(e.at.z) }, e.plane as Plane)).chebyshev) }))
+      return { ...b, entries: placed, elsewhere, ...(unread ? { unread } : {}), untrusted: ['riddle', 'entries[].label'] }
+    }),
     people: input.people.map((p) => ({
       pubkey: p.pubkey, place: describePlace(p.place), lastActive: p.lastActive, action: p.type, frozen: p.frozen ?? null,
       chainChecked: p.verdictAt === p.actionId, name: p.profile?.name ?? null, bot: p.profile?.bot ?? null,
       sectorsAway: Number(sectorsApart(p.place.position, here.position)), sameChatCube: sameCube(here, p.place, input.scanHeight),
+      distance: distanceData(distanceBetween(here, p.place).chebyshev),
     })),
     heard: recent.map((l) => ({ id: l.id, from: l.from, at: l.at, text: l.text, mine: l.mine, addressed: l.addressed, untrusted: true })),
     budget: input.budget,

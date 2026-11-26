@@ -19,6 +19,7 @@ import {
   type Plane,
 } from 'cyberspace-core'
 import { HEX_64 } from '../nostr/event.js'
+import { convertLength, formatDistance } from './units.js'
 
 export interface Position {
   x: bigint
@@ -108,8 +109,9 @@ function toBig(v: string | number | bigint, name: string): bigint {
 /**
  * A coordinate from any of the three input forms: a 64-hex coordinate; an
  * object with x, y, z (decimal strings) and a plane (0 or 1); or an offset
- * dx, dy, dz from `from`, which is where the agent stands. Throws with a
- * sentence that says what was wrong.
+ * dx, dy, dz from `from`, which is where the agent stands, each whole
+ * gibsons or a length with a unit ("200 nm"). Throws with a sentence that
+ * says what was wrong.
  */
 export function parseCoordinate(input: CoordinateInput, from?: Place): Place {
   if (typeof input === 'string') return placeFromHex(input)
@@ -127,9 +129,12 @@ export function parseCoordinate(input: CoordinateInput, from?: Place): Place {
   }
   if ('dx' in o || 'dy' in o || 'dz' in o) {
     if (!from) throw new Error('an offset needs a place to start from, and the agent has no position yet')
+    // An offset is whole gibsons, or a length with a unit ("200 nm", "1.5 µm", "3 m"), converted exactly (units.ts).
     const offset = (v: unknown, name: string): bigint => {
       if (v === undefined) return 0n
-      if (typeof v !== 'string' && typeof v !== 'number' && typeof v !== 'bigint') throw new Error(`${name} must be an integer, as a decimal string`)
+      if (typeof v === 'string') return convertLength(v, name)?.gibsons ?? toBig(v, name)
+      if (typeof v === 'number' && !Number.isInteger(v)) throw new Error(`${name} must be whole gibsons; for a fraction give a length with a unit as a string ("200 nm", "1.5 µm", "3 m"); got ${v}`)
+      if (typeof v !== 'number' && typeof v !== 'bigint') throw new Error(`${name} must be whole gibsons or a length with a unit, as a string`)
       return toBig(v, name)
     }
     const dx = offset(o.dx, 'dx')
@@ -185,19 +190,20 @@ export function sameCube(a: Place, b: Place, h: number): boolean {
   return a.plane === b.plane && a.position.x >> s === b.position.x >> s && a.position.y >> s === b.position.y >> s && a.position.z >> s === b.position.z >> s
 }
 
-/** A distance in words: "same h12 cube", "3 sectors east", "about 2^40 gibsons". */
+/** A distance in words: "200 nm (1718 gibsons east, 3 up; within the h11 cube)". */
 export function distanceWords(d: Distance): string {
   if (d.chebyshev === 0n) return d.samePlane ? 'the same point' : 'the same point in the other plane'
   const dirs: string[] = []
   const axis = (v: bigint, pos: string, neg: string): void => {
     if (v === 0n) return
     const n = v < 0n ? -v : v
-    dirs.push(`${n.toString()} ${v > 0n ? pos : neg}`)
+    dirs.push(`${n.toString()}${dirs.length ? '' : ` gibson${n === 1n ? '' : 's'}`} ${v > 0n ? pos : neg}`)
   }
   axis(d.dx, 'east', 'west')
   axis(d.dy, 'up', 'down')
   axis(d.dz, 'forward', 'back')
   const h = d.maxLca
   const where = h <= 12 ? `within the h${h} cube` : h <= 30 ? `${h <= 30 ? 'the same sector' : ''}, h${h} apart` : `h${h} apart, across sectors`
-  return `${dirs.join(', ')} (${where}${d.samePlane ? '' : ', other plane'})`
+  // First the distance as ONOSENDAI shows it (the widest axis, sno-core formatDistance), then the gibsons per axis.
+  return `${formatDistance(d.chebyshev)} (${dirs.join(', ')}; ${where}${d.samePlane ? '' : ', other plane'})`
 }

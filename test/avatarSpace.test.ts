@@ -286,7 +286,7 @@ describe('the agent near people, by their avatars', () => {
       const r = await a.ride({ to: 900000 })
       expect(r.text).toContain('the rule that your avatar never overlaps a person\'s yields here')
       expect(r.text).toContain('The human star')
-      const fixed = r.data.fixedPoint as { sharedWith: string[]; stepOff: string; stepOffGibsons: string; stepOffSeconds: number }
+      const fixed = r.data.fixedPoint as { sharedWith: string[]; stepOff: string; stepOffGibsons: string; stepOffDistance: string; stepOffSeconds: number }
       expect(fixed.sharedWith).toEqual([big.pubkey])
       // Just outside the box: four gibsons from the star on one axis. On x
       // that is three or five from the stop; on y or z, four. nearestClear
@@ -302,7 +302,7 @@ describe('the agent near people, by their avatars', () => {
       expect(candidates.map((c) => c.hex)).toContain(off.hex)
       const lowest = Math.min(...candidates.map((c) => distanceBetween(stopAt, c).maxLca))
       expect(distanceBetween(stopAt, off).maxLca).toBe(lowest)
-      expect(r.text).toContain(`Step off by ${fixed.stepOffGibsons} gibsons now, to ${fixed.stepOff} (one hop`)
+      expect(r.text).toContain(`Step off by ${fixed.stepOffGibsons} gibsons (${fixed.stepOffDistance}) now, to ${fixed.stepOff} (one hop`)
       expect(typeof fixed.stepOffSeconds).toBe('number')
     } finally {
       spy.mockRestore()

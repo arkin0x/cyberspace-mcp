@@ -69,6 +69,7 @@ import { chosenConstrainOf, walkWords, withAuthoredConstrain } from './walkConst
 import { DEFAULT_PUBLISH_PER_DAY, MAX_ALT_LENGTH, MAX_NAME_LENGTH, dProblem, newObjectId, objectPointers, publicObjectTemplate } from './publicObject.js'
 import { hopCeiling, loadOrMeasure, projectCantorMs, type Calibration } from './space/calibration.js'
 import { describePlace, distanceBetween, distanceWords, parseCoordinate, placeFromHex, placeOf, spawnPlace, type CoordinateInput, type Place, type Position } from './space/coords.js'
+import { distanceData, distanceText, formatDistance } from './space/units.js'
 import { MAX_AVATAR_REACH, apartOnBestAxis, nearestClear, overlapping, spacingFor, type Body } from './space/personalSpace.js'
 import { AvatarSizes } from './avatarSizes.js'
 import { planSummary, priceNextStep, type Ceilings, type PricedStep } from './space/plan.js'
@@ -1191,7 +1192,7 @@ export class Agent {
     if (!who) return null
     const free = nearestClear(landing, from, occ, mine)
     const apart = apartOnBestAxis(landing, who)
-    const where = apart === 0n ? `stands on ${landing.hex}` : `stands at ${who.place.hex}, ${apart.toString()} gibson${apart === 1n ? '' : 's'} from ${landing.hex}`
+    const where = apart === 0n ? `stands on ${landing.hex}` : `stands at ${who.place.hex}, ${distanceText(apart)} from ${landing.hex}`
     return `${who.words} ${where}, and your avatar never overlaps a person's: it is uncomfortable for them. ${this.spaceWords(who, mine)}. ${free ? (free.hex === from.hex ? 'You already stand clear of them, just outside: stay.' : `Land just outside instead, at ${free.hex} (clear of every avatar nearby): call plan_hop or hop with that target.`) : 'No coordinate near it is clear; wait for them to move.'}`
   }
 
@@ -1208,7 +1209,7 @@ export class Agent {
    * clear coordinate beside the stop (nearestClear: the lowest wall first,
    * then the fewest gibsons), with that step's price.
    */
-  fixedPointNote(at: Place, why: string): { text: string; data: { why: string; sharedWith: string[]; stepOff: string | null; stepOffGibsons: string | null; stepOffSeconds: number | null } } {
+  fixedPointNote(at: Place, why: string): { text: string; data: { why: string; sharedWith: string[]; stepOff: string | null; stepOffGibsons: string | null; stepOffDistance: string | null; stepOffSeconds: number | null } } {
     const mine = this.myRadius()
     const occ = this.occupants()
     const hit = overlapping(at, occ, mine)
@@ -1217,9 +1218,9 @@ export class Agent {
     const step = free && free.hex !== at.hex ? priceNextStep(at, free, this.ceilings(), this.calibration) : null
     const gibsons = free ? distanceBetween(at, free).chebyshev : null
     const price = step ? ` (one ${step.kind} of h${step.maxHeight}, about ${step.seconds.toFixed(2)} s here; plan_hop prices it)` : ''
-    const stepWords = free ? `step off by ${gibsons!.toString()} gibsons now, to ${free.hex}${price}` : 'step off as soon as a clear coordinate opens near it'
-    const text = `${why} That is a single point the protocol fixes, so the rule that your avatar never overlaps a person's yields here.${who ? ` ${who.words} ${apartOnBestAxis(at, who) === 0n ? 'stands on this exact gibson' : `stands ${apartOnBestAxis(at, who).toString()} gibsons from it`}, so your avatars overlap. ${this.spaceWords(who, mine)}. ${stepWords[0].toUpperCase()}${stepWords.slice(1)}.` : ''}`
-    return { text, data: { why, sharedWith: hit.map((o) => o.pubkey), stepOff: free?.hex ?? null, stepOffGibsons: gibsons?.toString() ?? null, stepOffSeconds: step ? Number(step.seconds.toFixed(2)) : null } }
+    const stepWords = free ? `step off by ${gibsons!.toString()} gibsons (${formatDistance(gibsons!)}) now, to ${free.hex}${price}` : 'step off as soon as a clear coordinate opens near it'
+    const text = `${why} That is a single point the protocol fixes, so the rule that your avatar never overlaps a person's yields here.${who ? ` ${who.words} ${apartOnBestAxis(at, who) === 0n ? 'stands on this exact gibson' : `stands ${distanceText(apartOnBestAxis(at, who))} from it`}, so your avatars overlap. ${this.spaceWords(who, mine)}. ${stepWords[0].toUpperCase()}${stepWords.slice(1)}.` : ''}`
+    return { text, data: { why, sharedWith: hit.map((o) => o.pubkey), stepOff: free?.hex ?? null, stepOffGibsons: gibsons?.toString() ?? null, stepOffDistance: gibsons === null ? null : formatDistance(gibsons), stepOffSeconds: step ? Number(step.seconds.toFixed(2)) : null } }
   }
 
   // ---- plan_hop and hop -----------------------------------------------------
@@ -1238,6 +1239,9 @@ export class Agent {
       kind: step.kind,
       from: describePlace(step.from),
       to: describePlace(step.to),
+      // How far this step goes and how far the target is, on the widest axis, in gibsons and as ONOSENDAI shows it.
+      distance: distanceData(distanceBetween(step.from, step.to).chebyshev),
+      targetDistance: distanceData(distanceBetween(step.from, target).chebyshev),
       heights: step.heights,
       maxHeight: step.maxHeight,
       terrainK: step.terrainK,
@@ -1259,7 +1263,7 @@ export class Agent {
     const c = this.ceilings()
     const d = distanceBetween(from, target)
     if (d.maxLca <= Math.max(c.hop, c.sidestep)) return null
-    return `The target is across an h${d.maxLca} wall (${d.chebyshev.toString()} gibsons on the widest axis), and the highest wall this server crosses is h${c.sidestep} (the sidestep cap; hops reach h${c.hop}). Nobody hops that far: a coordinate that distant is reached by hyperspace, which exits only at stops. Ride the line to the stop nearest it (station, board, ride) and meet there, or pick a target within h${c.sidestep}.`
+    return `The target is across an h${d.maxLca} wall (${distanceText(d.chebyshev)} on the widest axis), and the highest wall this server crosses is h${c.sidestep} (the sidestep cap; hops reach h${c.hop}). Nobody hops that far: a coordinate that distant is reached by hyperspace, which exits only at stops. Ride the line to the stop nearest it (station, board, ride) and meet there, or pick a target within h${c.sidestep}.`
   }
 
   private stepRefusal(step: PricedStep | null, target: Place, cap?: number): string | null {
@@ -1284,9 +1288,9 @@ export class Agent {
     const plan = step ? this.describeStep(step, target) : null
     const chainWords = this.keeper.breakWords()
     const text = step
-      ? `${refusal ? `REFUSED: ${refusal}` : 'Within the caps.'} Next step: a ${step.kind} of h${step.maxHeight} (x h${step.heights.x}, y h${step.heights.y}, z h${step.heights.z}; terrain K ${step.terrainK}) expected to take about ${step.seconds.toFixed(2)} s here${step.to.hex === target.hex ? ', landing on the target' : `, landing short of the target; ${(plan!.remainingAfter as { steps: number }).steps} more step(s) would follow`}.${this.keeper.status() === 'none' ? ' You have no chain yet: hop will sign your spawn first.' : ''}${chainWords ? ` ${chainWords}` : ''}`
+      ? `${refusal ? `REFUSED: ${refusal}` : 'Within the caps.'} Next step: a ${step.kind} of h${step.maxHeight} (x h${step.heights.x}, y h${step.heights.y}, z h${step.heights.z}; terrain K ${step.terrainK}) expected to take about ${step.seconds.toFixed(2)} s here, covering ${distanceText(distanceBetween(step.from, step.to).chebyshev)}${step.to.hex === target.hex ? ', landing on the target' : `, landing short of the target (${distanceText(distanceBetween(step.from, target).chebyshev)} away); ${(plan!.remainingAfter as { steps: number }).steps} more step(s) would follow`}.${this.keeper.status() === 'none' ? ' You have no chain yet: hop will sign your spawn first.' : ''}${chainWords ? ` ${chainWords}` : ''}`
       : refusal!
-    return { text, data: { refused: refusal, plan, target: describePlace(target), chainStatus: this.keeper.status() } }
+    return { text, data: { refused: refusal, plan, target: describePlace(target), targetDistance: distanceData(distanceBetween(from, target).chebyshev), chainStatus: this.keeper.status() } }
   }
 
   /**
@@ -1479,13 +1483,13 @@ export class Agent {
       `${action === 'spawn' ? 'Spawn' : action === 'hop' ? 'Hop' : 'Sidestep'} ${event.id.slice(0, 8)}... signed${step ? ` (h${step.maxHeight}, ${seconds.toFixed(2)} s of work)` : ''}; you now stand at ${where.hex} (${where.planeName}, sector ${where.sector}).`,
       accepted.length ? `Accepted by ${accepted.join(', ')}${accepted.includes(this.relays.canonical) ? '' : '; the canonical relay has not taken it yet and will be retried in the background (see outbox)'}.` : `No relay has taken it yet${result && !result.ok ? ` (${result.reason})` : ''}; it waits in the outbox and is retried once the relays show the chain is clear of it.`,
       Object.keys(refused).length ? `Refused by ${Object.entries(refused).map(([u, r]) => `${u}: ${r}`).join('; ')}.` : '',
-      place.hex === target.hex ? 'You are on the target.' : `The target is ${rest.steps} step(s) further (${rest.hops} hop(s), ${rest.sidesteps} sidestep(s), tallest wall h${rest.tallestWall}); call hop again to continue.`,
+      place.hex === target.hex ? 'You are on the target.' : `The target is ${distanceText(distanceBetween(place, target).chebyshev)} away, ${rest.steps} step(s) further (${rest.hops} hop(s), ${rest.sidesteps} sidestep(s), tallest wall h${rest.tallestWall}); call hop again to continue.`,
     ].filter(Boolean).join('\n')
     return {
       text,
       data: {
         eventId: event.id, action, where, workSeconds: Number(seconds.toFixed(3)), work, accepted, refused, canonicalPending: !accepted.includes(this.relays.canonical),
-        remainingToTarget: rest, onTarget: place.hex === target.hex, budget: this.budget.state(),
+        remainingToTarget: rest, onTarget: place.hex === target.hex, targetDistance: distanceData(distanceBetween(place, target).chebyshev), budget: this.budget.state(),
       },
     }
   }
@@ -1537,8 +1541,8 @@ export class Agent {
     const operatorMoved = moved ? { ...this.moveData(moved), quiet } : null
     const movedWords = operatorMoved
       ? quiet
-        ? ` Your operator moved: ${operatorMoved.action} to ${operatorMoved.to} (${operatorMoved.distance} from you), still out of your reach; they were already told.`
-        : ` Your operator moved: ${operatorMoved.action} to ${operatorMoved.to} (${operatorMoved.distance} from you). Call follow_operator to see the way there.`
+        ? ` Your operator moved: ${operatorMoved.action} to ${operatorMoved.to}, ${operatorMoved.away.gibsons === '0' && operatorMoved.plane === this.keeper.place().plane ? 'where you stand' : `${operatorMoved.distance} from you`}, still out of your reach; they were already told.`
+        : ` Your operator moved: ${operatorMoved.action} to ${operatorMoved.to}, ${operatorMoved.away.gibsons === '0' && operatorMoved.plane === this.keeper.place().plane ? 'where you stand' : `${operatorMoved.distance} from you`}. Call follow_operator to see the way there.`
       : ''
     const off = this.follow.pendingOff()
     const followSwitchedOff = off ? { at: off.at, reason: off.reason } : null
@@ -1607,9 +1611,9 @@ export class Agent {
   }
 
   /** A verified operator move as orders_waiting and follow_operator show it, with the distance from where the agent stands (from memory). */
-  private moveData(m: OperatorMove): { to: string; plane: number; planeName: string; at: number; eventId: string; action: string; distance: string } {
+  private moveData(m: OperatorMove): { to: string; plane: number; planeName: string; at: number; eventId: string; action: string; distance: string; away: { gibsons: string; human: string } } {
     const there = placeFromHex(m.coordHex)
-    return { to: m.coordHex, plane: m.plane, planeName: m.plane === 0 ? 'dataspace' : 'ideaspace', at: m.at, eventId: m.eventId, action: m.action, distance: distanceWords(distanceBetween(this.keeper.place(), there)) }
+    return { to: m.coordHex, plane: m.plane, planeName: m.plane === 0 ? 'dataspace' : 'ideaspace', at: m.at, eventId: m.eventId, action: m.action, distance: distanceWords(distanceBetween(this.keeper.place(), there)), away: distanceData(distanceBetween(this.keeper.place(), there).chebyshev) }
   }
 
   // ---- follow_operator (follow.ts) ------------------------------------------
@@ -1825,11 +1829,13 @@ export class Agent {
     const head = chain.at(-1) ?? null
     const atSpawn = !head || status === 'dead'
     const at = atSpawn ? spawnPlace(who) : placeFromHex(head!.coordHex)
-    const whereWords = !head
+    // How far that is from you, on the widest axis, in gibsons and as ONOSENDAI shows it.
+    const apart = distanceBetween(this.keeper.place(), at)
+    const whereWords = (!head
       ? `${forOperator ? 'Your operator has' : 'They have'} no chain yet, so the note is at their spawn cube: their first spawn puts them on that exact gibson, and they see it as soon as they arrive.`
       : status === 'dead'
         ? 'Their chain is dead, so their next spawn puts them back at their spawn coordinate; the note waits in that cube.'
-        : `That is where their newest move (${head.name} ${head.id.slice(0, 8)}..., signed ${new Date(head.createdAt * 1000).toISOString()}) put them.`
+        : `That is where their newest move (${head.name} ${head.id.slice(0, 8)}..., signed ${new Date(head.createdAt * 1000).toISOString()}) put them.`) + ` The cube is ${apart.chebyshev === 0n ? 'where you stand' : `${distanceWords(apart)} from you`}.`
 
     const hidden = await this.hide({ contents: { message: note }, coordinate: at.hex, height: SCAN_MAX_HEIGHT })
     const cube = hidden.data.cube as { base: { x: string; y: string; z: string } }
@@ -1844,7 +1850,7 @@ export class Agent {
     return {
       text,
       data: {
-        for: { pubkey: who, npub, operator: forOperator }, at: place, atSpawn, chainStatus: status,
+        for: { pubkey: who, npub, operator: forOperator }, at: place, distance: distanceData(apart.chebyshev), atSpawn, chainStatus: status,
         head: head ? { eventId: head.id, action: head.name, at: head.createdAt } : null,
         bagId: hidden.data.bagId, lookupId: hidden.data.lookupId, cube: hidden.data.cube, entries: hidden.data.entries, accepted, refused: hidden.data.refused,
       },

@@ -71,7 +71,8 @@ import { nowSeconds, type EventTemplate, type NostrEvent } from './nostr/event.j
 import type { Outbox, OutboxEntry } from './nostr/outbox.js'
 import type { PublishResult } from './nostr/relays.js'
 import { projectCantorMs, type Calibration } from './space/calibration.js'
-import { describePlace, placeFromHex } from './space/coords.js'
+import { describePlace, distanceBetween, placeFromHex } from './space/coords.js'
+import { distanceData, distanceText, formatDistance } from './space/units.js'
 import type { StateDir } from './state/dir.js'
 import { Refusal, type ToolResult } from './tool.js'
 import type { Wallet } from './wallet.js'
@@ -406,13 +407,15 @@ export class Transit {
       ? await this.hosakaQuote(sells, quote.fromHeight, quote.destination, signal)
       : null
     const stopHex = (s: StationResult): string => line.stopCoordHex(s.stop.height)!
+    // How far a stop is on the widest axis, in gibsons and as ONOSENDAI's stop field shows it.
+    const away = (s: StationResult): bigint => distanceBetween(here, placeFromHex(stopHex(s))).chebyshev
     const text = [
       sync ? `Sync: ${sync.verified} blob(s) verified (${sync.fetched} fetched) in ${sync.elapsedSeconds.toFixed(1)} s${sync.failure ? `; stopped: ${sync.failure}` : ''}${sync.notes.length ? `. ${sync.notes.join(' ')}` : ''}.` : '',
       this.lineWords(status),
       station
-        ? `Your station under as_of ${line.asOf()} (the newest verified block) is ${stopWords(station.stop, stopHex(station))}, ${station.distance === 0 ? 'and you stand on it' : `h${station.distance} from where you stand`}.`
+        ? `Your station under as_of ${line.asOf()} (the newest verified block) is ${stopWords(station.stop, stopHex(station))}, ${station.distance === 0 ? 'and you stand on it' : `h${station.distance} from where you stand, ${distanceText(away(station))} away`}.`
         : 'No station can be named until the line holds a verified block.',
-      nearest.length ? `Nearest stops: ${nearest.map((s) => `block ${s.stop.height} (${s.stop.kind}, h${s.distance})`).join(', ')}.` : '',
+      nearest.length ? `Nearest stops: ${nearest.map((s) => `block ${s.stop.height} (${s.stop.kind}, h${s.distance}, ${formatDistance(away(s))})`).join(', ')}.` : '',
       state === null
         ? 'You are not on the line: board to ride.'
         : state.fromHeight === null
@@ -429,8 +432,8 @@ export class Transit {
       data: {
         line: { ...status, remainingBlobs: status.blobsTotal === null ? null : status.blobsTotal - status.blobsLoaded },
         sync,
-        station: station ? { ...stopData(station.stop, stopHex(station)), distance: station.distance, asOf: line.asOf() } : null,
-        nearest: nearest.map((s) => ({ height: s.stop.height, kind: s.stop.kind, distance: s.distance })),
+        station: station ? { ...stopData(station.stop, stopHex(station)), distance: station.distance, away: distanceData(away(station)), asOf: line.asOf() } : null,
+        nearest: nearest.map((s) => ({ height: s.stop.height, kind: s.stop.kind, distance: s.distance, away: distanceData(away(s)) })),
         onLine: state ? { boarded: true, atStop: state.fromHeight, head: state.previousId } : null,
         quote,
         hosakaQuote,

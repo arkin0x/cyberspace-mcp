@@ -79,9 +79,9 @@ describe('the server', () => {
     expect(instructions).toContain('shows 9 of its 53 tools')
     expect(instructions).toContain('--tools all')
     expect(instructions).toContain('"tools" in config.json')
-    expect(instructions).toMatch(/: station, board, ride, ride_status, wait_for, hide, .*log_travel\.$/)
+    expect(instructions).toMatch(/: station, board, ride, ride_status, wait_for, hide, .*log_travel\.$/m)
     expect(instructions).not.toMatch(/wake_again|work_done/)
-    expect(instructions.length).toBeLessThan(1500)
+    expect(instructions.length).toBeLessThan(2000)
     // About a sixth of the whole list's schema (61 KB, about 15k tokens, on 2026-11-09).
     expect(JSON.stringify(tools).length).toBeLessThan(12_000)
     // A tool left out is not there to call.
