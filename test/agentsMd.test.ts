@@ -51,7 +51,15 @@ describe('the MCP instructions', () => {
   })
 
   it('stay short, since a client sends them on every session', () => {
-    expect(serverInstructions().length).toBeLessThan(1200)
+    // 1200 before the units table joined them (arkinox, 2026-11-26: the agent should convert nanometres to gibsons).
+    expect(serverInstructions().length).toBeLessThan(1600)
+  })
+
+  it('teach the units: gibsons in each unit ONOSENDAI shows, and a worked example', () => {
+    const text = serverInstructions()
+    expect(text).toContain('a gibson is 2^-33 m')
+    for (const row of ['| nm | 8.5899 |', '| m | 8,589,934,592 |', '| km | 8,589,934,592,000 |', '| AU (1.496e11 m) | 1,285,054,214,963,200,000,000 |']) expect(text).toContain(row)
+    expect(text).toContain('200 nm = 200 x 8.5899 = 1,717.98, so 1,718 gibsons')
   })
 
   it('fall back to the inline rules, with the same titles, when the guide is missing', () => {

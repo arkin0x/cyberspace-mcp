@@ -47,7 +47,8 @@ import { attributed, hexToBytes, nowSeconds } from './nostr/event.js';
 import { mergeAnswers } from './nostr/relayOutcome.js';
 import { normalizeURL } from 'nostr-tools/utils';
 import { objectHandle } from './render.js';
-import { parseCoordinate, placeOf } from './space/coords.js';
+import { distanceBetween, parseCoordinate, placeOf } from './space/coords.js';
+import { distanceData, formatDistance } from './space/units.js';
 import { Refusal } from './tool.js';
 import { readOpacity } from 'sno-core/shards';
 import { CONSTRAIN_WORDS, authoredConstrainOf, chosenConstrain, chosenConstrainOf, rawConstrain, rewritePayload, walkWords, withAuthoredConstrain } from './walkConstrain.js';
@@ -477,7 +478,7 @@ export class Placements {
             out.push(`Not answered: ${reading.silent.join('; ')}. A bag only those relays hold is not listed.`);
         if (this.host.builds)
             out.push('Each thing names its build ("unlabelled": placed with no build, or before builds were kept). To take a whole build out and keep everything else in the same bags: delete_build.');
-        out.push('To take one down: remove_placed with its target (its id, its exact name, or "last" for the newest of any type; add type: "shard" for the newest shard); whole_bag: true takes down the bag it is in. To move one: move_placed with its target and by: { dz: 12 } for 12 gibsons toward Z+ (dx, dy, dz in gibsons, negative for X-, Y-, Z-), or to: a coordinate. To turn collision in WALK on or off for shards: constrain_placed with their target (or match, bag, all: true) and constrain "opaque", "all" or "off".');
+        out.push('To take one down: remove_placed with its target (its id, its exact name, or "last" for the newest of any type; add type: "shard" for the newest shard); whole_bag: true takes down the bag it is in. To move one: move_placed with its target and by: { dz: 12 } for 12 gibsons toward Z+ (dx, dy, dz in gibsons or as lengths with units, "200 nm"; negative for X-, Y-, Z-), or to: a coordinate. To turn collision in WALK on or off for shards: constrain_placed with their target (or match, bag, all: true) and constrain "opaque", "all" or "off".');
         return {
             text: out.join('\n'),
             data: {
@@ -1362,7 +1363,7 @@ export class Placements {
             if (input.by !== undefined) {
                 const by = input.by;
                 if (Object.keys(by).some((k) => !['dx', 'dy', 'dz'].includes(k)))
-                    throw new Error('by takes only dx, dy and dz, in gibsons');
+                    throw new Error('by takes only dx, dy and dz, in gibsons or as a length with a unit ("200 nm")');
                 dest = parseCoordinate({ dx: input.by.dx ?? 0, dy: input.by.dy ?? 0, dz: input.by.dz ?? 0 }, from);
             }
             else {
@@ -1541,7 +1542,7 @@ export class Placements {
         this.host.builds?.moved({ id: row.id, lineage: row.lineage }, { id: newId, lineage: typeof lineage === 'string' ? lineage : null, lookupId: newKey.lookupId, height, at: { x: place.x, y: place.y, z: place.z }, plane: dest.plane });
         const delta = ['x', 'y', 'z'].map((a) => [a, dest.position[a] - from.position[a]]).filter(([, d]) => d !== 0n).map(([a, d]) => `${d > 0n ? '+' : ''}${d} ${a}`);
         const text = [
-            `Moved ${row.type} "${row.label}" from ${words(row.at)} to ${words(place)}${delta.length ? ` (${delta.join(', ')} gibsons)` : ''}${height !== oldKey.height ? `, from the h${oldKey.height} cube to h${height}` : ''}. Its new id is ${newId.slice(0, 12)}; ${isReference(moved) ? 'its object keeps its address' : `it keeps its lineage ${String(lineage).slice(0, 12)}`}, so its reactions follow it.`,
+            `Moved ${row.type} "${row.label}" from ${words(row.at)} to ${words(place)}${delta.length ? ` (${delta.join(', ')} gibsons; ${formatDistance(distanceBetween(from, dest).chebyshev)})` : ''}${height !== oldKey.height ? `, from the h${oldKey.height} cube to h${height}` : ''}. Its new id is ${newId.slice(0, 12)}; ${isReference(moved) ? 'its object keeps its address' : `it keeps its lineage ${String(lineage).slice(0, 12)}`}, so its reactions follow it.`,
             bagWords,
         ].join('\n');
         return {
@@ -1550,6 +1551,7 @@ export class Placements {
                 moved: { ...Placements.publicRow(row), id: newId, lineage, at: { x: place.x, y: place.y, z: place.z }, plane: dest.plane },
                 from: { ...row.at, plane: row.plane, height: oldKey.height, lookupId: oldKey.lookupId },
                 to: { x: place.x, y: place.y, z: place.z, plane: dest.plane, height, lookupId: newKey.lookupId },
+                distance: distanceData(distanceBetween(from, dest).chebyshev),
                 sameBag, bagId: newBag.id, accepted, refused, keyMs: Math.round(keyMs), objectEventId: object?.id ?? null,
             },
         };
