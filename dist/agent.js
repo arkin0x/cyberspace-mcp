@@ -547,6 +547,19 @@ export class Agent {
     }
     /** The startup republish while it runs (republishProfileIfMoved): identity waits for it, so the two never write profile.json over each other. */
     republishing = null;
+    /** The created_at of the newest profile this server signed in this run. */
+    lastProfileAt = 0;
+    /**
+     * A created_at for the next profile: now, but always after every profile this
+     * server signed (in this run, or still in the outbox). A kind 0 is replaceable,
+     * and on a tie a relay keeps the lower id (NIP-01), so an identity edit signed
+     * in the same second as the startup republish could lose to it (the flaky
+     * profileMoved test was this race, not timing).
+     */
+    profileCreatedAt() {
+        const signed = this.outbox.entries.filter((o) => o.event.kind === 0 && o.event.pubkey === this.pubkey).map((o) => o.event.created_at);
+        return Math.max(nowSeconds(), this.lastProfileAt + 1, ...signed.map((t) => t + 1));
+    }
     /**
      * At serve start: the last published profile, published again unchanged
      * (its content and tags as they were, signed now) when no relay that
@@ -583,7 +596,8 @@ export class Agent {
                 this.dir.writeJson('profile.json', { ...last, accepted });
             return { status: 'unneeded' };
         }
-        const event = this.sign({ kind: 0, created_at: nowSeconds(), content: last.content, tags: last.tags });
+        const event = this.sign({ kind: 0, created_at: this.profileCreatedAt(), content: last.content, tags: last.tags });
+        this.lastProfileAt = event.created_at;
         const entry = this.outbox.add(event);
         const result = await this.outbox.send(entry);
         const refused = entry.refused ?? {};
@@ -874,7 +888,7 @@ export class Agent {
             picture: picture === '' ? undefined : picture ?? had.picture,
             operator: operator ?? undefined,
         };
-        const template = profileTemplate(fields, nowSeconds());
+        const template = profileTemplate(fields, this.profileCreatedAt());
         let publish;
         // Unchanged and still on a relay this server publishes to. A profile only
         // the relays of an older configuration hold (the old defaults, before
@@ -884,6 +898,7 @@ export class Agent {
         }
         else {
             const event = this.sign(template);
+            this.lastProfileAt = event.created_at;
             const entry = this.outbox.add(event);
             const result = await this.outbox.send(entry);
             const refused = entry.refused ?? {};

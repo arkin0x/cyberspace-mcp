@@ -160,8 +160,11 @@ describe('a profile only older relays hold', () => {
     expect((r.data.profile as { status: string }).status).toBe('published')
     expect(JSON.parse(profileFile(dir).content).about).toBe('a newer about')
     // The newest profile on the current relay is the edit.
-    const newest = profilesOn(network, NEW, a.pubkey).sort((x, y) => y.created_at - x.created_at || (x.id < y.id ? 1 : -1))[0]
+    const newest = profilesOn(network, NEW, a.pubkey).sort((x, y) => y.created_at - x.created_at || (x.id < y.id ? -1 : 1))[0]
     expect(JSON.parse(newest.content).about).toBe('a newer about')
+    // Strictly newer than the republish, so no relay's same-second tie rule (lower id wins) can keep the old one.
+    const all = profilesOn(network, NEW, a.pubkey)
+    expect(all.filter((e) => e.created_at === newest.created_at)).toHaveLength(1)
   })
 
   it('never while the profile names another operator than the configured one', async () => {
