@@ -163,6 +163,25 @@ export async function resealedObject(object, fromKey, toKey, createdAt, change =
     const tags = object.tags.map((t, i) => (i === at ? sealed : [...t]));
     return { kind: OBJECT_KIND, created_at: createdAt, content: object.content, tags };
 }
+/**
+ * A sealed object (kind 33331) sealed again to the same place under a new
+ * `d`, its plaintext exactly as it was decrypted (never re-serialized, so no
+ * field is lost or rewritten): how restore_build puts back a shard whose
+ * object was taken down, since a deleted address and id cannot be used again
+ * (review of 485a2df). Null when it is not one this key opens.
+ */
+export async function sealedCopy(object, key, d, createdAt) {
+    const at = object.tags.findIndex((t) => t[0] === 'encrypted');
+    if (object.kind !== OBJECT_KIND || at < 0 || object.tags[at][1] !== ALGO || !object.tags[at][2])
+        return null;
+    const plain = await decryptForRegion(key, object.tags[at][2]);
+    if (plain === null)
+        return null;
+    const sealed = [...object.tags[at]];
+    sealed[2] = await encryptForRegion(key, plain);
+    const tags = object.tags.map((t, i) => (i === at ? sealed : t[0] === 'd' ? ['d', d] : [...t]));
+    return { kind: OBJECT_KIND, created_at: createdAt, content: object.content, tags };
+}
 /** The reference entry that hides a signed object at a point (spec 7.6). */
 export function referenceTo(object, at, plane, relayHint) {
     const d = object.tags.find((t) => t[0] === 'd')?.[1] ?? '';

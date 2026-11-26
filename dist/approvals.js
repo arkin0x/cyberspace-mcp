@@ -17,6 +17,7 @@
 // <state>/approvals.json keeps the requests (mode 600), so a restart waits
 // on the same request instead of asking twice.
 import { randomInt } from 'node:crypto';
+import { RESTORE_WORDS } from './trash.js';
 /** How long the operator has to answer a request. */
 export const APPROVAL_TTL_MS = 30 * 60_000;
 /** How many requests are kept, newest last; settled ones older than a week go first. */
@@ -212,6 +213,8 @@ export function requestWords(r, day) {
 /** How many pieces may go in one delete without the operator's approval, by default. */
 export const DEFAULT_DELETE_APPROVAL_THRESHOLD = 5;
 const DELETE_FILE = 'delete-approvals.json';
+/** How long a delete that ran without approval counts against the threshold (review of 485a2df: no splitting a large delete into small ones). */
+export const DELETE_WINDOW_MS = 60 * 60_000;
 /** The set a request covers, as one string: the ids sorted, without repeats. */
 function setOf(pieces) {
     return [...new Set(pieces)].sort();
@@ -223,6 +226,8 @@ export class DeleteApprovals {
     now;
     ttlMs;
     requests;
+    /** Deletes that ran without an approval, the last hour's: when, and how many pieces. */
+    deleted;
     constructor(dir, mode, now = Date.now, ttlMs = APPROVAL_TTL_MS) {
         this.dir = dir;
         this.mode = mode;
@@ -230,6 +235,19 @@ export class DeleteApprovals {
         this.ttlMs = ttlMs;
         const saved = dir.readJson(DELETE_FILE, null);
         this.requests = saved?.version === 1 && Array.isArray(saved.requests) ? saved.requests : [];
+        this.deleted = saved?.version === 1 && Array.isArray(saved.deleted) ? saved.deleted.filter((d) => typeof d?.at === 'number' && typeof d?.pieces === 'number') : [];
+    }
+    /** How many pieces deletes that needed no approval took in the last hour, across delete_build and remove_placed. */
+    recentDeleted() {
+        const since = this.now() - DELETE_WINDOW_MS;
+        return this.deleted.filter((d) => d.at > since).reduce((n, d) => n + d.pieces, 0);
+    }
+    /** A delete ran. One the operator approved is not counted: they saw exactly what went. */
+    noteDeleted(pieces, approved) {
+        if (approved || pieces <= 0)
+            return;
+        this.deleted.push({ at: this.now(), pieces });
+        this.save();
     }
     /** Whether a delete that needs approval waits for the operator. */
     get required() {
@@ -242,7 +260,9 @@ export class DeleteApprovals {
     save() {
         const cutoff = this.now() - KEPT_MS;
         this.requests = this.requests.filter((r) => r.state === 'pending' || r.state === 'approved' || r.createdAt >= cutoff).slice(-KEPT);
-        this.dir.writeJson(DELETE_FILE, { version: 1, requests: this.requests });
+        const since = this.now() - DELETE_WINDOW_MS;
+        this.deleted = this.deleted.filter((d) => d.at > since);
+        this.dir.writeJson(DELETE_FILE, { version: 1, requests: this.requests, deleted: this.deleted });
     }
     expire() {
         const t = this.now();
@@ -343,7 +363,7 @@ export class DeleteApprovals {
 /** The DM that asks the operator to approve one delete. Kept under the DM cap: the list is cut, never the code or how to answer. */
 export function deleteRequestWords(r, maxChars = 3800) {
     const minutes = Math.round((r.expiresAt - r.createdAt) / 60_000);
-    const head = `May I delete ${r.pieces.length} thing(s) I placed? A backup of everything that goes is written to the trash in my state directory first.`;
+    const head = `May I delete ${r.pieces.length} thing(s) I placed? A backup of everything that goes is written to the trash in my state directory first. ${RESTORE_WORDS}`;
     const tail = `To approve, reply with just the code ${r.code} (or "yes ${r.code}"). To refuse, reply "no ${r.code}". Any other reply approves nothing. It expires in ${minutes} minutes; if you do not answer, nothing is deleted.`;
     const room = Math.max(200, maxChars - head.length - tail.length - 4);
     const summary = r.summary.length > room ? `${r.summary.slice(0, room - 20).replace(/\s+\S*$/, '')} ... (list cut)` : r.summary;

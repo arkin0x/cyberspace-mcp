@@ -20,6 +20,7 @@ import type { Plane } from 'cyberspace-core'
 import type { HiddenType } from './hidden/bags.js'
 import type { StateDir } from './state/dir.js'
 import { Refusal } from './tool.js'
+import { withoutTokens } from './trash.js'
 
 const FILE = 'builds.json'
 /** The group of everything placed under no build, and of what was placed before the ledger. */
@@ -76,12 +77,17 @@ export function groupKey(label: string): string {
 }
 
 /** The build ledger in <state>/builds.json: read once, written whole on every change. */
+/** A piece as the ledger keeps it: a message's first words may start a Cashu token, blanked as the trash blanks it (review of 485a2df). */
+function safe(piece: BuildPiece): BuildPiece {
+  return { ...piece, label: withoutTokens(piece.label).text }
+}
+
 export class Builds {
   private state: BuildsFile
 
   constructor(private readonly dir: StateDir, private readonly now: () => number = () => Math.floor(Date.now() / 1000)) {
     const saved = dir.readJson<BuildsFile | null>(FILE, null)
-    this.state = saved?.version === 1 && Array.isArray(saved.builds) ? { version: 1, current: saved.current ?? null, builds: saved.builds } : { version: 1, current: null, builds: [] }
+    this.state = saved?.version === 1 && Array.isArray(saved.builds) ? { version: 1, current: saved.current ?? null, builds: saved.builds.map((b) => ({ ...b, pieces: (b.pieces ?? []).map(safe) })) } : { version: 1, current: null, builds: [] }
   }
 
   private save(): void {
@@ -138,7 +144,7 @@ export class Builds {
   record(label: unknown, piece: BuildPiece): Build {
     const b = this.ensure(this.target(label))
     b.pieces = b.pieces.filter((p) => !(p.id === piece.id && p.lookupId === piece.lookupId && !p.removedAt))
-    b.pieces.push(piece)
+    b.pieces.push(safe(piece))
     b.updatedAt = this.now()
     this.save()
     return b
@@ -211,6 +217,8 @@ export class Builds {
   /** Rename a build. A label another build has is refused, and so is "unlabelled" (it would merge with what has no build). */
   rename(given: unknown, label: unknown): Build {
     const b = this.get(given)
+    // "unlabelled" holds what no build named: renaming it would claim all of it is one build (review of 485a2df). build_add sorts it.
+    if (groupKey(b.label) === UNLABELLED) throw new Refusal(`"${UNLABELLED}" is where things with no build go, so it cannot be renamed: it may hold several builds. Name each with build_add (by id, by name match, or a whole bag). Nothing was changed.`)
     const clean = cleanLabel(label)
     if (!clean) throw new Refusal('The new label is a few words, not empty.')
     if (groupKey(clean) === UNLABELLED && groupKey(b.label) !== UNLABELLED) throw new Refusal(`"${UNLABELLED}" is where things with no build go; choose another label.`)
@@ -280,7 +288,7 @@ export class Builds {
         from.build.updatedAt = t
         if (groupKey(from.build.label) !== UNLABELLED) moved.push({ piece, from: from.build.label })
       }
-      b.pieces.push({ ...piece, ...(from ? { placedAt: from.piece.placedAt } : {}), changedAt: t })
+      b.pieces.push(safe({ ...piece, ...(from ? { placedAt: from.piece.placedAt } : {}), changedAt: t }))
       if (!from || groupKey(from.build.label) === UNLABELLED) added.push(piece)
     }
     b.updatedAt = t

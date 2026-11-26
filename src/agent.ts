@@ -80,7 +80,7 @@ import type { Secret } from './nwc.js'
 import { DEFAULT_MAX_DAILY_SATS, DEFAULT_MAX_PAYMENT_SATS, Wallet } from './wallet.js'
 import { NOTICE_RELAY, UpdateWatch } from './updates.js'
 import { DEFAULT_DELETE_APPROVAL_THRESHOLD, Placements, labelOf } from './placed.js'
-import { Builds, UNLABELLED, cleanLabel, type BuildPiece } from './builds.js'
+import { Builds, cleanLabel, type BuildPiece } from './builds.js'
 import { Trash } from './trash.js'
 import { Notes } from './notes.js'
 import { DEFAULT_TRAVEL_PER_DAY, TravelLog, repeatsPrivate, type TravelLogSettings } from './travel.js'
@@ -378,6 +378,8 @@ export class Agent {
   readonly deleteApprovals: DeleteApprovals
   /** The agent's own notes: what it built where, and why (notes.ts). */
   readonly notes: Notes
+  /** Restores in flight, by trash entry: one at a time each (review of 485a2df). */
+  private readonly restoring = new Map<string, Promise<void>>()
   calibration: Calibration
   private readonly dir: StateDir
   private readonly sk: Uint8Array
@@ -577,25 +579,35 @@ export class Agent {
       afterRemove: (ids) => { for (const id of ids) this.doors.remove(id) },
       builds: this.builds,
       trash: this.trash,
-      deleteGate: { threshold: config.deleteApprovalThreshold ?? DEFAULT_DELETE_APPROVAL_THRESHOLD, required: () => this.deleteApprovals.required, check: (input) => this.deleteGate(input) },
+      deleteGate: {
+        threshold: config.deleteApprovalThreshold ?? DEFAULT_DELETE_APPROVAL_THRESHOLD,
+        required: () => this.deleteApprovals.required,
+        check: (input) => this.deleteGate(input),
+        recent: () => this.deleteApprovals.recentDeleted(),
+        note: (pieces, approved) => this.deleteApprovals.noteDeleted(pieces, approved),
+      },
     })
   }
 
   /**
    * Whether a delete that needs approval may run (deleteApproval "operator";
-   * approvals.ts DeleteApprovals). Null: go ahead, the approval spent on
-   * exactly these pieces. Else the answer to give: held, with the request
-   * sent to the operator by the server, never with its code.
+   * approvals.ts DeleteApprovals). `spend`: go ahead; the caller calls it
+   * inside the bag lock right before signing, and it spends the approval on
+   * exactly these pieces then (review of 485a2df), refusing when it no longer
+   * holds. `held`: the answer to give, with the request sent to the operator
+   * by the server, never with its code. The operator's pending DMs are read
+   * first, as inbox reads them, so an answer that came in is counted.
    */
-  private async deleteGate(input: { pieces: string[]; needs: string[]; summary: string; again: string }): Promise<ToolResult | null> {
-    if (input.needs.length === 0 || !this.deleteApprovals.required) return null
+  private async deleteGate(input: { pieces: string[]; needs: string[]; summary: string; again: string }): Promise<{ held: ToolResult } | { spend: () => void }> {
+    if (input.needs.length === 0 || !this.deleteApprovals.required) return { spend: () => {} }
     const why = input.needs.join('; ')
     const operator = this.operatorProblem() ? null : this.operatorOfProfile()
     if (!operator) throw new Refusal(`This delete needs your operator's approval (${why}), and deleteApproval is "operator", but there is no operator to ask${this.operatorProblem() ? ` (${this.operatorProblem()})` : ' (identity publishes the operator your human configured)'}. Nothing was deleted.`)
+    await this.operatorChannel.readNow()
     const v = this.deleteApprovals.verdict(input.pieces)
     if (v.state === 'approved') {
-      if (!this.deleteApprovals.use(v.request.code, input.pieces)) throw new Refusal('The approval changed before the delete ran. Nothing was deleted.')
-      return null
+      const code = v.request.code
+      return { spend: () => { if (!this.deleteApprovals.use(code, input.pieces)) throw new Refusal('The approval lapsed or changed before the delete ran. Nothing was deleted.') } }
     }
     if (v.state === 'refused' || v.state === 'expired') {
       this.deleteApprovals.reported(v.request.code)
@@ -608,12 +620,14 @@ export class Agent {
         await this.operatorChannel.message(deleteRequestWords(request))
         this.deleteApprovals.markNotified(request.code)
       } catch (err) {
-        return { text: `Held: this delete needs your operator's approval (${why}), and the request could NOT be sent to them just now (${err instanceof Error ? err.message : String(err)}). Nothing was deleted. ${input.again[0].toUpperCase()}${input.again.slice(1)} to send it again.`, data: { held: true, approvalNeeded: true, needs: input.needs, notified: false } }
+        return { held: { text: `Held: this delete needs your operator's approval (${why}), and the request could NOT be sent to them just now (${err instanceof Error ? err.message : String(err)}). Nothing was deleted. ${input.again[0].toUpperCase()}${input.again.slice(1)} to send it again.`, data: { held: true, approvalNeeded: true, needs: input.needs, notified: false } } }
       }
     }
     return {
-      text: `Held for your operator's approval (${why}): the server ${v.state === 'pending' ? 'already sent' : 'sent'} them what would go and what would stay, by DM, with a code. Nothing was deleted. When they approve, ${input.again}; it runs then. If they refuse, or do not answer within ${minutes} minutes, nothing is deleted. The request covers exactly these pieces: if what would go changes, it no longer applies.`,
-      data: { held: true, approvalNeeded: true, needs: input.needs, notified: true, expiresAt: request.expiresAt },
+      held: {
+        text: `Held for your operator's approval (${why}): the server ${v.state === 'pending' ? 'already sent' : 'sent'} them what would go and what would stay, by DM, with a code. Nothing was deleted. Their answer comes as a DM: when they approve, ${input.again}; it runs then. If they refuse, or do not answer within ${minutes} minutes, nothing is deleted. The request covers exactly these pieces: if what would go changes, it no longer applies.`,
+        data: { held: true, approvalNeeded: true, needs: input.needs, notified: true, expiresAt: request.expiresAt },
+      },
     }
   }
 
@@ -2619,57 +2633,55 @@ export class Agent {
   /** trash: the backups deletes wrote, newest first. */
   trashList(): ToolResult {
     const all = this.trash.list()
-    const out = [all.length ? `Trash: ${all.length} backup(s), newest first. Nothing here is ever deleted on its own; restore_build with an id places its shards and messages again.` : 'The trash is empty: nothing you placed was deleted since backups were kept.']
+    const out = [all.length ? `Trash: ${all.length} backup(s), newest first. Nothing here is ever deleted on its own; restore_build with an id puts its pieces back.` : 'The trash is empty: nothing you placed was deleted since backups were kept.']
     for (const m of all.slice(0, 50)) {
-      out.push(`  ${m.id}: ${m.tool}${m.build ? ` of the build "${m.build}"` : ''}, ${m.removed.length} thing(s) from ${m.bags.length} bag(s)${m.bags.some((b) => b.kept.length) ? ` (${m.bags.reduce((n, b) => n + b.kept.length, 0)} stayed)` : ''}: ${m.removed.slice(0, 6).map((r) => `${r.type} "${r.label}"`).join(', ')}${m.removed.length > 6 ? ', ...' : ''}${m.restoredAt ? `. Restored ${m.restoredAt}` : ''}`)
+      out.push(`  ${m.id}: ${m.tool}${m.build ? ` of the build "${m.build}"` : ''}, ${m.removed.length} thing(s) from ${m.bags.length} bag(s)${m.bags.some((b) => b.kept.length) ? ` (${m.bags.reduce((n, b) => n + b.kept.length, 0)} stayed)` : ''}: ${m.removed.slice(0, 6).map((r) => `${r.type} "${r.label}"`).join(', ')}${m.removed.length > 6 ? ', ...' : ''}${m.restoredAt ? `. Restored ${m.restoredAt}` : (m.restored ?? []).some((r) => r.ok) ? `. Partly restored (${new Set((m.restored ?? []).filter((r) => r.ok).map((r) => r.from)).size} of ${m.removed.length}); restore_build again tries the rest` : ''}`)
     }
     if (all.length > 50) out.push(`  ... and ${all.length - 50} older.`)
     return { text: out.join('\n'), data: { entries: all.map((m) => ({ id: m.id, createdAt: m.createdAt, tool: m.tool, build: m.build ?? null, removed: m.removed, bags: m.bags.map((b) => ({ lookupId: b.lookupId, height: b.height, wholeBag: b.wholeBag, removed: b.removed.length, kept: b.kept.length })), restoredAt: m.restoredAt ?? null })) } }
   }
 
   /**
-   * restore_build: place a trash entry's shards and messages again, as new
-   * events at the same place, plane and cube height with the same payload,
-   * through hide and place (each bag read fresh and merged), recorded under
-   * the build they were in. Keys, chests and doors cannot be made again
-   * exactly (a key is a new keypair; a chest is sealed with a key thrown
-   * away): skipped, and said. The entry is marked restored, never deleted.
+   * restore_build: put back what a delete removed, from the bag the trash
+   * keeps (placed.ts restoreFromTrash, review of 485a2df): the original
+   * entries verbatim, same ids, merged into the bag as it stands now; a
+   * sealed shard whose object was taken down sealed again under a new d; a
+   * piece from a locked room only into that room. Each piece is marked in
+   * the entry as it lands, so a restore cut short is tried again for the
+   * rest only, and a piece already back is never put back twice. One restore
+   * of an entry runs at a time. The entry is kept.
    */
   async restoreBuild(input: { trash: string }): Promise<ToolResult> {
-    const entry = this.trash.read(input.trash)
-    if (entry.meta.restoredAt) throw new Refusal(`The trash entry ${entry.meta.id} was already restored (${entry.meta.restoredAt}); restoring it again would place copies of what is already back. Nothing was changed.`)
-    const done: Array<{ from: string; id: string | null; type: string; label: string; ok: boolean; why?: string }> = []
-    for (const p of entry.pieces) {
-      const coordinate = { x: p.at.x, y: p.at.y, z: p.at.z, plane: p.plane }
-      const build = p.build || UNLABELLED
-      let why: string | null = null
-      let run: (() => Promise<ToolResult>) | null = null
-      if (p.type === 'shard' && p.byReference === 'public' && p.objectAddress) run = () => this.place({ address: p.objectAddress, coordinate, height: p.height, build })
-      else if (p.type === 'shard' && p.payload && typeof p.payload === 'object') run = () => this.hide({ contents: { object: p.payload }, coordinate, height: p.height, build })
-      else if (p.type === 'message' && p.heldCashuToken) why = 'it held a Cashu token, which is money and was never kept in the trash'
-      else if (p.type === 'message' && typeof p.text === 'string') run = () => this.hide({ contents: { message: p.text! }, coordinate, height: p.height, build })
-      else if (p.type === 'key') why = 'a key is a keypair: a new one would open none of the chests sealed to the old one, so it cannot be made again exactly (forge_item makes a new one)'
-      else if (p.type === 'chest') why = `a ${p.chest?.door ? 'door' : 'chest'} is sealed with a key used once and thrown away, so it cannot be made again exactly (seal it again with seal_${p.chest?.door ? 'door' : 'chest'})`
-      else why = `a ${p.type} is not restored: only shards and messages are`
-      if (!run) { done.push({ from: p.id, id: null, type: p.type, label: p.label, ok: false, why: why ?? 'nothing to restore' }); continue }
-      try {
-        const r = await run()
-        done.push({ from: p.id, id: typeof r.data.id === 'string' ? r.data.id : null, type: p.type, label: p.label, ok: true })
-      } catch (err) {
-        done.push({ from: p.id, id: null, type: p.type, label: p.label, ok: false, why: err instanceof Error ? err.message : String(err) })
+    const id = this.trash.read(input.trash).meta.id
+    // One restore of an entry at a time: a second waits for the first, then sees what it put back.
+    const before = this.restoring.get(id) ?? Promise.resolve()
+    let release!: () => void
+    const mine = new Promise<void>((r) => { release = r })
+    const tail = before.then(() => mine)
+    this.restoring.set(id, tail)
+    await before
+    try {
+      const entry = this.trash.read(id)
+      if (entry.pieces.length === 0) throw new Refusal(`The trash entry ${id} holds no piece this server could read (the bag could not be opened when it was deleted), so nothing can be restored from it. Nothing was changed.`)
+      const back = new Set((entry.meta.restored ?? []).filter((r) => r.ok).map((r) => r.from))
+      if (entry.pieces.every((p) => back.has(p.id))) throw new Refusal(`Everything in the trash entry ${id} is already back (${entry.meta.restoredAt ?? 'restored'}); restoring it again would put back nothing. Nothing was changed.`)
+      const done = await this.placements.restoreFromTrash(entry, back, (rs) => { this.trash.markRestored(id, rs) })
+      const ok = done.filter((d) => d.ok)
+      const failed = done.filter((d) => !d.ok)
+      const meta = this.trash.read(id).meta
+      if (ok.length === 0) throw new Refusal(`Nothing of ${id} was restored: ${failed.map((d) => `${d.type} "${d.label}": ${d.why}`).join('; ')}. The entry stays in the trash; restore_build tries again for these.`)
+      return {
+        text: [
+          `Restored ${ok.length} thing(s) from ${id} into their bags, as they were (the same entries, merged with what is there now), recorded in their builds: ${ok.map((d) => `${d.type} "${d.label}"${d.id ? ` (id ${d.id.slice(0, 12)})` : ''}${d.why ? `; ${d.why}` : ''}`).join(', ')}.`,
+          ...(back.size ? [`Already back before this call: ${back.size}.`] : []),
+          ...failed.map((d) => `Not restored: ${d.type} "${d.label}": ${d.why}`),
+          meta.restoredAt ? `Every piece is back; the trash entry is kept, marked restored (${meta.restoredAt}).` : 'Not every piece is back: the trash entry is kept, and restore_build with it again tries only the rest.',
+        ].join('\n'),
+        data: { trashId: id, restored: ok, failed, restoredAt: meta.restoredAt ?? null },
       }
-    }
-    if (!done.some((d) => d.ok)) throw new Refusal(`Nothing of ${entry.meta.id} was restored: ${done.map((d) => `${d.type} "${d.label}": ${d.why}`).join('; ')}. The entry stays in the trash as it was.`)
-    const meta = this.trash.markRestored(entry.meta.id, done)
-    const ok = done.filter((d) => d.ok)
-    const skipped = done.filter((d) => !d.ok)
-    return {
-      text: [
-        `Restored ${ok.length} of ${done.length} thing(s) from ${entry.meta.id}, as new events at the same places and heights (new ids), recorded in their builds: ${ok.map((d) => `${d.type} "${d.label}"${d.id ? ` (now id ${d.id.slice(0, 12)})` : ''}`).join(', ')}.`,
-        ...skipped.map((d) => `Not restored: ${d.type} "${d.label}": ${d.why}`),
-        `The trash entry is kept, marked restored (${meta.restoredAt}).`,
-      ].join('\n'),
-      data: { trashId: entry.meta.id, restored: ok, skipped, restoredAt: meta.restoredAt },
+    } finally {
+      release()
+      if (this.restoring.get(id) === tail) this.restoring.delete(id)
     }
   }
 

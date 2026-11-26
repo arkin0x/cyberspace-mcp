@@ -182,10 +182,11 @@ describe('placed, remove_placed and move_placed', () => {
     expect(bagsOn(s.mine, s.a.pubkey).has(k.lookupId)).toBe(false)
     expect(rowsOf(await s.call('placed'))).toEqual([])
     // A hide there afterwards is newer than the deletion, so the relay keeps it.
-    const again = await s.call('hide', { contents: { message: 'back again' }, ...at(0n), height: 8 })
+    // In one build: a whole bag of things in no build is refused with no approval to ask for (review of 485a2df).
+    const again = await s.call('hide', { contents: { message: 'back again' }, ...at(0n), height: 8, build: 'notes' })
     expect(again.isError).toBe(false)
     expect(bagsOn(s.mine, s.a.pubkey).get(k.lookupId)!.created_at).toBeGreaterThan(del.created_at)
-    await s.call('hide', { contents: { message: 'second' }, ...at(1n), height: 8 })
+    await s.call('hide', { contents: { message: 'second' }, ...at(1n), height: 8, build: 'notes' })
     const whole = await s.call('remove_placed', { target: 'second', whole_bag: true })
     expect(whole.isError).toBe(false)
     expect((whole.data.removed as Row[]).length).toBe(2)

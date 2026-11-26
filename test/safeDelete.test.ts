@@ -24,7 +24,8 @@ import { parseArgs, settingsFrom } from '../src/config.js'
 import { HIDDEN_KIND } from '../src/hidden/bags.js'
 import { regionKeyAt } from '../src/hidden/crypto.js'
 import { wrapMessage } from '../src/nostr/dm.js'
-import { bytesToHex, nowSeconds, type NostrEvent } from '../src/nostr/event.js'
+import { bagTemplate } from '../src/hidden/bags.js'
+import { bytesToHex, hexToBytes, nowSeconds, signEvent, type NostrEvent } from '../src/nostr/event.js'
 import { openEntries } from '../src/placed.js'
 import { createServer } from '../src/server.js'
 import type { Calibration } from '../src/space/calibration.js'
@@ -94,7 +95,7 @@ function secretsIn(dir: string): string[] {
   const out = new Set<string>()
   const walk = (path: string): void => {
     for (const name of readdirSync(path)) {
-      if (name === 'trash') continue
+      if (name === 'trash' || name === 'builds.json') continue
       const p = join(path, name)
       if (statSync(p).isDirectory()) { walk(p); continue }
       const text = readFileSync(p, 'utf8')
@@ -105,9 +106,24 @@ function secretsIn(dir: string): string[] {
   return [...out]
 }
 
+/** Every file of the trash, and builds.json: what must never hold a secret in the clear. */
 function trashFiles(dir: string): Array<{ path: string; text: string }> {
   const root = join(dir, 'trash')
-  return readdirSync(root).flatMap((e) => readdirSync(join(root, e)).map((f) => ({ path: join(root, e, f), text: readFileSync(join(root, e, f), 'utf8') })))
+  const trash = readdirSync(root).flatMap((e) => readdirSync(join(root, e)).map((f) => ({ path: join(root, e, f), text: readFileSync(join(root, e, f), 'utf8') })))
+  return [...trash, { path: join(dir, 'builds.json'), text: readFileSync(join(dir, 'builds.json'), 'utf8') }]
+}
+
+/** The agent's secret key, from its key file (to sign a version of its bag as another session would). */
+function skOf(dir: string): Uint8Array {
+  return hexToBytes((JSON.parse(readFileSync(join(dir, 'key'), 'utf8')) as { secret: string }).secret)
+}
+
+/** The entries of the agent's h8 bag on the canonical relay, opened, as JSON strings by id. */
+async function entriesNow(relay: FakeRelay, pubkey: string, lookup = H8): Promise<Map<string, string>> {
+  const bag = relay.all().find((e) => e.kind === HIDDEN_KIND && e.pubkey === pubkey && e.tags.some((t) => t[0] === 'd' && t[1] === lookup.lookupId))
+  const out = new Map<string, string>()
+  for (const e of (bag ? await openEntries(bag, lookup.key) : null) ?? []) out.set((e as NostrEvent).id ?? JSON.stringify(e), JSON.stringify(e))
+  return out
 }
 
 interface Row { id: string; label: string; type: string }
@@ -318,31 +334,122 @@ describe('builds, the trash, scoped deletes and restore (no operator)', () => {
     expect(a.builds.find('castle')!.pieces.find((p) => p.label === 'tower')).toMatchObject({ trashId })
   })
 
-  it('restore_build places the pieces again (same payloads, new ids) in their build, and keeps the entry marked restored', async () => {
+  it('restore_build puts the original entries back verbatim (same ids), a key and its chest and a coin included, merged into the bag', async () => {
     await mixedBag()
-    const oldIds = rowsOf(await call('placed')).filter((r) => ['ramp', 'loop', 'start line here'].includes(r.label)).map((r) => r.id)
+    const TOKEN = 'cashuAeyJ0b2tlbiI6W3sibWludCI6Imh0dHBzOi8vbWludC5leGFtcGxlIn1dfQ'
+    await call('hide', { contents: { message: `${TOKEN} for the winner` }, ...at(5), height: 8, build: 'aerocarnival course' })
+    expect((await call('seal_chest', { name: 'Prize', lock: 'Course Key', contents: [{ message: 'you win' }], ...at(4), height: 8, build: 'aerocarnival course' })).isError).toBe(false)
+    const before = await entriesNow(canonical, a.pubkey)
+    expect(before.size).toBe(9)
     const done = await call('delete_build', { build: 'aerocarnival course', confirm: true })
+    expect(done.data.deleted, done.text).toBe(true)
+    expect(done.text).toContain('restore_build can put back')
+    expect((await entriesNow(canonical, a.pubkey)).size).toBe(3)
     const trashId = String(done.data.trashId)
-    // A second on: an item signed again in the same second as the first, with the same payload, would have the same id.
-    await new Promise((r) => setTimeout(r, 1100))
+    // No coin and no secret in the clear: not in the trash, not in builds.json.
+    const secrets = secretsIn(dir)
+    for (const f of trashFiles(dir)) {
+      expect(f.text.includes(TOKEN), `${f.path} holds the coin`).toBe(false)
+      for (const sec of secrets) expect(f.text.includes(sec), `${f.path} holds a secret`).toBe(false)
+    }
     const r = await call('restore_build', { trash: trashId })
     expect(r.isError, r.text).toBe(false)
-    expect((r.data.restored as unknown[]).length).toBe(3)
-    expect(r.text).toMatch(/Not restored: key "Course Key": a key is a keypair/)
-    // Merged into the bag that holds the castle.
-    expect(await bagNames(canonical, a.pubkey)).toEqual(['gate', 'keep', 'loop', 'ramp', 'start line here', 'tower'])
-    // The same payload: the restored ramp's vertices, colors and faces are the ones placed.
-    const bag = canonical.all().find((e) => e.kind === HIDDEN_KIND && e.pubkey === a.pubkey && e.tags.some((t) => t[0] === 'd' && t[1] === H8.lookupId))!
-    const ramp = ((await openEntries(bag, H8.key)) as NostrEvent[]).map((e) => { try { return JSON.parse(e.content) as Record<string, unknown> } catch { return {} } }).find((p) => p.name === 'ramp')
-    const { name: _n, ...geometry } = shard('ramp')
-    expect(ramp).toMatchObject(geometry)
-    const now = rowsOf(await call('placed'))
-    for (const label of ['ramp', 'loop', 'start line here']) expect(oldIds).not.toContain(now.find((x) => x.label === label)!.id)
+    expect((r.data.restored as unknown[]).length).toBe(6)
+    expect(r.data.failed).toEqual([])
+    // Every original entry is back, byte for byte: the same ids, the key item and its chest exactly as sealed, the coin's message whole.
+    const after = await entriesNow(canonical, a.pubkey)
+    expect(after.size).toBe(9)
+    for (const [id, json] of before) expect(after.get(id), id).toBe(json)
+    expect(await bagNames(canonical, a.pubkey)).toContain('key:Course Key')
     const course = a.builds.find('aerocarnival course')!
-    expect(course.pieces.filter((p) => !p.removedAt).map((p) => p.label).sort()).toEqual(['loop', 'ramp', 'start line here'])
-    const meta = JSON.parse(readFileSync(join(dir, 'trash', trashId, 'meta.json'), 'utf8')) as { restoredAt?: string }
+    const labels = course.pieces.filter((p) => !p.removedAt).map((p) => p.label)
+    expect(labels.filter((l) => !l.startsWith('[a Cashu token, not kept]')).sort()).toEqual(['Course Key', 'Prize', 'loop', 'ramp', 'start line here'])
+    expect(labels).toHaveLength(6)
+    expect(readFileSync(join(dir, 'builds.json'), 'utf8')).not.toContain(TOKEN)
+    const meta = JSON.parse(readFileSync(join(dir, 'trash', trashId, 'meta.json'), 'utf8')) as { restoredAt?: string; restored: unknown[] }
     expect(meta.restoredAt).toBeTruthy()
-    expect((await call('restore_build', { trash: trashId })).text).toContain('already restored')
+    expect(meta.restored).toHaveLength(6)
+    expect((await call('restore_build', { trash: trashId })).text).toContain('already back')
+  })
+
+  it('a piece from a locked room goes back only into that room, and never into the open once its door is gone', async () => {
+    expect((await call('forge_item', { name: 'Vault Key', ...at(120), height: 3, build: 'vault' })).isError).toBe(false)
+    expect((await call('seal_door', { name: 'Vault door', lock: 'Vault Key', room_height: 4, height: 5, ...at(0), build: 'vault' })).isError).toBe(false)
+    const placed = await call('place', { object: shard('statue'), ...at(0), height: 4, build: 'vault' })
+    expect(placed.text).toContain('inside the room of your door')
+    const roomLookup = String(placed.data.lookupId)
+    const removed = await call('remove_placed', { target: 'statue' })
+    expect(removed.isError, removed.text).toBe(false)
+    const pieces = JSON.parse(readFileSync(join(dir, 'trash', String(removed.data.trashId), 'pieces.json'), 'utf8')) as Array<{ room?: boolean; lookupId: string }>
+    expect(pieces).toEqual([expect.objectContaining({ room: true, lookupId: roomLookup })])
+    // With the door held: back into the room bag, as it was.
+    const back = await call('restore_build', { trash: String(removed.data.trashId) })
+    expect(back.isError, back.text).toBe(false)
+    const where = (await call('placed')).data.bags as Array<{ lookupId: string; entries: Row[] }>
+    expect(where.find((b) => b.entries.some((e) => e.label === 'statue'))!.lookupId).toBe(roomLookup)
+    // The door gone from this server: the statue is not put in the open cube.
+    const again = await call('remove_placed', { target: 'statue' })
+    const door = rowsOf(await call('placed')).find((r) => r.label === 'Vault door')!
+    ;(a as unknown as { doors: { remove(id: string): void } }).doors.remove(door.id)
+    const refused = await call('restore_build', { trash: String(again.data.trashId) })
+    expect(refused.isError).toBe(true)
+    expect(refused.text).toMatch(/inside a locked room whose door this server no longer holds/)
+    expect(rowsOf(await call('placed')).some((r) => r.label === 'statue')).toBe(false)
+  }, 30_000)
+
+  it('a restore cut short is tried again for the rest only', async () => {
+    await call('place', { object: shard('low'), ...at(0), height: 3, build: 'two cubes' })
+    await call('place', { object: shard('high'), ...at(0), height: 8, build: 'two cubes' })
+    const done = await call('delete_build', { build: 'two cubes', confirm: true })
+    expect(done.data.deleted, done.text).toBe(true)
+    const trashId = String(done.data.trashId)
+    // The canonical relay falls silent once the first bag of the restore is out: the second cannot be read, so it is not restored.
+    let cut = false
+    canonical.onPublished.push((ev) => { if (!cut && ev.kind === HIDDEN_KIND) { cut = true; canonical.policy.silent = true } })
+    const first = await call('restore_build', { trash: trashId })
+    canonical.policy.silent = false
+    canonical.onPublished.length = 0
+    expect(first.isError, first.text).toBe(false)
+    expect((first.data.restored as unknown[]).length).toBe(1)
+    expect((first.data.failed as Array<{ why: string }>)[0].why).toMatch(/canonical relay did not answer/)
+    expect(first.text).toContain('tries only the rest')
+    const again = await call('restore_build', { trash: trashId })
+    expect(again.isError, again.text).toBe(false)
+    expect((again.data.restored as Array<{ label: string }>).map((d) => d.label)).toEqual([(first.data.failed as Array<{ label: string }>)[0].label])
+    expect(again.text).toContain('Already back before this call: 1')
+    expect(JSON.parse(readFileSync(join(dir, 'trash', trashId, 'meta.json'), 'utf8')).restoredAt).toBeTruthy()
+    expect(a.builds.find('two cubes')!.pieces.filter((p) => !p.removedAt).map((p) => p.label).sort()).toEqual(['high', 'low'])
+  }, 30_000)
+
+  it('two builds placed before the ledger share a bag: a whole-bag remove and delete_build "unlabelled" are refused', async () => {
+    for (const [i, n] of ['ramp', 'loop', 'keep', 'tower'].entries()) await call('place', { object: shard(n), ...at(i), height: 8 })
+    await forgetLedger()
+    const before = canonical.published.length
+    const whole = await call('remove_placed', { target: 'keep', whole_bag: true })
+    expect(whole.isError).toBe(true)
+    expect(whole.text).toMatch(/holds 4 thing\(s\) in no build.*build_add/)
+    expect((await call('remove_placed', { bag: H8.lookupId.slice(0, 12) })).isError).toBe(true)
+    const all = await call('delete_build', { build: 'unlabelled', confirm: true })
+    expect(all.isError).toBe(true)
+    expect(all.text).toContain('"unlabelled" is not one build')
+    expect(canonical.published.length).toBe(before)
+    // The way through: name the builds, then the scoped delete takes one.
+    await call('build_add', { build: 'course', match: 'r' }) // ramp, tower: a name match takes what it says
+    await call('build_add', { build: 'castle', pieces: rowsOf(await call('placed')).filter((r) => ['loop', 'keep'].includes(r.label)).map((r) => r.id) })
+    expect((await call('remove_placed', { target: 'keep', whole_bag: true })).text).toMatch(/holds things of 2 builds/)
+  })
+
+  it('a move across a cube\'s edge carries the ledger to the new bag', async () => {
+    const placed = await call('place', { object: shard('wanderer'), ...at(0), height: 8, build: 'roamers' })
+    const first = String(placed.data.id)
+    const moved = await call('move_placed', { target: first, by: { dz: 200 } })
+    expect(moved.isError, moved.text).toBe(false)
+    expect(moved.data.sameBag).toBe(false)
+    const to = moved.data.to as { lookupId: string; z: string }
+    const piece = a.builds.find('roamers')!.pieces[0]
+    expect(piece).toMatchObject({ id: (moved.data.moved as { id: string }).id, lineage: first, lookupId: to.lookupId, height: 8, at: { z: (BASE + 200n).toString() } })
+    expect(piece.lookupId).not.toBe(H8.lookupId)
+    expect((await call('build', { build: 'roamers' })).data.pieces).toEqual([expect.objectContaining({ state: 'there' })])
   })
 
   it('the ledger follows a move and a constrain, and rename and notes work', async () => {
@@ -364,6 +471,8 @@ describe('builds, the trash, scoped deletes and restore (no operator)', () => {
     expect(a.builds.find('rainbow bridge')!.pieces).toHaveLength(1)
     await call('place', { object: shard('other'), ...at(30), height: 8, build: 'tower' })
     expect((await call('build_rename', { build: 'rainbow bridge', label: 'TOWER' })).text).toContain('Another build is already called "tower"')
+    await call('place', { object: shard('loose'), ...at(40), height: 8 })
+    expect((await call('build_rename', { build: 'unlabelled', label: 'mine' })).text).toContain('cannot be renamed')
     await call('build_notes', { build: 'rainbow bridge', set: 'for the operator\'s birthday' })
     const notes = await call('build_notes', { build: 'Rainbow Bridge', append: 'south end at the stop' })
     expect(notes.data.notes).toBe('for the operator\'s birthday\nsouth end at the stop')
@@ -452,6 +561,9 @@ describe('a large delete under deleteApproval "operator"', () => {
   const op = getPublicKey(opSk)
   let a: Agent
   let call: Call
+  let dir: string
+  /** A short life for a delete request, so one can lapse within the test. */
+  const TTL_MS = 5000
   const outputs: string[] = []
   const said = async (name: string, args: Record<string, unknown> = {}) => { const r = await call(name, args); outputs.push(r.raw); return r }
   const dms = (): string[] => dmsTo(inbox, opSk)
@@ -461,8 +573,8 @@ describe('a large delete under deleteApproval "operator"', () => {
   const codes = (): string[] => dms().filter((d) => d.startsWith('May I delete')).map((d) => /DEL-[2-9A-HJKMNP-Z]{6}/.exec(d)![0])
 
   beforeAll(async () => {
-    const dir = stateWithKey()
-    ;({ a, call } = await connect(network, dir, { operator: op, lookupRelays: [GENERAL], ordersPollMs: 40, deleteApprovalThreshold: 2 }))
+    dir = stateWithKey()
+    ;({ a, call } = await connect(network, dir, { operator: op, lookupRelays: [GENERAL], ordersPollMs: 40, deleteApprovalThreshold: 2, deleteApprovalTtlMs: TTL_MS }))
     general.seed(finalizeEvent({ kind: 10050, created_at: nowSeconds(), tags: [['relay', INBOX]], content: '' }, opSk) as NostrEvent)
     general.seed(finalizeEvent({ kind: 3, created_at: nowSeconds(), tags: [['p', a.pubkey]], content: '' }, opSk) as NostrEvent)
     await said('identity', { name: 'builder' })
@@ -537,6 +649,68 @@ describe('a large delete under deleteApproval "operator"', () => {
     expect(held.isError, held.text).toBe(false)
     expect(held.data.held).toBe(true)
     expect(held.text).toMatch(/no build/)
+    expect(held.text).toContain('call inbox')
     expect(bagEvents()).toBe(before)
+    // Approved, the same call runs: the bag is deleted, and its backup written.
+    await until(() => codes().length === 4, 'the whole-bag request')
+    dmFrom(`yes ${codes()[3]}`)
+    const ran = await said('remove_placed', { target: 'lone note', whole_bag: true })
+    expect(ran.isError, ran.text).toBe(false)
+    expect(ran.data.deletedBag).toBe(true)
+    expect(ran.data.trashId).toBeTruthy()
+    expect(bagEvents()).toBeGreaterThan(before)
   }, 60_000)
+
+  it('a request the operator does not answer in time lapses: nothing is deleted, and a late yes approves nothing', async () => {
+    for (const n of ['p', 'q', 'r']) await said('place', { object: shard(n), ...at(60), height: 3, build: 'late' })
+    const held = await said('delete_build', { build: 'late', confirm: true })
+    expect(held.data.held).toBe(true)
+    await until(() => codes().length === 5, 'the request')
+    const code = codes()[4]
+    await settle(TTL_MS + 300)
+    dmFrom(`yes ${code}`)
+    const lapsed = await said('delete_build', { build: 'late', confirm: true })
+    expect(lapsed.isError).toBe(true)
+    expect(lapsed.text).toMatch(/did not answer the request for this delete within/)
+    expect(a.builds.find('late')!.pieces.every((p) => !p.removedAt)).toBe(true)
+    for (const o of outputs) expect(o).not.toContain(code)
+  }, 30_000)
+
+  it('a bag whose key is held but which does not open is held for approval, and the preview says it could not be read', async () => {
+    await said('build_use', { build: 'sealed shut' })
+    await said('hide', { contents: { message: 'soon unreadable' }, ...at(70), height: 3 })
+    const H3 = regionKeyAt({ x: BASE, y: BASE, z: BASE + 70n }, 3, 20)
+    // Another session's newer version of the bag, sealed with a key this server does not hold for it.
+    const wrong = regionKeyAt({ x: BASE + (1n << 30n), y: BASE, z: BASE }, 3, 20).key
+    const now = canonical.all().find((e) => e.kind === HIDDEN_KIND && e.tags.some((t) => t[0] === 'd' && t[1] === H3.lookupId))!
+    canonical.seed(signEvent(await bagTemplate([], wrong, H3.lookupId, 3, now.created_at + 5, HIDDEN_KIND), skOf(dir)))
+    const list = await said('placed')
+    const bag = (list.data.bags as Array<{ lookupId: string; keyHeld: boolean; opened: boolean; entries: unknown[] }>).find((b) => b.lookupId === H3.lookupId)!
+    expect(bag).toMatchObject({ keyHeld: true, opened: false, entries: [] })
+    expect(list.text).toContain('does not open with the key this server holds')
+    const before = bagEvents()
+    const held = await said('remove_placed', { bag: H3.lookupId.slice(0, 12) })
+    expect(held.isError, held.text).toBe(false)
+    expect(held.data.held).toBe(true)
+    expect(held.text).toMatch(/could not be read \(it does not open with the key this server holds for it\)/)
+    expect(bagEvents()).toBe(before)
+    expect((await said('build_add', { build: 'x', bag: H3.lookupId.slice(0, 12) })).text).toContain('does not open')
+  }, 30_000)
+
+  it('deletes split small still add up: within the hour, past the threshold, the next one waits for approval', async () => {
+    await said('build_use', { build: 'singles' })
+    for (const n of ['s1', 's2', 's3']) await said('place', { object: shard(n), ...at(80), height: 2 })
+    const start = a.deleteApprovals.recentDeleted()
+    expect(start).toBe(0)
+    expect((await said('remove_placed', { target: 's1' })).data.trashId).toBeTruthy()
+    expect((await said('remove_placed', { target: 's2' })).data.trashId).toBeTruthy()
+    expect(a.deleteApprovals.recentDeleted()).toBe(2)
+    const third = await said('remove_placed', { target: 's3' })
+    expect(third.isError, third.text).toBe(false)
+    expect(third.data.held).toBe(true)
+    expect(third.text).toMatch(/2 thing\(s\) were deleted in the last hour without approval; with these 1 that makes 3, more than 2/)
+    expect(rowsOf(await said('placed')).some((r) => r.label === 's3')).toBe(true)
+    // The window is kept in state: a restart still counts it.
+    expect(JSON.parse(readFileSync(join(dir, 'delete-approvals.json'), 'utf8')).deleted).toHaveLength(2)
+  }, 30_000)
 })
