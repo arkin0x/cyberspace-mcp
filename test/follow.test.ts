@@ -114,8 +114,8 @@ class Walker {
   }
 }
 
-/** A place `dx` gibsons east of `p`, same plane. */
-const east = (p: Place, dx: bigint, dy = 0n): Place => placeOf({ x: p.position.x + dx, y: p.position.y + dy, z: p.position.z }, p.plane)
+/** A place `dx` gibsons right of `p` (+X, facing the black sun), same plane. */
+const toRight = (p: Place, dx: bigint, dy = 0n): Place => placeOf({ x: p.position.x + dx, y: p.position.y + dy, z: p.position.z }, p.plane)
 
 describe('the follow watch', () => {
   const w = world()
@@ -133,18 +133,18 @@ describe('the follow watch', () => {
     a = await start(w, dir, op)
     await a.identity({ name: 'xor' })
     await a.hop({ target: { dx: 5, dy: 0, dz: 0 } })
-    w.canonical.seed(operator.spawn, operator.hop(east(home, 30n)))
+    w.canonical.seed(operator.spawn, operator.hop(toRight(home, 30n)))
 
     const r = await a.followOperator({ on: true })
     expect(r.data.on).toBe(true)
     const pos = r.data.position as { to: string; eventId: string; action: string }
-    expect(pos.to).toBe(east(home, 30n).hex)
+    expect(pos.to).toBe(toRight(home, 30n).hex)
     expect(pos.eventId).toBe(operator.head.id)
     expect(pos.action).toBe('hop')
     // The aim is beside the operator, never their own gibson, and the way there is priced.
     const beside = r.data.beside as { hex: string }
     // Two default avatars and a gibson between: two gibsons off (space/personalSpace.ts).
-    expect(beside.hex).toBe(east(home, 28n).hex)
+    expect(beside.hex).toBe(toRight(home, 28n).hex)
     expect((r.data.plan as { refused: string | null }).refused).toBeNull()
     expect(r.data.needsRide).toBe(false)
     expect(r.text).toContain('never stand where your avatar would overlap theirs')
@@ -155,16 +155,16 @@ describe('the follow watch', () => {
   }, 30_000)
 
   it('a move of the operator is verified and reported by orders_waiting until follow_operator reports it', async () => {
-    const h2 = operator.hop(east(home, 40n))
+    const h2 = operator.hop(toRight(home, 40n))
     w.canonical.inject(h2)
     await until('the move', () => a.follow.unseen()?.eventId === h2.id)
     const ow = await a.ordersWaiting()
     const moved = ow.data.operatorMoved as { to: string; plane: number; at: number; eventId: string; action: string; distance: string }
     expect(moved.eventId).toBe(h2.id)
-    expect(moved.to).toBe(east(home, 40n).hex)
+    expect(moved.to).toBe(toRight(home, 40n).hex)
     expect(moved.plane).toBe(home.plane)
     expect(moved.at).toBe(h2.created_at)
-    expect(moved.distance).toContain('35 gibsons east')
+    expect(moved.distance).toContain('35 gibsons right')
     expect(ow.text).toContain('Your operator moved')
     // Still unseen on the next poll: only follow_operator marks it.
     expect(((await a.ordersWaiting()).data.operatorMoved as { eventId: string }).eventId).toBe(h2.id)
@@ -172,27 +172,27 @@ describe('the follow watch', () => {
 
   it('ignores a stranger\'s move and a forged event; neither is a move', async () => {
     const stranger = new Walker(generateSecretKey())
-    const theirs = stranger.hop(east(home, 50n))
+    const theirs = stranger.hop(toRight(home, 50n))
     w.canonical.inject(stranger.spawn)
     w.canonical.inject(theirs)
     // A relay that hands over the stranger's event anyway is ignored too.
     a.follow.ingest(theirs)
     // The operator's pubkey on an event they never signed: the C tag changed after signing.
-    const real = operator.hopFrom(operator.head, east(home, 90n))
-    const forged = { ...real, tags: real.tags.map((t) => (t[0] === 'C' ? ['C', east(home, 91n).hex] : t)) }
+    const real = operator.hopFrom(operator.head, toRight(home, 90n))
+    const forged = { ...real, tags: real.tags.map((t) => (t[0] === 'C' ? ['C', toRight(home, 91n).hex] : t)) }
     w.canonical.inject(forged)
     // nostr-tools drops it at the socket already; the watch checks it again for any path that does not.
     a.follow.ingest(forged)
     await until('the forged note', () => a.follow.notes().some((n) => n.text.includes('signature does not verify')))
     await new Promise((r) => setTimeout(r, 300))
     expect(a.follow.unseen()?.eventId).toBe(operator.head.id)
-    expect(a.follow.latest()?.coordHex).toBe(east(home, 40n).hex)
+    expect(a.follow.latest()?.coordHex).toBe(toRight(home, 40n).hex)
   }, 30_000)
 
   it('nothing waits while the watch reads: orders_waiting and budget answer at once with a read in flight', async () => {
     // The canonical relay turns slow, so the read of the operator's chain takes its whole wait.
     w.canonical.policy.latencyMs = 1200
-    const h3 = operator.hop(east(home, 45n))
+    const h3 = operator.hop(toRight(home, 45n))
     w.mine.inject(h3)
     await until('a read in flight', () => a.follow.reading)
     const t0 = performance.now()
@@ -217,21 +217,21 @@ describe('the follow watch', () => {
 
   it('survives a restart: still on, reads the move made while it was down, and keeps watching', async () => {
     await stop(a)
-    const whileDown = operator.hop(east(home, 60n))
+    const whileDown = operator.hop(toRight(home, 60n))
     w.canonical.seed(whileDown)
     a = await start(w, dir, op)
     expect(a.follow.on).toBe(true)
     await until('the move made while down', () => a.follow.unseen()?.eventId === whileDown.id)
-    const after = operator.hop(east(home, 70n))
+    const after = operator.hop(toRight(home, 70n))
     w.canonical.inject(after)
     await until('the move after the restart', () => a.follow.unseen()?.eventId === after.id)
-    expect(((await a.ordersWaiting()).data.operatorMoved as { to: string }).to).toBe(east(home, 70n).hex)
+    expect(((await a.ordersWaiting()).data.operatorMoved as { to: string }).to).toBe(toRight(home, 70n).hex)
   }, 30_000)
 
   it('a fork of the operator\'s chain is ignored with a note', async () => {
     const before = a.follow.latest()!.eventId
-    const left = operator.hopFrom(operator.head, east(home, 80n))
-    const right = operator.hopFrom(operator.head, east(home, 81n))
+    const left = operator.hopFrom(operator.head, toRight(home, 80n))
+    const right = operator.hopFrom(operator.head, toRight(home, 81n))
     w.canonical.inject(left)
     w.canonical.inject(right)
     await until('the fork note', () => a.follow.notes().some((n) => n.text.includes('chain is dead')))
@@ -261,24 +261,24 @@ describe('nobody\'s gibson', () => {
     a = await start(w, dirWithKey(agentSk), op)
     await a.identity({ name: 'xor' })
     await a.hop({ target: { dx: 5, dy: 0, dz: 0 } })
-    const there = east(home, 20n)
+    const there = toRight(home, 20n)
     w.canonical.seed(operator.spawn, operator.hop(there))
     await a.followOperator({ on: true })
 
     const plan = await a.planHop({ target: there.hex })
     const said = plan.data.refused as string
     expect(said).toContain('Your operator stands on')
-    expect(said).toContain(east(home, 18n).hex)
+    expect(said).toContain(toRight(home, 18n).hex)
     expect(plan.text).toContain('REFUSED')
     const refused = await refusal(a.hop({ target: there.hex }))
-    expect(refused).toContain(`Land just outside instead, at ${east(home, 18n).hex}`)
-    expect(a.here().hex).toBe(east(home, 5n).hex)
+    expect(refused).toContain(`Land just outside instead, at ${toRight(home, 18n).hex}`)
+    expect(a.here().hex).toBe(toRight(home, 5n).hex)
 
     // One gibson off is too close now: two default avatars and a gibson between need two.
-    expect(await refusal(a.hop({ target: east(home, 19n).hex }))).toContain('at least 2 gibsons')
-    const r = await a.hop({ target: east(home, 18n).hex })
+    expect(await refusal(a.hop({ target: toRight(home, 19n).hex }))).toContain('at least 2 gibsons')
+    const r = await a.hop({ target: toRight(home, 18n).hex })
     expect(r.data.onTarget).toBe(true)
-    expect(a.here().hex).toBe(east(home, 18n).hex)
+    expect(a.here().hex).toBe(toRight(home, 18n).hex)
     // Standing beside them already: the follow tool says no move is needed.
     const f = await a.followOperator()
     expect(f.data.besideAlready).toBe(true)
@@ -293,8 +293,8 @@ describe('nobody\'s gibson', () => {
       finalizeEvent({ kind: 0, created_at: nowSeconds(), tags: [], content: JSON.stringify({ name: 'other-agent', bot: true }) }, botSk) as NostrEvent,
       finalizeEvent({ kind: 0, created_at: nowSeconds(), tags: [], content: JSON.stringify({ name: 'visitor' }) }, humanSk) as NostrEvent,
     )
-    const botAt = east(home, 25n)
-    const humanAt = east(home, 15n)
+    const botAt = toRight(home, 25n)
+    const humanAt = toRight(home, 15n)
     w.canonical.inject(bot.spawn)
     w.canonical.inject(bot.hop(botAt))
     w.canonical.inject(human.spawn)
@@ -353,7 +353,7 @@ describe('following belongs to a STRATEGY (arkinox, 2026-10-22)', () => {
     a = await start(w, dir, op)
     await a.identity({ name: 'xor' })
     await a.hop({ target: { dx: 5, dy: 0, dz: 0 } })
-    w.canonical.seed(operator.spawn, operator.hop(east(home, 30n)))
+    w.canonical.seed(operator.spawn, operator.hop(toRight(home, 30n)))
     strategy('Follow me around.')
     await a.inbox()
     await a.followOperator({ on: true })
@@ -368,7 +368,7 @@ describe('following belongs to a STRATEGY (arkinox, 2026-10-22)', () => {
     expect(a.follow.on).toBe(false)
     expect(readFileSync(join(dir, 'follow.json'), 'utf8')).toContain('a new STRATEGY from your operator arrived')
 
-    w.canonical.inject(operator.hop(east(home, 40n)))
+    w.canonical.inject(operator.hop(toRight(home, 40n)))
     await new Promise((r) => setTimeout(r, 300))
     const ow = await a.ordersWaiting()
     expect(ow.data.operatorMoved).toBeNull()
@@ -387,7 +387,7 @@ describe('following belongs to a STRATEGY (arkinox, 2026-10-22)', () => {
     expect(a.follow.status().onFor).toBe(a.operatorChannel.strategy()!.id)
     expect((await a.inbox()).text).not.toContain('Follow watch switched off')
     expect(a.follow.on).toBe(true)
-    const h = operator.hop(east(home, 50n))
+    const h = operator.hop(toRight(home, 50n))
     w.canonical.inject(h)
     await until('the move', () => a.follow.unseen()?.eventId === h.id)
     expect((await a.ordersWaiting()).data.operatorMoved).toMatchObject({ eventId: h.id, quiet: false })
@@ -451,7 +451,7 @@ describe('out of reach, once per STRATEGY (arkinox, 2026-10-22: five "I can\'t r
     a = await start(w, dir, op)
     await a.identity({ name: 'xor' })
     await a.hop({ target: { dx: 5, dy: 0, dz: 0 } })
-    w.canonical.seed(operator.spawn, operator.hop(east(home, FAR)))
+    w.canonical.seed(operator.spawn, operator.hop(toRight(home, FAR)))
     strategy('Follow me.')
     await a.inbox()
     const first = await a.followOperator({ on: true })
@@ -465,7 +465,7 @@ describe('out of reach, once per STRATEGY (arkinox, 2026-10-22: five "I can\'t r
     // Turning it on again does not reset the rule.
     expect((await a.followOperator({ on: true })).data.unreachableNote).toBe('sent')
 
-    await moveTo(east(home, FAR + 100n))
+    await moveTo(toRight(home, FAR + 100n))
     const ow = await a.ordersWaiting()
     expect(ow.data.operatorMoved).toMatchObject({ quiet: true })
     expect(ow.text).toContain('still out of your reach; they were already told')
@@ -480,13 +480,13 @@ describe('out of reach, once per STRATEGY (arkinox, 2026-10-22: five "I can\'t r
   }, 30_000)
 
   it('ends when the operator is within reach again; out of reach later is a new situation', async () => {
-    await moveTo(east(home, 30n))
+    await moveTo(toRight(home, 30n))
     expect((await a.ordersWaiting()).data.operatorMoved).toMatchObject({ quiet: false })
     const near = await a.followOperator()
     expect(near.data.needsRide).toBe(false)
     expect(near.data.unreachableNote).toBeNull()
     expect(near.text).toContain('Following is silent: no message to your operator about it.')
-    await moveTo(east(home, FAR))
+    await moveTo(toRight(home, FAR))
     expect((await a.ordersWaiting()).data.operatorMoved).toMatchObject({ quiet: false })
     expect((await a.followOperator()).data.unreachableNote).toBe('invited')
   }, 30_000)

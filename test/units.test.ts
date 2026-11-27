@@ -19,7 +19,7 @@ import { Agent } from '../src/agent.js'
 import { bytesToHex } from '../src/nostr/event.js'
 import { createServer } from '../src/server.js'
 import type { Calibration } from '../src/space/calibration.js'
-import { distanceBetween, distanceWords, parseCoordinate, placeFromHex, placeOf } from '../src/space/coords.js'
+import { AXIS_WORDS, distanceBetween, distanceWords, parseCoordinate, placeFromHex, placeOf } from '../src/space/coords.js'
 import { AU_METRES, GIBSONS_PER_METRE, UNITS_GUIDE, conversionWords, convertLength, distanceData, distanceText, formatDistance, unitConversions } from '../src/space/units.js'
 import { KEY_GENERATED_BY, StateDir } from '../src/state/dir.js'
 import { FakeNetwork } from './fakeRelay.js'
@@ -209,7 +209,23 @@ describe('offsets with units in a coordinate', () => {
 
   it('says a distance with the unit first, then the gibsons per axis', () => {
     const to = parseCoordinate({ dx: '200 nm', dy: 3 }, from)
-    expect(distanceWords(distanceBetween(from, to))).toBe('200 nm (1718 gibsons east, 3 up; within the h11 cube)')
+    expect(distanceWords(distanceBetween(from, to))).toBe('200 nm (1718 gibsons right, 3 up; within the h11 cube)')
+  })
+
+  it('names directions as the spec does, facing the black sun: +Z toward it (east), +X right, +Y up', () => {
+    // Spec 11.1 to 11.3: +X screen-right, +Y up, +Z ahead toward the black sun, the east reference marker.
+    const words = (o: { dx?: number; dy?: number; dz?: number }): string => distanceWords(distanceBetween(from, parseCoordinate(o, from)))
+    expect(words({ dz: 5 })).toContain('5 gibsons toward the black sun')
+    expect(words({ dz: -5 })).toContain('5 gibsons away from the black sun')
+    expect(words({ dx: 7 })).toContain('7 gibsons right')
+    expect(words({ dx: -7 })).toContain('7 gibsons left')
+    expect(words({ dy: 2 })).toContain('2 gibsons up')
+    expect(words({ dy: -2 })).toContain('2 gibsons down')
+    expect(words({ dx: 1, dy: -2, dz: 3 })).toContain('(1 gibson right, 2 down, 3 toward the black sun;')
+    // East is +Z and never +X; no compass word is said for any axis (the spec names only east, and only as the black sun's direction).
+    for (const o of [{ dx: 9 }, { dx: -9 }, { dy: 9 }, { dy: -9 }, { dz: 9 }, { dz: -9 }]) expect(words(o)).not.toMatch(/\b(east|west|north|south|forward|back)\b/)
+    expect(AXIS_WORDS.z.pos).toBe('toward the black sun')
+    expect(AXIS_WORDS.x.pos).toBe('right')
   })
 
   it('lists the conversions in a tool\'s arguments, and says them in a line', () => {
@@ -248,7 +264,7 @@ const cal: Calibration = { version: 1, at: Date.now(), fingerprint: 'test', cant
 const running: Agent[] = []
 afterAll(async () => { for (const a of running) await a.stop() })
 
-/** A key whose spawn has no tall wall within 1718 gibsons east, so the plan is one hop to the target. */
+/** A key whose spawn has no tall wall within 1718 gibsons right (+X), so the plan is one hop to the target. */
 function roomyKey(): Uint8Array {
   for (;;) {
     const sk = generateSecretKey()
@@ -257,7 +273,7 @@ function roomyKey(): Uint8Array {
   }
 }
 
-describe('plan_hop with a target 200 nm east', () => {
+describe('plan_hop with a target 200 nm to the right (+X)', () => {
   it('lands on the converted gibsons, and says the conversion and the distances in gibsons and nm', async () => {
     const sk = roomyKey()
     const dir = mkdtempSync(join(tmpdir(), 'cyberspace-mcp-units-'))

@@ -190,7 +190,21 @@ export function sameCube(a: Place, b: Place, h: number): boolean {
   return a.plane === b.plane && a.position.x >> s === b.position.x >> s && a.position.y >> s === b.position.y >> s && a.position.z >> s === b.position.z >> s
 }
 
-/** A distance in words: "200 nm (1718 gibsons east, 3 up; within the h11 cube)". */
+/**
+ * The words for each axis, as spec 11.1 and 11.3 name them for a viewer
+ * facing the black sun: +Z is ahead, toward the black sun (11.2 also calls
+ * that direction east); +X is screen-right and +Y is up. Viewer-relative
+ * words only: the spec defines no north, south or west for the dataspace
+ * axes (the globe mapping of 9.4, where +Y is toward Earth's north pole,
+ * is a different frame), so none are said.
+ */
+export const AXIS_WORDS = {
+  x: { pos: 'right', neg: 'left' },
+  y: { pos: 'up', neg: 'down' },
+  z: { pos: 'toward the black sun', neg: 'away from the black sun' },
+} as const
+
+/** A distance in words: "200 nm (1718 gibsons right, 3 up, 5 toward the black sun; within the h11 cube)", right and left as seen facing the black sun (spec 11.3). */
 export function distanceWords(d: Distance): string {
   if (d.chebyshev === 0n) return d.samePlane ? 'the same point' : 'the same point in the other plane'
   const dirs: string[] = []
@@ -199,9 +213,9 @@ export function distanceWords(d: Distance): string {
     const n = v < 0n ? -v : v
     dirs.push(`${n.toString()}${dirs.length ? '' : ` gibson${n === 1n ? '' : 's'}`} ${v > 0n ? pos : neg}`)
   }
-  axis(d.dx, 'east', 'west')
-  axis(d.dy, 'up', 'down')
-  axis(d.dz, 'forward', 'back')
+  axis(d.dx, AXIS_WORDS.x.pos, AXIS_WORDS.x.neg)
+  axis(d.dy, AXIS_WORDS.y.pos, AXIS_WORDS.y.neg)
+  axis(d.dz, AXIS_WORDS.z.pos, AXIS_WORDS.z.neg)
   const h = d.maxLca
   const where = h <= 12 ? `within the h${h} cube` : h <= 30 ? `${h <= 30 ? 'the same sector' : ''}, h${h} apart` : `h${h} apart, across sectors`
   // First the distance as ONOSENDAI shows it (the widest axis, sno-core formatDistance), then the gibsons per axis.

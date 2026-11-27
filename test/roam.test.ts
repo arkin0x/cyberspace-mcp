@@ -89,7 +89,7 @@ function chainTo(sk: Uint8Array, to: Place): { spawn: NostrEvent; head: NostrEve
   return { spawn, head }
 }
 
-const east = (p: Place, dx: bigint): Place => placeOf({ x: p.position.x + dx, y: p.position.y, z: p.position.z }, p.plane)
+const toRight = (p: Place, dx: bigint): Place => placeOf({ x: p.position.x + dx, y: p.position.y, z: p.position.z }, p.plane)
 
 /** The message in the agent's newest bag at the h12 cube around `at`, opened with that cube's key. */
 async function noteAt(a: Agent, relay: FakeRelay, at: Place): Promise<string[]> {
@@ -118,10 +118,10 @@ describe('roam candidates and the search', () => {
   })
 
   it('passes over a person\'s gibson, a step over the caps and a visited cube, and takes the first fresh one', () => {
-    const person = east(from, 1n << 14n)
-    const tooFar = east(from, 1n << 18n)
-    const visited = east(from, (1n << 13n) + 5n)
-    const fresh = east(from, (1n << 15n) + 9n)
+    const person = toRight(from, 1n << 14n)
+    const tooFar = toRight(from, 1n << 18n)
+    const visited = toRight(from, (1n << 13n) + 5n)
+    const fresh = toRight(from, (1n << 15n) + 9n)
     const price = (target: Place): PricedStep => ({ kind: 'hop', from, to: target, heights: { x: 0, y: 0, z: 0 }, maxHeight: 0, terrainK: 0, seconds: target.hex === tooFar.hex ? 99 : 1, work: 0, feasible: true, aboveSidestepCap: false })
     const found = searchRoam({
       candidates: [person, tooFar, visited, fresh],
@@ -178,7 +178,7 @@ describe('roam', () => {
     expect(plan.kind).toBe('hop')
     expect(plan.landsOnTarget).toBe(true)
     expect(plan.expectedSeconds).toBeLessThanOrEqual(30)
-    expect(a.here().hex).toBe(east(home, 5n).hex)
+    expect(a.here().hex).toBe(toRight(home, 5n).hex)
     expect((await a.ordersWaiting()).data.roamDue).toBe(false)
     // The interval runs from the step.
     clock += 30 * 60
@@ -218,7 +218,7 @@ describe('roam', () => {
 
   it('never suggests a person\'s gibson: the operator\'s is passed over', async () => {
     // Both inside the agent's own aligned 256-gibson cube, so the hop to
-    // either crosses a wall of h8 at most. They used to sit 2^14 east of a
+    // either crosses a wall of h8 at most. They used to sit 2^14 to the right (+X) of a
     // random home, where the carry could reach a wall above the hop ceiling
     // and roam (rightly) skipped the candidate as not one hop away
     // (flaky under load, 2026-10-14).
@@ -301,7 +301,7 @@ describe('visit', () => {
     const here = a.here().hex
     const sk = generateSecretKey()
     const pk = getPublicKey(sk)
-    const there = east(placeFromHex(pk), 1n << 20n)
+    const there = toRight(placeFromHex(pk), 1n << 20n)
     const { spawn, head } = chainTo(sk, there)
     w.canonical.seed(spawn, head)
     const r = await a.visit({ pubkey: nip19.npubEncode(pk), note: 'I passed by. XOR' })
