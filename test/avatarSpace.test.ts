@@ -193,13 +193,13 @@ class Walker {
 
 /**
  * An agent key whose spawn leaves room for this file's routes: every target
- * here is at most 110 gibsons east and 4 north of the spawn, and each must be
+ * here is at most 110 gibsons right (+X) and 4 up (+Y) of the spawn, and each must be
  * one hop from where the agent stands, so plan_hop judges the target itself.
  * With a random key the walk could cross a wall above the hop ceiling (h18
  * with `cal`): the step then stops at the wall's leaf, short of the
  * target, and that landing is judged instead. CI drew such a key
- * (2026-11-09): north across an h19 wall, the step stopped 2 gibsons from
- * the star, inside its box, and the clear target 4 north was refused for it.
+ * (2026-11-09): up across an h19 wall, the step stopped 2 gibsons from
+ * the star, inside its box, and the clear target 4 up was refused for it.
  * The rule for a landing short of the target is the product's, and right;
  * it is just not what these tests are about.
  */
@@ -212,7 +212,7 @@ function roomyKey(): Uint8Array {
   }
 }
 
-const east = (p: Place, dx: bigint, dy = 0n): Place => placeOf({ x: p.position.x + dx, y: p.position.y + dy, z: p.position.z }, p.plane)
+const toRight = (p: Place, dx: bigint, dy = 0n): Place => placeOf({ x: p.position.x + dx, y: p.position.y + dy, z: p.position.z }, p.plane)
 const profile = (sk: Uint8Array, content: Record<string, unknown>): NostrEvent => finalizeEvent({ kind: 0, created_at: nowSeconds(), tags: [], content: JSON.stringify(content) }, sk) as NostrEvent
 
 describe('the agent near people, by their avatars', () => {
@@ -225,9 +225,9 @@ describe('the agent near people, by their avatars', () => {
   const plain = new Walker(plainSk)
   const botSk = generateSecretKey()
   const bot = new Walker(botSk)
-  const bigAt = east(home, 40n)
-  const plainAt = east(home, 70n)
-  const botAt = east(home, 100n)
+  const bigAt = toRight(home, 40n)
+  const plainAt = toRight(home, 70n)
+  const botAt = toRight(home, 100n)
   let a: Agent
 
   beforeAll(async () => {
@@ -251,36 +251,36 @@ describe('the agent near people, by their avatars', () => {
   it('refuses a landing whose box would overlap a large avatar, and accepts one just outside', async () => {
     expect(a.avatars.radius(big.pubkey)).toBe(BIG_RADIUS)
     // Three gibsons off: inside the big avatar's box (2 + 0.5 + 1 = 3.5, so 4).
-    const inside = await a.planHop({ target: east(home, 37n).hex })
+    const inside = await a.planHop({ target: toRight(home, 37n).hex })
     const said = inside.data.refused as string
     expect(said).toContain('The human star')
     expect(said).toContain('"Big star" reaches 2.00 gibsons')
     expect(said).toContain('at least 4 gibsons')
     expect(said).toContain('at coarser zooms every avatar nearby overlaps on screen by design')
-    expect(said).toContain(`Land just outside instead, at ${east(home, 36n).hex}`)
-    // Off the axis too: two east and three north is inside on both.
-    expect((await a.planHop({ target: east(home, 38n, 3n).hex })).data.refused).toContain('The human star')
+    expect(said).toContain(`Land just outside instead, at ${toRight(home, 36n).hex}`)
+    // Off the axis too: two right and three up is inside on both.
+    expect((await a.planHop({ target: toRight(home, 38n, 3n).hex })).data.refused).toContain('The human star')
     // Just outside, on either axis: accepted.
-    expect((await a.planHop({ target: east(home, 36n).hex })).data.refused).toBeNull()
-    expect((await a.planHop({ target: east(home, 38n, 4n).hex })).data.refused).toBeNull()
+    expect((await a.planHop({ target: toRight(home, 36n).hex })).data.refused).toBeNull()
+    expect((await a.planHop({ target: toRight(home, 38n, 4n).hex })).data.refused).toBeNull()
   }, 30_000)
 
   it('a person with no avatar is the default size', async () => {
     expect(a.avatars.radius(plain.pubkey)).toBe(DEFAULT_AVATAR_RADIUS)
-    const close = await a.planHop({ target: east(home, 69n).hex })
+    const close = await a.planHop({ target: toRight(home, 69n).hex })
     expect(close.data.refused).toContain('The human plain')
     expect(close.data.refused).toContain('the default')
     expect(close.data.refused).toContain('at least 2 gibsons')
-    expect((await a.planHop({ target: east(home, 68n).hex })).data.refused).toBeNull()
+    expect((await a.planHop({ target: toRight(home, 68n).hex })).data.refused).toBeNull()
   }, 30_000)
 
   it('bots may overlap bots: a bot\'s large avatar is no bar', async () => {
     expect(a.avatars.radius(bot.pubkey)).toBe(BIG_RADIUS)
-    expect((await a.planHop({ target: east(home, 101n).hex })).data.refused).toBeNull()
+    expect((await a.planHop({ target: toRight(home, 101n).hex })).data.refused).toBeNull()
   }, 30_000)
 
   it('a ride\'s exit beside the large avatar names how far to step off, priced', async () => {
-    const stop = east(home, 41n).hex
+    const stop = toRight(home, 41n).hex
     const spy = vi.spyOn(a.transit, 'ride').mockResolvedValue({ text: 'Ride signed.', data: { action: 'hyperjump', where: { hex: stop } } })
     try {
       const r = await a.ride({ to: 900000 })
@@ -325,16 +325,16 @@ describe('following an operator with a large avatar', () => {
     const a = await start(w, dirWithKey(agentSk), op)
     await a.identity({ name: 'xor' })
     await a.hop({ target: { dx: 5, dy: 0, dz: 0 } })
-    w.canonical.seed(operator.spawn, operator.hop(east(home, 30n)))
+    w.canonical.seed(operator.spawn, operator.hop(toRight(home, 30n)))
     a.avatars.want([op])
     await a.avatars.settled()
 
     const r = await a.followOperator({ on: true })
     // Their avatar reaches 2 gibsons, the agent's 0.5, and a gibson between: 3.5, so four gibsons off.
-    expect((r.data.beside as { hex: string }).hex).toBe(east(home, 26n).hex)
+    expect((r.data.beside as { hex: string }).hex).toBe(toRight(home, 26n).hex)
     expect((r.data.plan as { refused: string | null }).refused).toBeNull()
     // The old aim, the gibson beside them, is refused.
-    expect((await a.planHop({ target: east(home, 29n).hex })).data.refused).toContain('Your operator')
+    expect((await a.planHop({ target: toRight(home, 29n).hex })).data.refused).toContain('Your operator')
   }, 60_000)
 })
 

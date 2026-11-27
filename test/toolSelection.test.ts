@@ -90,6 +90,16 @@ describe('the server', () => {
     await client.close()
   })
 
+  it('names an offset\'s directions as the spec does, facing the black sun: dx right, dy up, dz toward the black sun', async () => {
+    // Spec 11.1 to 11.3: +Z is toward the black sun (east), +X right, +Y up. Said on the schema, which every client sends.
+    const client = await connect(STARTER_TOOLS)
+    const hop = (await client.listTools()).tools.find((t) => t.name === 'plan_hop')
+    const schema = JSON.stringify(hop?.inputSchema)
+    expect(schema).toContain('facing the black sun: dx right, dy up, dz toward the black sun')
+    expect(schema).not.toMatch(/\b(east|west|north|south)\b/i)
+    await client.close()
+  })
+
   it('keeps the waker\'s tools whenever a waker runs, whatever the selection', async () => {
     const client = await connect(STARTER_TOOLS, WAKER)
     expect(await names(client)).toEqual([...STARTER_TOOLS, 'wake_again', 'work_done'].sort())

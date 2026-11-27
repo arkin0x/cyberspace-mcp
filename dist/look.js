@@ -21,7 +21,7 @@ function ago(seconds) {
         return `${Math.round(seconds / 3600)} h ago`;
     return `${Math.round(seconds / 86400)} d ago`;
 }
-/** How far a thing is, as a look line says it: "200 nm (1718 gibsons east; within the h11 cube) from you". */
+/** How far a thing is, as a look line says it: "200 nm (1718 gibsons right; within the h11 cube) from you". */
 function fromYou(d) {
     return d.chebyshev === 0n ? (d.samePlane ? 'where you stand' : 'where you stand, in the other plane') : `${distanceWords(d)} from you`;
 }
